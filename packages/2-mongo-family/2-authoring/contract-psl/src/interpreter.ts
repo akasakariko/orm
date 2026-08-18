@@ -1134,11 +1134,11 @@ function resolveNonRelationField(
   const { sources, diagnostics } = presetContext;
   const ownerName = owner.name;
   if (compositeTypeNames.has(field.typeName)) {
-    const result: ContractField = {
+    return { field: {
       type: { kind: 'valueObject', name: field.typeName },
       nullable: field.optional,
-    };
-    return { field: field.list ? { ...result, many: true, ...(field.elementOptional ? { elementNullable: true } : {}) } : result };
+      many: field.list ? { elementNullable: field.elementOptional } : false,
+    } };
   }
 
   // If this field's declared type is a known enum name, treat the field as a scalar
@@ -1151,12 +1151,12 @@ function resolveNonRelationField(
       namespaceId: UNBOUND_NAMESPACE_ID,
       entityName: field.typeName,
     };
-    const result: ContractField = {
+    return { field: {
       type: { kind: 'scalar', codecId: enumCodecId },
       nullable: field.optional,
+      many: field.list ? { elementNullable: field.elementOptional } : false,
       valueSet,
-    };
-    return { field: field.list ? { ...result, many: true, ...(field.elementOptional ? { elementNullable: true } : {}) } : result };
+    } };
   }
 
   // Avoid cascading unsupported-type diagnostics after invalid qualification.
@@ -1198,11 +1198,11 @@ function resolveNonRelationField(
   }
 
   scalarNames.warnDeprecated(field);
-  const result: ContractField = {
+  return { field: {
     type: { kind: 'scalar', codecId },
     nullable: field.optional,
-  };
-  return { field: field.list ? { ...result, many: true, ...(field.elementOptional ? { elementNullable: true } : {}) } : result };
+    many: field.list ? { elementNullable: field.elementOptional } : false,
+  } };
 }
 
 function processEnumDeclarations(input: {

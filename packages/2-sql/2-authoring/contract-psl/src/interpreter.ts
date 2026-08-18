@@ -1466,12 +1466,10 @@ function buildModelNodeFromPsl(input: BuildModelNodeInput): BuildModelNodeResult
           columnName: resolvedField.columnName,
           descriptor: resolvedField.descriptor,
           nullable: resolvedField.nullable,
-          ...(resolvedField.many && resolvedField.valueObjectTypeName === undefined
-            ? {
-                many: true as const,
-                ...ifDefined('elementNullable', resolvedField.elementNullable),
-              }
-            : {}),
+          many:
+            resolvedField.many && resolvedField.valueObjectTypeName === undefined
+              ? { elementNullable: resolvedField.elementNullable === true }
+              : false,
           ...ifDefined('default', resolvedField.defaultValue),
           ...ifDefined('executionDefaults', resolvedField.executionDefaults),
           ...ifDefined('noCheck', resolvedField.noCheck),
@@ -1534,14 +1532,12 @@ function buildValueObjects(input: BuildValueObjectsInput): Record<string, Contra
         const result: ContractField = {
           type: { kind: 'valueObject', name: fieldTypeResolution.symbol.name },
           nullable: field.optional,
+          many: false,
         };
-        fields[field.name] = field.list
-          ? {
-              ...result,
-              many: true,
-              ...ifDefined('elementNullable', field.elementOptional ? (true as const) : undefined),
-            }
-          : result;
+        fields[field.name] = {
+          ...result,
+          many: field.list ? { elementNullable: field.elementOptional } : false,
+        };
         continue;
       }
       const resolved = resolveFieldTypeDescriptor({
@@ -1570,14 +1566,12 @@ function buildValueObjects(input: BuildValueObjectsInput): Record<string, Contra
       const scalarField: ContractField = {
         nullable: field.optional,
         type: { kind: 'scalar', codecId: resolved.descriptor.codecId },
+        many: false,
       };
-      fields[field.name] = field.list
-        ? {
-            ...scalarField,
-            many: true,
-            ...ifDefined('elementNullable', field.elementOptional ? (true as const) : undefined),
-          }
-        : scalarField;
+      fields[field.name] = {
+        ...scalarField,
+        many: field.list ? { elementNullable: field.elementOptional } : false,
+      };
     }
     valueObjects[compositeType.name] = { fields };
   }
@@ -1604,8 +1598,7 @@ function patchModelDomainFields(
         patchedFields[rf.field.name] = {
           nullable: rf.field.optional,
           type: { kind: 'valueObject', name: rf.valueObjectTypeName },
-          ...(rf.many ? { many: true as const } : {}),
-          ...ifDefined('elementNullable', rf.elementNullable),
+          many: rf.many ? { elementNullable: rf.elementNullable === true } : false,
         };
       } else if (rf.many && rf.scalarCodecId) {
         needsPatch = true;
@@ -1618,8 +1611,7 @@ function patchModelDomainFields(
             codecId: rf.scalarCodecId,
             ...ifDefined('typeParams', typeParams),
           },
-          many: true as const,
-          ...ifDefined('elementNullable', rf.elementNullable),
+          many: { elementNullable: rf.elementNullable === true },
         };
       }
     }
@@ -1892,6 +1884,7 @@ function materializeMtiVariantStorageLinks(
         columnName: pkColumn,
         descriptor: baseField.descriptor,
         nullable: false,
+        many: false,
       });
     }
     if (linkFields.length === 0) return node;

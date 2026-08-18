@@ -611,8 +611,8 @@ function computeColumnType(
   if (base === undefined) {
     base = renderRefinedCodecType(column, side, columnTypeParams(storage, column), codecLookup);
   }
-  if (column.many === true) {
-    const element = column.elementNullable === true ? `${base} | null` : base;
+  if (column.many !== false) {
+    const element = column.many.elementNullable ? `${base} | null` : base;
     base = `ReadonlyArray<${element}>`;
   }
   return column.nullable ? `${base} | null` : base;
@@ -746,8 +746,12 @@ function generateTableLiteralType(table: StorageTable): string {
         ? `; readonly typeParams: ${serializeTypeParamsLiteral(col.typeParams)}`
         : '';
     const typeRefSpec = col.typeRef ? `; readonly typeRef: ${serializeValue(col.typeRef)}` : '';
+    const manySpec =
+      col.many === false
+        ? '; readonly many: false'
+        : `; readonly many: { readonly elementNullable: ${col.many.elementNullable} }`;
     columns.push(
-      `readonly ${serializeObjectKey(colName)}: { readonly nativeType: ${nativeType}; readonly codecId: ${codecId}; readonly nullable: ${nullable}${defaultSpec}${typeParamsSpec}${typeRefSpec} }`,
+      `readonly ${serializeObjectKey(colName)}: { readonly nativeType: ${nativeType}; readonly codecId: ${codecId}; readonly nullable: ${nullable}${defaultSpec}${typeParamsSpec}${typeRefSpec}${manySpec} }`,
     );
   }
 

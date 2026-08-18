@@ -853,11 +853,13 @@ function buildStorageColumn(
       nativeType: JSONB_NATIVE_TYPE,
       codecId: JSONB_CODEC_ID,
       nullable: field.nullable,
+      many: false,
       ...ifDefined('default', encodedDefault),
     };
   }
 
   const codecId = field.descriptor.codecId;
+  const many = field.many ?? false;
   const encodedDefault =
     field.default !== undefined
       ? encodeColumnDefault(
@@ -866,8 +868,8 @@ function buildStorageColumn(
           (lookup) =>
             columnCodec(codecId, columnTypeParams(field.descriptor, storageTypes), lookup),
           { modelName, fieldName: field.fieldName, codecId },
-          field.many === true,
-          field.elementNullable === true,
+          many !== false,
+          many !== false && many.elementNullable,
         )
       : undefined;
 
@@ -882,8 +884,7 @@ function buildStorageColumn(
     nativeType: field.descriptor.nativeType,
     codecId,
     nullable: field.nullable,
-    ...(field.many ? { many: true as const } : {}),
-    ...ifDefined('elementNullable', field.elementNullable),
+    many,
     ...(field.noCheck !== undefined ? { noCheck: [...field.noCheck].sort() } : {}),
     ...ifDefined('typeParams', field.descriptor.typeParams),
     ...ifDefined('default', encodedDefault),
@@ -901,7 +902,7 @@ function buildDomainField(
     return {
       type: { kind: 'valueObject', name: field.valueObjectName },
       nullable: field.nullable,
-      ...(field.many ? { many: true } : {}),
+      many: field.many ? { elementNullable: false } : false,
     };
   }
 
@@ -912,8 +913,7 @@ function buildDomainField(
       ...ifDefined('typeParams', column.typeParams),
     },
     nullable: column.nullable,
-    ...(field.many ? { many: true } : {}),
-    ...ifDefined('elementNullable', field.elementNullable),
+    many: field.many ?? false,
     ...ifDefined('valueSet', domainValueSetRef),
   };
 }
@@ -1257,8 +1257,8 @@ export function buildSqlContractFromDefinition(
                 modelName: semanticModel.modelName,
                 fieldName: field.fieldName,
                 kinds: authoredNoCheck,
-                many: resolvedField.many === true,
-                elementNullable: resolvedField.elementNullable === true,
+                many: resolvedField.many !== false,
+                elementNullable: resolvedField.many !== false && resolvedField.many.elementNullable,
                 isDomainEnum: enumHandle !== undefined,
               }),
             }
@@ -1272,6 +1272,7 @@ export function buildSqlContractFromDefinition(
         definition.storageTypes ?? {},
         codecLookup,
       );
+      const columnMany = column.many ?? false;
       columns[field.columnName] = column;
       fieldToColumn[field.fieldName] = field.columnName;
 
@@ -1290,8 +1291,8 @@ export function buildSqlContractFromDefinition(
             renderCheckExpressions({
               tableName,
               columnName: field.columnName,
-              many: column.many === true,
-              elementNullable: column.elementNullable === true,
+              many: columnMany !== false,
+              elementNullable: columnMany !== false && columnMany.elementNullable,
               memberValues:
                 enumHandle !== undefined ? checkMemberValues(enumHandle, codecLookup) : undefined,
             }).filter((candidate) => !(waivedKinds?.includes(candidate.kind) ?? false)),
@@ -1793,7 +1794,7 @@ export function buildSqlContractFromDefinition(
                     ? {
                         type: { kind: 'valueObject' as const, name: f.valueObjectName },
                         nullable: f.nullable,
-                        ...(f.many ? { many: true } : {}),
+                        many: f.many ? { elementNullable: false } : false,
                       }
                     : {
                         type: {
@@ -1802,6 +1803,7 @@ export function buildSqlContractFromDefinition(
                           ...ifDefined('typeParams', f.descriptor.typeParams),
                         },
                         nullable: f.nullable,
+                        many: f.many,
                       },
                 ]),
               ),

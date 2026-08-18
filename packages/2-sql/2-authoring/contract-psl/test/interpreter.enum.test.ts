@@ -1066,8 +1066,7 @@ model Post {
       nativeType: 'text',
       codecId: 'pg/text@1',
       nullable: false,
-      many: true,
-      elementNullable: true,
+      many: { elementNullable: true },
       valueSet: {
         plane: 'storage',
         namespaceId: 'public',
