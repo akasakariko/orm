@@ -55,7 +55,48 @@ namespace auth {
     ]);
   });
 
-  it('reports a resolved-but-non-model target itself', () => {
+  it('leaves a qualified target naming no namespace to the binder, which names it', () => {
+    expect(
+      refusalFor(`namespace public {
+  model Post {
+    id Int @id
+    userId Int
+    user wrong.User @relation(fields: [userId], references: [id])
+  }
+}
+
+namespace auth {
+  model User {
+    id Int @id
+  }
+}
+`),
+    ).toEqual([
+      { code: 'PSL_UNRESOLVED_REFERENCE', message: 'Cannot find type "wrong.User"' },
+      {
+        code: 'PSL_UNRESOLVED_REFERENCE',
+        message: 'Cannot find field "id" on the type of "Post.user"',
+      },
+    ]);
+  });
+
+  it('names a bare type reference into an unavailable extension namespace', () => {
+    expect(
+      refusalFor(`model Document {
+  id Int @id
+  embedding pgvector.Vector
+}
+`),
+    ).toEqual([
+      { code: 'PSL_UNRESOLVED_REFERENCE', message: 'Cannot find type "pgvector.Vector"' },
+      {
+        code: 'PSL_UNSUPPORTED_FIELD_TYPE',
+        message: 'Field "Document.embedding" type "Vector" is not supported in SQL PSL provider v1',
+      },
+    ]);
+  });
+
+  it('reports a resolved-but-non-model target itself, naming what it found', () => {
     expect(
       refusalFor(`type Address {
   street String
@@ -70,7 +111,8 @@ model Post {
     ).toEqual([
       {
         code: 'PSL_INVALID_RELATION_TARGET',
-        message: 'Relation field "Post.address" references unknown model "Address"',
+        message:
+          'Relation field "Post.address" references composite type "Address"; a relation target must be a model',
       },
     ]);
   });

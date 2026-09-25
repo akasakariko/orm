@@ -59,6 +59,7 @@ import {
   nodePslSpan,
   type PslDiagnostic,
   type PslDiagnosticCollector,
+  type Resolution,
   type ResolvedAttribute,
   type SymbolTable,
   typeReferenceNode,
@@ -1380,7 +1381,7 @@ function buildModelNodeFromPsl(input: BuildModelNodeInput): BuildModelNodeResult
     const typeReference = typeReferenceNode(relationAttribute.field);
     const targetResolution =
       typeReference === undefined ? undefined : input.binder.symbolForNode(typeReference);
-    if (targetResolution?.kind === 'unresolved' && fieldTypeNamespaceId === undefined) {
+    if (targetResolution?.kind === 'unresolved') {
       continue;
     }
     const targetMapping =
@@ -1388,9 +1389,14 @@ function buildModelNodeFromPsl(input: BuildModelNodeInput): BuildModelNodeResult
         ? input.modelMappingsBySymbol.get(targetResolution.symbol)
         : undefined;
     if (targetMapping === undefined) {
+      const foundKind =
+        targetResolution === undefined ? undefined : relationTargetKindLabel(targetResolution);
       diagnostics.push({
         code: 'PSL_INVALID_RELATION_TARGET',
-        message: `Relation field "${model.name}.${relationAttribute.field.name}" references unknown model "${qualifiedTypeName}"`,
+        message:
+          foundKind === undefined
+            ? `Relation field "${model.name}.${relationAttribute.field.name}" references unknown model "${qualifiedTypeName}"`
+            : `Relation field "${model.name}.${relationAttribute.field.name}" references ${foundKind} "${qualifiedTypeName}"; a relation target must be a model`,
         ...source.at(relationAttribute.field.span),
       });
       continue;
@@ -2048,6 +2054,24 @@ function stripStorageOnlyDomainFields(
   return { ...model, fields, storage: { ...storage, fields: storageFields } };
 }
 
+function relationTargetKindLabel(resolution: Resolution): string | undefined {
+  switch (resolution.kind) {
+    case 'compositeType':
+      return 'composite type';
+    case 'namedType':
+      return 'named type';
+    case 'block':
+      return resolution.symbol.keyword;
+    case 'namespace':
+    case 'contributedNamespace':
+      return 'namespace';
+    case 'contributedType':
+      return 'type';
+    default:
+      return undefined;
+  }
+}
+
 function voicedAsUncomposedNamespace(
   diagnostic: PslDiagnostic,
   composedExtensions: ReadonlySet<string>,
@@ -2059,6 +2083,7 @@ function voicedAsUncomposedNamespace(
 ): boolean {
   const data = diagnostic.data;
   if (data?.['reference'] !== 'type') return false;
+  if (data['constructorCall'] !== true) return false;
   const name = data['name'];
   if (typeof name !== 'string') return false;
   return checkUncomposedNamespace(name, composedExtensions, context) !== undefined;
