@@ -25,6 +25,7 @@ describe('two namespaces declaring the same bare model name', () => {
   const schema = `namespace public {
   model User {
     id Int @id
+    profiles Profile[]
     @@map("public_users")
   }
   model Profile {
@@ -38,6 +39,7 @@ describe('two namespaces declaring the same bare model name', () => {
 namespace auth {
   model User {
     id Int @id
+    sessions Session[]
     @@map("auth_users")
   }
   model Session {
@@ -95,6 +97,19 @@ namespace auth {
     expect(modelsOf(contract, 'auth')?.['Session']?.relations?.['user']?.to).toEqual({
       namespace: 'auth',
       model: 'User',
+    });
+  });
+
+  it('matches each backrelation to the FK side in its own namespace', () => {
+    const contract = interpret();
+
+    expect(modelsOf(contract, 'public')?.['User']?.relations?.['profiles']).toMatchObject({
+      cardinality: '1:N',
+      to: { namespace: 'public', model: 'Profile' },
+    });
+    expect(modelsOf(contract, 'auth')?.['User']?.relations?.['sessions']).toMatchObject({
+      cardinality: '1:N',
+      to: { namespace: 'auth', model: 'Session' },
     });
   });
 });

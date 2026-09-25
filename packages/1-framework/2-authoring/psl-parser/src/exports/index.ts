@@ -109,6 +109,7 @@ export type {
 export {
   createBinder,
   PSL_UNRESOLVED_REFERENCE,
+  typeReferenceNode,
 } from '../binder';
 export type {
   ContributedMember,

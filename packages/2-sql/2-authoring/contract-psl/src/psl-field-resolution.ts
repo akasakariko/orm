@@ -132,6 +132,7 @@ export type ResolvedField = {
 export type ModelNameMapping = {
   readonly model: ModelSymbol;
   readonly tableName: string;
+  readonly namespaceId: string | undefined;
   readonly fieldColumns: Map<string, string>;
 };
 
@@ -783,6 +784,7 @@ export function buildModelMappings(
     result.set(modelCoordinateKey(namespaceId ?? defaultNamespaceId, model.name), {
       model,
       tableName,
+      namespaceId,
       fieldColumns,
     });
   }
