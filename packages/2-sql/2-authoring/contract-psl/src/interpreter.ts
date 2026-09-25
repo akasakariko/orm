@@ -95,8 +95,8 @@ import type { DataTypeSupport } from './data-type-default';
 import { getAttribute, getNamedArgument, mapFieldNamesToColumns } from './psl-attribute-parsing';
 import type { ColumnDescriptor } from './psl-column-resolution';
 import {
-  checkUncomposedNamespace,
   getAuthoringEntity,
+  replacesUnresolvedTypeVoice,
   resolveFieldTypeDescriptor,
 } from './psl-column-resolution';
 import {
@@ -2082,7 +2082,7 @@ function relationTargetKindLabel(resolution: Resolution): string | undefined {
   }
 }
 
-function voicedAsUncomposedNamespace(
+function replacedBySqlTypeVoice(
   diagnostic: PslDiagnostic,
   composedExtensions: ReadonlySet<string>,
   context: {
@@ -2096,7 +2096,7 @@ function voicedAsUncomposedNamespace(
   if (data['constructorCall'] !== true) return false;
   const name = data['name'];
   if (typeof name !== 'string') return false;
-  return checkUncomposedNamespace(name, composedExtensions, context) !== undefined;
+  return replacesUnresolvedTypeVoice(name, composedExtensions, context);
 }
 
 export function interpretPslDocumentToSqlContract(
@@ -2138,7 +2138,7 @@ export function interpretPslDocumentToSqlContract(
   diagnostics.push(
     ...binderDiagnostics.filter(
       (diagnostic) =>
-        !voicedAsUncomposedNamespace(diagnostic, composedExtensionNames, {
+        !replacedBySqlTypeVoice(diagnostic, composedExtensionNames, {
           familyId: 'sql',
           targetId: input.target.targetId,
           authoringContributions: input.authoringContributions,

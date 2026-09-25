@@ -205,6 +205,33 @@ export function checkUncomposedNamespace(
 }
 
 /**
+ * Whether SQL emits its own diagnostic for a dotted type name it could not
+ * resolve, replacing the parser's unresolved-reference voice: an unrecognized
+ * extension namespace earns `PSL_EXTENSION_NAMESPACE_NOT_COMPOSED`, and a
+ * registered field-preset namespace earns `PSL_UNKNOWN_FIELD_PRESET`. Both
+ * replacements are reached only from a type-constructor call, so callers must
+ * establish that shape before asking.
+ */
+export function replacesUnresolvedTypeVoice(
+  typeName: string,
+  composedExtensions: ReadonlySet<string>,
+  context: {
+    readonly familyId?: string;
+    readonly targetId?: string;
+    readonly authoringContributions?: AuthoringContributions | undefined;
+  },
+): boolean {
+  if (checkUncomposedNamespace(typeName, composedExtensions, context) !== undefined) {
+    return true;
+  }
+  const dotIndex = typeName.indexOf('.');
+  if (dotIndex <= 0 || dotIndex === typeName.length - 1) {
+    return false;
+  }
+  return hasRegisteredFieldNamespace(context.authoringContributions, typeName.slice(0, dotIndex));
+}
+
+/**
  * Pushes the canonical `PSL_EXTENSION_NAMESPACE_NOT_COMPOSED` diagnostic for a subject (attribute, model attribute, or type constructor) that references an extension namespace which is not composed in the current contract.
  *
  * The `data` payload carries the missing namespace so machine consumers (agents, IDE extensions, CLI auto-fix) don't have to parse the prose.
