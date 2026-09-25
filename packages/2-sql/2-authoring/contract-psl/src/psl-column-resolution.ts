@@ -204,14 +204,6 @@ export function checkUncomposedNamespace(
   return namespace;
 }
 
-/**
- * Whether SQL emits its own diagnostic for a dotted type name it could not
- * resolve, replacing the parser's unresolved-reference voice: an unrecognized
- * extension namespace earns `PSL_EXTENSION_NAMESPACE_NOT_COMPOSED`, and a
- * registered field-preset namespace earns `PSL_UNKNOWN_FIELD_PRESET`. Both
- * replacements are reached only from a type-constructor call, so callers must
- * establish that shape before asking.
- */
 export function replacesUnresolvedTypeVoice(
   typeName: string,
   composedExtensions: ReadonlySet<string>,
