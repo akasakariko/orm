@@ -11,6 +11,7 @@ import {
   readResolvedConstructorCall,
 } from './resolve';
 import type { PslSources, Range } from './source-file';
+import type { FieldAttributeAst, ModelAttributeAst } from './syntax/ast/attributes';
 import {
   CompositeTypeDeclarationAst,
   type DocumentAst,
@@ -60,7 +61,7 @@ export interface ModelSymbol {
   readonly node: ModelDeclarationAst;
   readonly span: PslSpan;
   readonly fields: Record<string, FieldSymbol>;
-  readonly attributes: readonly ResolvedAttribute[];
+  readonly attributes: readonly ResolvedAttribute<ModelAttributeAst>[];
 }
 
 export interface CompositeTypeSymbol {
@@ -69,7 +70,7 @@ export interface CompositeTypeSymbol {
   readonly node: CompositeTypeDeclarationAst;
   readonly span: PslSpan;
   readonly fields: Record<string, FieldSymbol>;
-  readonly attributes: readonly ResolvedAttribute[];
+  readonly attributes: readonly ResolvedAttribute<ModelAttributeAst>[];
 }
 
 export interface BlockSymbol {
@@ -86,7 +87,7 @@ export interface ResolvedNamedTypeBinding {
   readonly baseType?: string;
   readonly typeConstructor?: ResolvedTypeConstructorCall;
   readonly isConstructor: boolean;
-  readonly attributes: readonly ResolvedAttribute[];
+  readonly attributes: readonly ResolvedAttribute<FieldAttributeAst>[];
 }
 
 /**
@@ -112,7 +113,7 @@ export interface FieldSymbol {
   readonly optional: boolean;
   readonly list: boolean;
   readonly typeConstructor?: ResolvedTypeConstructorCall;
-  readonly attributes: readonly ResolvedAttribute[];
+  readonly attributes: readonly ResolvedAttribute<FieldAttributeAst>[];
   /** Prevents cascading unsupported-type diagnostics after invalid qualification. */
   readonly malformedType?: boolean;
 }
@@ -425,7 +426,7 @@ function resolveNamedTypeBinding(
   baseType?: string;
   typeConstructor?: ResolvedTypeConstructorCall;
   isConstructor: boolean;
-  attributes: readonly ResolvedAttribute[];
+  attributes: readonly ResolvedAttribute<FieldAttributeAst>[];
 } {
   const annotation = node.typeAnnotation();
   const isConstructor = annotation?.isConstructor() ?? false;
