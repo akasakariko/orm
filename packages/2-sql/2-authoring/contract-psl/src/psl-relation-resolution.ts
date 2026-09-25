@@ -17,9 +17,9 @@ import type { RelationNode } from '@internal/sql-contract-ts/contract-builder';
 import { assertDefined, invariant } from '@internal/utils/assertions';
 import { ifDefined } from '@internal/utils/defined';
 
+import { getAttribute } from './psl-attribute-parsing';
 import { checkUncomposedNamespace, reportUncomposedNamespace } from './psl-column-resolution';
 import {
-  findFieldAttributeNode,
   interpretFieldAttribute,
   type SqlRelationOutput,
   sqlAttributeSpecs,
@@ -80,7 +80,7 @@ export function interpretRelationAttribute(input: {
   readonly binder: Binder;
   readonly diagnostics: PslDiagnosticCollector;
 }): SqlRelationOutput | undefined {
-  const node = findFieldAttributeNode(input.field, 'relation');
+  const node = getAttribute(input.field.attributes, 'relation')?.node;
   if (node === undefined) return undefined;
   return interpretFieldAttribute({
     symbols: input.symbols,

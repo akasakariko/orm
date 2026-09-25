@@ -63,10 +63,10 @@ import {
   lowerDefaultFunctionWithRegistry,
 } from './default-function-registry';
 
+import { getAttribute } from './psl-attribute-parsing';
 import { mapPslHelperArgs } from './psl-authoring-arguments';
 import {
   fieldSpecContext,
-  findFieldAttributeNode,
   interpretFieldAttribute,
   sqlAttributeSpecs,
 } from './sql-attribute-specs';
@@ -793,7 +793,7 @@ export function lowerDefaultForField(input: {
   readonly defaultValue?: AuthoredColumnDefault;
   readonly executionDefaults?: ExecutionMutationDefaultPhases;
 } {
-  const node = findFieldAttributeNode(input.field, 'default');
+  const node = getAttribute(input.field.attributes, 'default')?.node;
   if (node === undefined) return {};
   const source = diagnosticSource(input.sources, node.syntax);
   const spec = sqlAttributeSpecs.field.default(

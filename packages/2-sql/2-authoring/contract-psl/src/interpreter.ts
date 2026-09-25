@@ -65,7 +65,7 @@ import {
   typeReferenceNode,
 } from '@internal/psl-parser';
 import { fkRelationPairKey, type InvalidFkPairing } from '@internal/psl-parser/interpret';
-import type { DocumentAst, PslSources } from '@internal/psl-parser/syntax';
+import type { DocumentAst, FieldAttributeAst, PslSources } from '@internal/psl-parser/syntax';
 import { isAuthoredIndexInput } from '@internal/sql-contract/index-naming';
 import type {
   SqlModelStorage,
@@ -120,7 +120,6 @@ import {
 } from './psl-relation-resolution';
 import {
   createSqlBinder,
-  findModelAttributeNode,
   interpretModelAttribute,
   modelAttributeSpecsFrom,
   PSL_CHECK_ON_STI_VARIANT,
@@ -710,7 +709,10 @@ function relationNullabilityMismatch(
 
 function relationNullabilityMismatchDiagnostic(
   modelName: string,
-  relationAttribute: { readonly field: FieldSymbol; readonly relation: ResolvedAttribute },
+  relationAttribute: {
+    readonly field: FieldSymbol;
+    readonly relation: ResolvedAttribute<FieldAttributeAst>;
+  },
   source: DiagnosticSource,
 ): PslDiagnostic {
   const fieldLabel = `Relation field "${modelName}.${relationAttribute.field.name}"`;
@@ -861,8 +863,9 @@ function buildModelNodeFromPsl(input: BuildModelNodeInput): BuildModelNodeResult
       field,
       relation: getAttribute(field.attributes, 'relation'),
     }))
-    .filter((entry): entry is { field: FieldSymbol; relation: ResolvedAttribute } =>
-      Boolean(entry.relation),
+    .filter(
+      (entry): entry is { field: FieldSymbol; relation: ResolvedAttribute<FieldAttributeAst> } =>
+        Boolean(entry.relation),
     );
   const uniqueConstraints: UniqueConstraintNode[] = resolvedFields
     .filter((field) => field.isUnique)
@@ -1687,7 +1690,7 @@ function collectPolymorphismDeclarations(
 
   for (const { model, key } of identities.values()) {
     const source = diagnosticSource(sources, model.node.syntax);
-    const discriminatorNode = findModelAttributeNode(model, 'discriminator');
+    const discriminatorNode = getAttribute(model.attributes, 'discriminator')?.node;
     if (discriminatorNode !== undefined) {
       const parsed = interpretModelAttribute({
         node: discriminatorNode,
@@ -1713,7 +1716,7 @@ function collectPolymorphismDeclarations(
       }
     }
 
-    const baseNode = findModelAttributeNode(model, 'base');
+    const baseNode = getAttribute(model.attributes, 'base')?.node;
     if (baseNode !== undefined) {
       const parsed = interpretModelAttribute({
         node: baseNode,

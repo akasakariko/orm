@@ -4,14 +4,18 @@ import {
   type PslDiagnosticCollector,
   parseQuotedStringLiteral,
 } from '@internal/psl-parser';
-import type { ExpressionAst } from '@internal/psl-parser/syntax';
+import type {
+  ExpressionAst,
+  FieldAttributeAst,
+  ModelAttributeAst,
+} from '@internal/psl-parser/syntax';
 
 export { parseQuotedStringLiteral };
 
-export function getAttribute(
-  attributes: readonly ResolvedAttribute[] | undefined,
+export function getAttribute<TNode extends FieldAttributeAst | ModelAttributeAst>(
+  attributes: readonly ResolvedAttribute<TNode>[] | undefined,
   name: string,
-): ResolvedAttribute | undefined {
+): ResolvedAttribute<TNode> | undefined {
   return attributes?.find((attribute) => attribute.name === name);
 }
 

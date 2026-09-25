@@ -43,8 +43,6 @@ import {
 } from './psl-column-resolution';
 import {
   fieldSpecContext,
-  findFieldAttributeNode,
-  findModelAttributeNode,
   interpretFieldAttribute,
   interpretModelAttribute,
   sqlAttributeSpecs,
@@ -69,7 +67,7 @@ function lowerEnumDefaultForField(input: {
   readonly diagnostics: PslDiagnosticCollector;
 }): LoweredFieldDefault {
   const { field, model, enumHandle, diagnostics } = input;
-  const node = findFieldAttributeNode(field, 'default');
+  const node = getAttribute(field.attributes, 'default')?.node;
   if (node === undefined) return {};
   if (enumHandle.enumMembers.length === 0) return {};
   const spec = sqlAttributeSpecs.field.default(
@@ -313,7 +311,7 @@ function extractFieldConstraintNames(input: {
 } {
   const idAttribute = getAttribute(input.field.attributes, 'id');
   const uniqueAttribute = getAttribute(input.field.attributes, 'unique');
-  const idNode = findFieldAttributeNode(input.field, 'id');
+  const idNode = getAttribute(input.field.attributes, 'id')?.node;
   const idName =
     idNode === undefined
       ? undefined
@@ -327,7 +325,7 @@ function extractFieldConstraintNames(input: {
           binder: input.binder,
           diagnostics: input.diagnostics,
         })?.map;
-  const uniqueNode = findFieldAttributeNode(input.field, 'unique');
+  const uniqueNode = getAttribute(input.field.attributes, 'unique')?.node;
   const uniqueName =
     uniqueNode === undefined
       ? undefined
@@ -365,7 +363,7 @@ function lowerNoCheckForField(input: {
   readonly isDomainEnum: boolean;
   readonly diagnostics: PslDiagnosticCollector;
 }): readonly NoCheckKind[] | undefined {
-  const node = findFieldAttributeNode(input.field, 'noCheck');
+  const node = getAttribute(input.field.attributes, 'noCheck')?.node;
   if (node === undefined) return undefined;
   const interpreted = interpretFieldAttribute({
     node,
@@ -753,7 +751,7 @@ export function buildModelMappings(
 ): Map<string, ModelNameMapping> {
   const result = new Map<string, ModelNameMapping>();
   for (const { model, namespaceId } of modelEntries) {
-    const mapNode = findModelAttributeNode(model, 'map');
+    const mapNode = getAttribute(model.attributes, 'map')?.node;
     const tableName =
       mapNode === undefined
         ? defaultTableName(model.name)
@@ -768,7 +766,7 @@ export function buildModelMappings(
           })?.name ?? defaultTableName(model.name));
     const fieldColumns = new Map<string, string>();
     for (const field of Object.values(model.fields)) {
-      const fieldMapNode = findFieldAttributeNode(field, 'map');
+      const fieldMapNode = getAttribute(field.attributes, 'map')?.node;
       const columnName =
         fieldMapNode === undefined
           ? field.name
