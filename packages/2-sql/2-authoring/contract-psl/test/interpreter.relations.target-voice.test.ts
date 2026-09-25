@@ -52,6 +52,10 @@ namespace auth {
         code: 'PSL_UNRESOLVED_REFERENCE',
         message: 'Cannot find field "id" on the type of "Post.user"',
       },
+      {
+        code: 'PSL_UNSUPPORTED_FIELD_TYPE',
+        message: 'Field "Post.user" type "User" is not supported in SQL PSL provider v1',
+      },
     ]);
   });
 
@@ -76,6 +80,10 @@ namespace auth {
       {
         code: 'PSL_UNRESOLVED_REFERENCE',
         message: 'Cannot find field "id" on the type of "Post.user"',
+      },
+      {
+        code: 'PSL_UNSUPPORTED_FIELD_TYPE',
+        message: 'Field "Post.user" type "User" is not supported in SQL PSL provider v1',
       },
     ]);
   });

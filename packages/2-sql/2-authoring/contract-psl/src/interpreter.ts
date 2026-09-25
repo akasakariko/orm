@@ -628,8 +628,6 @@ interface BuildModelNodeInput {
   readonly mapping: ModelNameMapping;
   readonly modelMappingsBySymbol: ReadonlyMap<ModelSymbol, ModelNameMapping>;
   readonly identityKeyOf: (model: ModelSymbol) => string;
-  readonly modelNames: Set<string>;
-  readonly compositeTypeNames: ReadonlySet<string>;
   readonly enumTypeDescriptors: Map<string, ColumnDescriptor>;
   readonly namedTypeDescriptors: Map<string, ColumnDescriptor>;
   readonly composedExtensions: Set<string>;
@@ -743,8 +741,6 @@ function buildModelNodeFromPsl(input: BuildModelNodeInput): BuildModelNodeResult
     mapping,
     enumTypeDescriptors: input.enumTypeDescriptors,
     namedTypeDescriptors: input.namedTypeDescriptors,
-    modelNames: input.modelNames,
-    compositeTypeNames: input.compositeTypeNames,
     composedExtensions: input.composedExtensions,
     authoringContributions: input.authoringContributions,
     familyId: input.familyId,
@@ -787,7 +783,8 @@ function buildModelNodeFromPsl(input: BuildModelNodeInput): BuildModelNodeResult
 
   const resultBackrelationCandidates: ModelBackrelationCandidate[] = [];
   for (const field of Object.values(model.fields)) {
-    if (!input.modelNames.has(field.typeName)) {
+    const backrelationTarget = backrelationTargetSymbol(field, input.binder);
+    if (backrelationTarget === undefined) {
       continue;
     }
     const relationAttribute = getAttribute(field.attributes, 'relation');
@@ -850,10 +847,6 @@ function buildModelNodeFromPsl(input: BuildModelNodeInput): BuildModelNodeResult
       continue;
     }
 
-    const backrelationTarget = backrelationTargetSymbol(field, input.binder);
-    if (backrelationTarget === undefined) {
-      continue;
-    }
     resultBackrelationCandidates.push({
       model,
       target: backrelationTarget,
@@ -1575,16 +1568,19 @@ function buildValueObjects(input: BuildValueObjectsInput): Record<string, Contra
     authoringContributions,
     diagnostics,
     sources,
+    binder,
   } = input;
   const valueObjects: Record<string, ContractValueObject> = {};
-  const compositeTypeNames = new Set(compositeTypes.map((ct) => ct.name));
 
   for (const compositeType of compositeTypes) {
     const fields: Record<string, ContractField> = {};
     for (const field of Object.values(compositeType.fields)) {
-      if (compositeTypeNames.has(field.typeName)) {
+      const fieldTypeReference = typeReferenceNode(field);
+      const fieldTypeResolution =
+        fieldTypeReference === undefined ? undefined : binder.symbolForNode(fieldTypeReference);
+      if (fieldTypeResolution?.kind === 'compositeType') {
         const result: ContractField = {
-          type: { kind: 'valueObject', name: field.typeName },
+          type: { kind: 'valueObject', name: fieldTypeResolution.symbol.name },
           nullable: field.optional,
         };
         fields[field.name] = field.list ? { ...result, many: true } : result;
@@ -2206,8 +2202,6 @@ export function interpretPslDocumentToSqlContract(
   }
   const defaultNamespaceId = input.target.defaultNamespaceId;
 
-  const modelNames = new Set(models.map((model) => model.name));
-  const compositeTypeNames = new Set(compositeTypes.map((ct) => ct.name));
   const composedExtensions = new Set(input.composedExtensions ?? []);
   const composedExtensionContracts: ReadonlyMap<string, Contract> =
     input.composedExtensionContracts;
@@ -2550,8 +2544,6 @@ export function interpretPslDocumentToSqlContract(
       mapping,
       modelMappingsBySymbol,
       identityKeyOf,
-      modelNames,
-      compositeTypeNames,
       enumTypeDescriptors: allEnumTypeDescriptors,
       namedTypeDescriptors: namedTypeResult.namedTypeDescriptors,
       composedExtensions,

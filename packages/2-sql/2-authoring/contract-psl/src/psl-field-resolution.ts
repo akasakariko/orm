@@ -17,7 +17,11 @@ import type {
   ResolvedAttribute,
   SymbolTable,
 } from '@internal/psl-parser';
-import { diagnosticSource, type PslDiagnosticCollector } from '@internal/psl-parser';
+import {
+  diagnosticSource,
+  type PslDiagnosticCollector,
+  typeReferenceNode,
+} from '@internal/psl-parser';
 import type { PslSources } from '@internal/psl-parser/syntax';
 import type {
   AuthoredColumnDefault,
@@ -160,8 +164,6 @@ export interface CollectResolvedFieldsInput {
   readonly mapping: ModelNameMapping;
   readonly enumTypeDescriptors: Map<string, ColumnDescriptor>;
   readonly namedTypeDescriptors: Map<string, ColumnDescriptor>;
-  readonly modelNames: Set<string>;
-  readonly compositeTypeNames: ReadonlySet<string>;
   readonly composedExtensions: Set<string>;
   readonly authoringContributions: AuthoringContributions | undefined;
   readonly familyId: string;
@@ -421,8 +423,6 @@ export function collectResolvedFields(input: CollectResolvedFieldsInput): Resolv
     mapping,
     enumTypeDescriptors,
     namedTypeDescriptors,
-    modelNames,
-    compositeTypeNames,
     composedExtensions,
     authoringContributions,
     binder,
@@ -461,7 +461,10 @@ export function collectResolvedFields(input: CollectResolvedFieldsInput): Resolv
 
   for (const field of Object.values(model.fields)) {
     const source = diagnosticSource(sources, field.node.syntax);
-    const isModelField = modelNames.has(field.typeName);
+    const fieldTypeReference = typeReferenceNode(field);
+    const fieldTypeResolution =
+      fieldTypeReference === undefined ? undefined : binder.symbolForNode(fieldTypeReference);
+    const isModelField = fieldTypeResolution?.kind === 'model';
 
     if (field.list && isModelField) {
       continue;
@@ -485,7 +488,7 @@ export function collectResolvedFields(input: CollectResolvedFieldsInput): Resolv
       continue;
     }
 
-    const isValueObjectField = compositeTypeNames.has(field.typeName);
+    const isValueObjectField = fieldTypeResolution?.kind === 'compositeType';
     const isListField = field.list;
 
     let descriptor: ColumnDescriptor | undefined;
