@@ -100,6 +100,60 @@ namespace auth {
     });
   });
 
+  it('pairs backrelations within each namespace when both model names are shared', () => {
+    const shared = `namespace public {
+  model User {
+    id Int @id
+    memberships Membership[]
+    @@map("public_users")
+  }
+  model Membership {
+    id Int @id
+    userId Int
+    user User @relation(fields: [userId], references: [id])
+    @@map("public_memberships")
+  }
+}
+
+namespace auth {
+  model User {
+    id Int @id
+    memberships Membership[]
+    @@map("auth_users")
+  }
+  model Membership {
+    id Int @id
+    userId Int
+    user User @relation(fields: [userId], references: [id])
+    @@map("auth_memberships")
+  }
+}
+`;
+    const result = interpretPslDocumentToSqlContract({
+      ...baseInput,
+      ...symbolTableInputFromParseArgs({ schema: shared, sourceId: 'schema.prisma' }),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.failure.diagnostics.map((d) => d.code).join(', '));
+
+    const contract = result.value;
+    const publicModels = contract.domain.namespaces['public']?.models as
+      | Record<string, ContractModel<SqlModelStorage>>
+      | undefined;
+    const authModels = contract.domain.namespaces['auth']?.models as
+      | Record<string, ContractModel<SqlModelStorage>>
+      | undefined;
+
+    expect(publicModels?.['User']?.relations?.['memberships']).toMatchObject({
+      cardinality: '1:N',
+      to: { namespace: 'public', model: 'Membership' },
+    });
+    expect(authModels?.['User']?.relations?.['memberships']).toMatchObject({
+      cardinality: '1:N',
+      to: { namespace: 'auth', model: 'Membership' },
+    });
+  });
+
   it('matches each backrelation to the FK side in its own namespace', () => {
     const contract = interpret();
 

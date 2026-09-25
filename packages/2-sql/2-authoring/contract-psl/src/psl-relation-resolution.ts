@@ -39,6 +39,8 @@ export const REFERENTIAL_ACTION_MAP: Record<string, ReferentialAction | undefine
 };
 
 export type FkRelationMetadata = {
+  readonly declaringModel: ModelSymbol;
+  readonly targetModel: ModelSymbol;
   readonly declaringModelName: string;
   readonly declaringFieldName: string;
   readonly declaringTableName: string;
@@ -56,10 +58,11 @@ export type FkRelationMetadata = {
 };
 
 export type ModelBackrelationCandidate = {
+  readonly model: ModelSymbol;
+  readonly target: ModelSymbol;
   readonly modelName: string;
   readonly tableName: string;
   readonly field: FieldSymbol;
-  readonly targetModelName: string;
   /** Whether the PSL field itself is list-typed (`Target[]`) rather than singular (`Target?`). A singular candidate is the back side of a 1:1 relation and can never be many-to-many. */
   readonly isList: boolean;
   readonly relationName?: string;
@@ -96,6 +99,7 @@ export function interpretRelationAttribute(input: {
 
 export function indexFkRelations(input: {
   readonly fkRelationMetadata: readonly FkRelationMetadata[];
+  readonly identityKeyOf: (model: ModelSymbol) => string;
 }): {
   readonly modelRelations: Map<string, ModelRelationMetadata[]>;
   readonly fkRelationsByPair: Map<string, FkRelationMetadata[]>;
@@ -106,17 +110,18 @@ export function indexFkRelations(input: {
   const fkRelationsByDeclaringModel = new Map<string, FkRelationMetadata[]>();
 
   for (const relation of input.fkRelationMetadata) {
-    const declaringFkRelations = fkRelationsByDeclaringModel.get(relation.declaringModelName);
+    const declaringKey = input.identityKeyOf(relation.declaringModel);
+    const declaringFkRelations = fkRelationsByDeclaringModel.get(declaringKey);
     if (declaringFkRelations) {
       declaringFkRelations.push(relation);
     } else {
-      fkRelationsByDeclaringModel.set(relation.declaringModelName, [relation]);
+      fkRelationsByDeclaringModel.set(declaringKey, [relation]);
     }
 
-    const existing = modelRelations.get(relation.declaringModelName);
+    const existing = modelRelations.get(declaringKey);
     const current = existing ?? [];
     if (!existing) {
-      modelRelations.set(relation.declaringModelName, current);
+      modelRelations.set(declaringKey, current);
     }
     current.push({
       fieldName: relation.declaringFieldName,
@@ -133,7 +138,7 @@ export function indexFkRelations(input: {
       },
     });
 
-    const pairKey = fkRelationPairKey(relation.declaringModelName, relation.targetModelName);
+    const pairKey = fkRelationPairKey(declaringKey, input.identityKeyOf(relation.targetModel));
     const pairRelations = fkRelationsByPair.get(pairKey);
     if (!pairRelations) {
       fkRelationsByPair.set(pairKey, [relation]);
@@ -237,17 +242,18 @@ function findJunctionFkPairs(input: {
   readonly candidate: ModelBackrelationCandidate;
   readonly fkRelationsByDeclaringModel: ReadonlyMap<string, readonly FkRelationMetadata[]>;
   readonly modelIdColumns: ReadonlyMap<string, readonly string[]>;
+  readonly identityKeyOf: (model: ModelSymbol) => string;
 }): { readonly pairs: JunctionFkPair[]; readonly nearMisses: JunctionNearMiss[] } {
-  const targetIdColumns = input.modelIdColumns.get(input.candidate.targetModelName);
+  const targetIdColumns = input.modelIdColumns.get(input.identityKeyOf(input.candidate.target));
   if (!targetIdColumns || targetIdColumns.length === 0) {
     return { pairs: [], nearMisses: [] };
   }
   const pairs: JunctionFkPair[] = [];
   const nearMisses: JunctionNearMiss[] = [];
-  for (const [junctionModelName, junctionFks] of input.fkRelationsByDeclaringModel) {
-    const idColumns = input.modelIdColumns.get(junctionModelName);
+  for (const [junctionKey, junctionFks] of input.fkRelationsByDeclaringModel) {
+    const idColumns = input.modelIdColumns.get(junctionKey);
     for (const parentFk of junctionFks) {
-      if (parentFk.targetModelName !== input.candidate.modelName) {
+      if (parentFk.targetModel !== input.candidate.model) {
         continue;
       }
       if (
@@ -257,7 +263,7 @@ function findJunctionFkPairs(input: {
         continue;
       }
       for (const childFk of junctionFks) {
-        if (childFk === parentFk || childFk.targetModelName !== input.candidate.targetModelName) {
+        if (childFk === parentFk || childFk.targetModel !== input.candidate.target) {
           continue;
         }
         // The model links both sides, so it is junction-shaped for this
@@ -266,12 +272,18 @@ function findJunctionFkPairs(input: {
           !idColumns ||
           !idColumnsAreExactlyFkPair(idColumns, parentFk.localColumns, childFk.localColumns)
         ) {
-          nearMisses.push({ junctionModelName, reason: 'id-not-fk-covering' });
+          nearMisses.push({
+            junctionModelName: parentFk.declaringModelName,
+            reason: 'id-not-fk-covering',
+          });
           continue;
         }
         const orderedChildColumns = childColumnsInTargetIdOrder(childFk, targetIdColumns);
         if (!orderedChildColumns) {
-          nearMisses.push({ junctionModelName, reason: 'target-fk-not-id' });
+          nearMisses.push({
+            junctionModelName: parentFk.declaringModelName,
+            reason: 'target-fk-not-id',
+          });
           continue;
         }
         pairs.push({ parentFk, childFk, childColumnsInTargetIdOrder: orderedChildColumns });
@@ -291,19 +303,19 @@ function junctionNearMissDiagnostic(
   const data = {
     listField,
     junctionModel: nearMiss.junctionModelName,
-    targetModel: candidate.targetModelName,
+    targetModel: candidate.target.name,
   };
   if (nearMiss.reason === 'target-fk-not-id') {
     return {
       code: 'PSL_JUNCTION_TARGET_FK_NOT_ID',
-      message: `Backrelation list field "${listField}" found junction model "${nearMiss.junctionModelName}", but its foreign key to "${candidate.targetModelName}" does not reference "${candidate.targetModelName}"'s @id. The junction's target-side foreign key must reference "${candidate.targetModelName}"'s full @id columns for many-to-many recognition.`,
+      message: `Backrelation list field "${listField}" found junction model "${nearMiss.junctionModelName}", but its foreign key to "${candidate.target.name}" does not reference "${candidate.target.name}"'s @id. The junction's target-side foreign key must reference "${candidate.target.name}"'s full @id columns for many-to-many recognition.`,
       ...source.at(candidate.field.span),
       data,
     };
   }
   return {
     code: 'PSL_JUNCTION_ID_NOT_FK_COVERING',
-    message: `Backrelation list field "${listField}" found junction-shaped model "${nearMiss.junctionModelName}" linking "${candidate.modelName}" and "${candidate.targetModelName}", but its id does not cover exactly its foreign-key columns. Declare @@id([...]) on "${nearMiss.junctionModelName}" listing exactly the two foreign-key columns for many-to-many recognition.`,
+    message: `Backrelation list field "${listField}" found junction-shaped model "${nearMiss.junctionModelName}" linking "${candidate.modelName}" and "${candidate.target.name}", but its id does not cover exactly its foreign-key columns. Declare @@id([...]) on "${nearMiss.junctionModelName}" listing exactly the two foreign-key columns for many-to-many recognition.`,
     ...source.at(candidate.field.span),
     data,
   };
@@ -374,10 +386,12 @@ export function applyBackrelationCandidates(input: {
   readonly modelRelations: Map<string, ModelRelationMetadata[]>;
   readonly diagnostics: PslDiagnosticCollector;
   readonly sources: PslSources;
+  readonly identityKeyOf: (model: ModelSymbol) => string;
 }): void {
   for (const candidate of input.backrelationCandidates) {
     const source = diagnosticSource(input.sources, candidate.field.node.syntax);
-    const pairKey = fkRelationPairKey(candidate.targetModelName, candidate.modelName);
+    const candidateKey = input.identityKeyOf(candidate.model);
+    const pairKey = fkRelationPairKey(input.identityKeyOf(candidate.target), candidateKey);
     const pairMatches = input.fkRelationsByPair.get(pairKey) ?? [];
     const matches = candidate.relationName
       ? pairMatches.filter((relation) => relation.relationName === candidate.relationName)
@@ -394,10 +408,11 @@ export function applyBackrelationCandidates(input: {
           candidate,
           fkRelationsByDeclaringModel: input.fkRelationsByDeclaringModel,
           modelIdColumns: input.modelIdColumns,
+          identityKeyOf: input.identityKeyOf,
         });
         const junctionPair = junctionPairs[0];
         if (junctionPairs.length === 1 && junctionPair) {
-          relationsForModel(input.modelRelations, candidate.modelName).push(
+          relationsForModel(input.modelRelations, candidateKey).push(
             manyToManyRelationNode(candidate, junctionPair),
           );
           continue;
@@ -418,7 +433,7 @@ export function applyBackrelationCandidates(input: {
       }
       input.diagnostics.push({
         code: 'PSL_ORPHANED_BACKRELATION',
-        message: `Backrelation field "${candidate.modelName}.${candidate.field.name}" has no matching FK-side relation on model "${candidate.targetModelName}". Add @relation(fields: [...], references: [...]) on the FK-side relation${candidate.isList ? ' or use an explicit join model for many-to-many' : ''}.`,
+        message: `Backrelation field "${candidate.modelName}.${candidate.field.name}" has no matching FK-side relation on model "${candidate.target.name}". Add @relation(fields: [...], references: [...]) on the FK-side relation${candidate.isList ? ' or use an explicit join model for many-to-many' : ''}.`,
         ...source.at(candidate.field.span),
       });
       continue;
@@ -426,7 +441,7 @@ export function applyBackrelationCandidates(input: {
     if (matches.length > 1) {
       input.diagnostics.push({
         code: 'PSL_AMBIGUOUS_BACKRELATION',
-        message: `Backrelation field "${candidate.modelName}.${candidate.field.name}" matches multiple FK-side relations on model "${candidate.targetModelName}". Add @relation(name: "...") (or @relation("...")) to both sides to disambiguate.`,
+        message: `Backrelation field "${candidate.modelName}.${candidate.field.name}" matches multiple FK-side relations on model "${candidate.target.name}". Add @relation(name: "...") (or @relation("...")) to both sides to disambiguate.`,
         ...source.at(candidate.field.span),
       });
       continue;
@@ -437,7 +452,8 @@ export function applyBackrelationCandidates(input: {
     assertDefined(matched, 'Backrelation matching requires a defined relation match');
 
     if (!candidate.isList) {
-      const uniqueColumnSets = input.modelUniqueColumnSets.get(matched.declaringModelName) ?? [];
+      const uniqueColumnSets =
+        input.modelUniqueColumnSets.get(input.identityKeyOf(matched.declaringModel)) ?? [];
       if (!fkColumnsAreUnique(matched.localColumns, uniqueColumnSets)) {
         input.diagnostics.push({
           code: 'PSL_NON_UNIQUE_BACKRELATION',
@@ -453,14 +469,14 @@ export function applyBackrelationCandidates(input: {
         requiredOneToOneBackrelationDiagnostic({
           modelName: candidate.modelName,
           field: candidate.field,
-          targetModelName: candidate.targetModelName,
+          targetModelName: candidate.target.name,
           sources: input.sources,
           recordNoun: 'row',
         }),
       );
     }
 
-    relationsForModel(input.modelRelations, candidate.modelName).push({
+    relationsForModel(input.modelRelations, candidateKey).push({
       fieldName: candidate.field.name,
       toModel: matched.declaringModelName,
       toTable: matched.declaringTableName,
