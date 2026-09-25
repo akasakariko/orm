@@ -2054,6 +2054,13 @@ function stripStorageOnlyDomainFields(
   return { ...model, fields, storage: { ...storage, fields: storageFields } };
 }
 
+function backrelationTargetSymbol(field: FieldSymbol, binder: Binder): ModelSymbol | undefined {
+  const typeReference = typeReferenceNode(field);
+  if (typeReference === undefined) return undefined;
+  const resolution = binder.symbolForNode(typeReference);
+  return resolution?.kind === 'model' ? resolution.symbol : undefined;
+}
+
 function relationTargetKindLabel(resolution: Resolution): string | undefined {
   switch (resolution.kind) {
     case 'compositeType':
