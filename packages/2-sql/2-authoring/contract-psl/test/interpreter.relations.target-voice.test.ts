@@ -52,10 +52,6 @@ namespace auth {
         code: 'PSL_UNRESOLVED_REFERENCE',
         message: 'Cannot find field "id" on the type of "Post.user"',
       },
-      {
-        code: 'PSL_UNSUPPORTED_FIELD_TYPE',
-        message: 'Field "Post.user" type "User" is not supported in SQL PSL provider v1',
-      },
     ]);
   });
 
@@ -81,10 +77,6 @@ namespace auth {
         code: 'PSL_UNRESOLVED_REFERENCE',
         message: 'Cannot find field "id" on the type of "Post.user"',
       },
-      {
-        code: 'PSL_UNSUPPORTED_FIELD_TYPE',
-        message: 'Field "Post.user" type "User" is not supported in SQL PSL provider v1',
-      },
     ]);
   });
 
@@ -97,11 +89,21 @@ namespace auth {
 `),
     ).toEqual([
       { code: 'PSL_UNRESOLVED_REFERENCE', message: 'Cannot find type "pgvector.Vector"' },
-      {
-        code: 'PSL_UNSUPPORTED_FIELD_TYPE',
-        message: 'Field "Document.embedding" type "Vector" is not supported in SQL PSL provider v1',
-      },
     ]);
+  });
+
+  it('leaves an unresolved composite-type field to the binder alone', () => {
+    expect(
+      refusalFor(`type Address {
+  region Province
+}
+
+model Person {
+  id Int @id
+  address Address
+}
+`),
+    ).toEqual([{ code: 'PSL_UNRESOLVED_REFERENCE', message: 'Cannot find type "Province"' }]);
   });
 
   it('leaves a type-constructor call into an unavailable namespace to SQL alone', () => {

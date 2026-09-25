@@ -1596,7 +1596,7 @@ function buildValueObjects(input: BuildValueObjectsInput): Record<string, Contra
         entityLabel: `Field "${compositeType.name}.${field.name}"`,
       });
       if (!resolved.ok) {
-        if (!resolved.alreadyReported) {
+        if (!resolved.alreadyReported && fieldTypeResolution?.kind !== 'unresolved') {
           diagnostics.push({
             code: 'PSL_UNSUPPORTED_FIELD_TYPE',
             message: `Field "${compositeType.name}.${field.name}" type "${field.typeName}" is not supported`,

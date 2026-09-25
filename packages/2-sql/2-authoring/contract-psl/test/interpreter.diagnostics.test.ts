@@ -110,15 +110,10 @@ describe('interpretPslDocumentToSqlContract diagnostics', () => {
     });
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.failure.diagnostics).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          code: 'PSL_INVALID_ATTRIBUTE_SYNTAX',
-          message: 'Mapped name must not be empty',
-        }),
-        expect.objectContaining({ code: 'PSL_UNSUPPORTED_FIELD_TYPE' }),
-      ]),
-    );
+    expect(result.failure.diagnostics.map(({ code, message }) => ({ code, message }))).toEqual([
+      { code: 'PSL_UNRESOLVED_REFERENCE', message: 'Cannot find type "MissingType"' },
+      { code: 'PSL_INVALID_ATTRIBUTE_SYNTAX', message: 'Mapped name must not be empty' },
+    ]);
   });
 
   it('throws when target context is missing', () => {
@@ -198,7 +193,6 @@ model User {
       'PSL_UNRESOLVED_REFERENCE',
       'PSL_UNRESOLVED_REFERENCE',
       'PSL_UNSUPPORTED_NAMED_TYPE_BASE',
-      'PSL_UNSUPPORTED_FIELD_TYPE',
     ]);
   });
 
@@ -387,14 +381,9 @@ model User {
     if (result.ok) return;
 
     expect(result.failure.summary).toBe('PSL to SQL contract interpretation failed');
-    expect(result.failure.diagnostics).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          code: 'PSL_UNSUPPORTED_FIELD_TYPE',
-          message: expect.stringContaining('Unknown'),
-        }),
-      ]),
-    );
+    expect(result.failure.diagnostics.map(({ code, message }) => ({ code, message }))).toEqual([
+      { code: 'PSL_UNRESOLVED_REFERENCE', message: 'Cannot find type "Unknown"' },
+    ]);
   });
 
   it('returns diagnostics for invalid Postgres native type constructor usage', () => {
@@ -692,14 +681,19 @@ model User {
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.failure.diagnostics).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          code: 'PSL_UNSUPPORTED_FIELD_TYPE',
-          sourceId: 'schema.prisma',
-        }),
-      ]),
-    );
+    expect(
+      result.failure.diagnostics.map(({ code, message, sourceId }) => ({
+        code,
+        message,
+        sourceId,
+      })),
+    ).toEqual([
+      {
+        code: 'PSL_UNRESOLVED_REFERENCE',
+        message: 'Cannot find type "Missing"',
+        sourceId: 'schema.prisma',
+      },
+    ]);
   });
 
   it('emits distinct diagnostic codes for malformed versus uncomposed constructor calls', () => {

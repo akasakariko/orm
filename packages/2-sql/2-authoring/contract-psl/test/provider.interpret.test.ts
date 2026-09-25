@@ -95,7 +95,7 @@ model User {
     expect(interpretResult.failure.diagnostics).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          code: 'PSL_UNSUPPORTED_FIELD_TYPE',
+          code: 'PSL_UNRESOLVED_REFERENCE',
           sourceId: schemaPath,
           span: expect.objectContaining({
             start: expect.objectContaining({ line: 4 }),
@@ -164,11 +164,9 @@ model Other {
     if (result === undefined || result.ok) {
       throw new Error('expected interpret to report diagnostics');
     }
-    expect(result.failure.diagnostics).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ code: 'PSL_UNSUPPORTED_FIELD_TYPE', sourceId: SOURCE_ID }),
-      ]),
-    );
+    expect(result.failure.diagnostics.map(({ code, sourceId }) => ({ code, sourceId }))).toEqual([
+      { code: 'PSL_UNRESOLVED_REFERENCE', sourceId: SOURCE_ID },
+    ]);
   });
 
   it('does not throw on a recovered CST from a syntax-broken schema', () => {
@@ -239,7 +237,7 @@ model Other {
     const context = createPostgresTestContext();
     const cases = [
       {
-        code: 'PSL_UNSUPPORTED_FIELD_TYPE',
+        code: 'PSL_UNRESOLVED_REFERENCE',
         schema: `model User {
   id Int @id
   things Unknown[]
