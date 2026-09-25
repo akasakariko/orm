@@ -164,7 +164,7 @@ describe('interpretPslDocumentToSqlContract diagnostics', () => {
     );
   });
 
-  it('returns diagnostics for unsupported named types, field lists, missing keys, and invalid relation targets', () => {
+  it('returns diagnostics for unsupported named types, field lists, missing keys, and an unresolved relation target', () => {
     const document = symbolTableInputFromParseArgs({
       schema: `types {
   DisplayName = VarChar(191)
@@ -194,13 +194,12 @@ model User {
     expect(result.ok).toBe(false);
     if (result.ok) return;
 
-    expect(result.failure.diagnostics.map((diagnostic) => diagnostic.code)).toEqual(
-      expect.arrayContaining([
-        'PSL_UNSUPPORTED_NAMED_TYPE_BASE',
-        'PSL_UNSUPPORTED_FIELD_TYPE',
-        'PSL_INVALID_RELATION_TARGET',
-      ]),
-    );
+    expect(result.failure.diagnostics.map((diagnostic) => diagnostic.code)).toEqual([
+      'PSL_UNRESOLVED_REFERENCE',
+      'PSL_UNRESOLVED_REFERENCE',
+      'PSL_UNSUPPORTED_NAMED_TYPE_BASE',
+      'PSL_UNSUPPORTED_FIELD_TYPE',
+    ]);
   });
 
   it('returns diagnostics when @map and @@map arguments are not quoted string literals', () => {

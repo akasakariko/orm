@@ -1380,6 +1380,9 @@ function buildModelNodeFromPsl(input: BuildModelNodeInput): BuildModelNodeResult
     const typeReference = typeReferenceNode(relationAttribute.field);
     const targetResolution =
       typeReference === undefined ? undefined : input.binder.symbolForNode(typeReference);
+    if (targetResolution?.kind === 'unresolved' && fieldTypeNamespaceId === undefined) {
+      continue;
+    }
     const targetMapping =
       targetResolution?.kind === 'model'
         ? input.modelMappingsBySymbol.get(targetResolution.symbol)
