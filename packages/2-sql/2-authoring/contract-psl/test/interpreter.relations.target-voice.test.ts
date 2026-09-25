@@ -104,6 +104,22 @@ namespace auth {
     ]);
   });
 
+  it('leaves a type-constructor call into an unavailable namespace to SQL alone', () => {
+    expect(
+      refusalFor(`model Document {
+  id Int @id
+  embedding pgvector.Vector(1536)
+}
+`),
+    ).toEqual([
+      {
+        code: 'PSL_EXTENSION_NAMESPACE_NOT_COMPOSED',
+        message:
+          'Type constructor "pgvector.Vector" uses unrecognized namespace "pgvector". Add extension pack "pgvector" to extensions in prisma.config.ts.',
+      },
+    ]);
+  });
+
   it('reports a resolved-but-non-model target itself, naming what it found', () => {
     expect(
       refusalFor(`type Address {
