@@ -159,7 +159,7 @@ export default {
 };
 ```
 
-The rule to remember: inside a request, `db` does everything the `db` from `postgres()` does, so any documented `db.orm...`, `db.sql...`, `db.raw...`, `db.transaction(...)`, `db.prepare(...)` or `db.runtime().query(...)` snippet works unchanged.
+The rule to remember: inside a request, `db` does everything the `db` from `postgres()` does, so any documented `db.orm...`, `db.sql...`, `db.raw...`, `db.transaction(...)`, `db.prepare(...)` or `db.runtime().query(...)` snippet works unchanged. Await every query before the `await using` scope ends: the connection closes when the scope ends, so a query returned from the scope without `await` (`return db.orm...` instead of `return await db.orm...`) fails with a "not connected" error.
 
 - **Never call `connect` at module scope.** A connection opened there is shared by every request in the isolate: it goes stale after the isolate idles, and concurrent requests queue behind each other on one `pg.Client`.
 - **`db.orm` is the default way to use the ORM.** Build `orm({ runtime: db.runtime(), context: db.context, collections })` only for custom collection classes, and build it inside the request.

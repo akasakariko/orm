@@ -39,18 +39,20 @@ export default {
 };
 ```
 
-The same package; the same `Contract` type; the same option keys at construction (`contractJson`, `extensions`, `middleware`, `verifyMarker`). Inside a request, `db` does everything the `db` from `postgres()` does. What differs is where the members bound to a connection live. The long-lived client carries them itself, bound to one lazily created pool. The serverless client carries none of them; each `connect({ url })` returns a per-request client that carries them, bound to one fresh `pg.Client`, and `await using` closes it when the request ends.
+The same package; the same `Contract` type; the same option keys at construction (`contractJson`, `extensions`, `middleware`, `verifyMarker`). Inside a request, `db` does everything the `db` from `postgres()` does. Await every query before the `await using` scope ends: the connection closes when the scope ends, so a query returned from the scope without `await` (`return db.orm...` instead of `return await db.orm...`) fails with a "not connected" error. What differs is where the runtime-bound members live. The long-lived client carries them itself, bound to one lazily created pool. The serverless client carries none of them; each `connect({ url })` returns a per-request client that carries them, bound to one fresh `pg.Client`, and `await using` closes it when the request ends.
 
 ## Decision
 
-`@internal/postgres` exports two clients. Nothing bound to a connection lives on a client that outlives a request.
+`@internal/postgres` exports two clients. On the serverless side, nothing bound to a connection lives on an object that outlives a request.
 
 - `postgres()` (`@internal/postgres/runtime`) suits long-lived processes. It returns a `PostgresClient`: the static members (`sql`, `raw`, `enums`, `nativeEnums`, `context`, `contract`, `stack`) plus `orm`, `runtime()`, `transaction(fn)`, `prepare(...)`, `connect(...)`, `close()` and `[Symbol.asyncDispose]`. The runtime and its `pg.Pool` are created on first use and live until `close()`.
-- `postgresServerless()` (`@internal/postgres/serverless`) suits per-request runtimes. The module-scope client (`PostgresServerlessClient`) has only the static members and `connect({ url })`. It holds no connection. Each `connect({ url })` opens one fresh `pg.Client` and returns a per-request client, `PostgresServerlessConnection`, which is `PostgresClient` without `connect`. Its static members are the same objects as the module-scope client's. `close()` and `[Symbol.asyncDispose]` close its runtime once; after that, `runtime()`, ORM queries, `transaction(...)` and `prepare(...)` fail with `DRIVER.NOT_CONNECTED`.
+- `postgresServerless()` (`@internal/postgres/serverless`) suits per-request runtimes. The module-scope client (`PostgresServerlessClient`) has only the static members and `connect({ url })`. It holds no connection. Each `connect({ url })` opens one fresh `pg.Client` and returns a per-request client, `PostgresServerlessConnection`. It is composed of the same three interfaces as `PostgresClient` (the static members, the runtime-bound members, and `close()` with `[Symbol.asyncDispose]`), without `connect`; a member added to `PostgresClient` alone does not reach it. Its static members are the same objects as the module-scope client's. `close()` and `[Symbol.asyncDispose]` close its runtime once; after that, `runtime()`, ORM queries, `transaction(...)` and `prepare(...)` fail with `DRIVER.NOT_CONNECTED`.
 
-Both clients build the static members with `buildPostgresStaticContext`, and both build `orm`, `runtime()`, `transaction(fn)` and `prepare(...)` with the same function, `buildPostgresQueryMembers`, from `postgres.ts`. That function takes the execution context, the raw codec inferer, `enums`, `nativeEnums` and a `getRuntime()` function. The clients differ only in what `getRuntime()` returns: the lazily created long-lived runtime, or the runtime of one request's connection. Code written against one client's `db` therefore works on the other's.
+Both clients build the static members with `buildPostgresStaticContext`, and both build the runtime-bound members (`orm`, `runtime()`, `transaction(fn)` and `prepare(...)`) with the same function, `buildPostgresRuntimeBoundMembers`. That function takes the execution context, the raw codec inferer, `enums`, `nativeEnums` and a `getRuntime()` function. The clients differ only in what `getRuntime()` returns: the lazily created long-lived runtime, or the runtime of one request's connection. Code written against one client's `db` therefore works on the other's.
 
 The per-request client is not a `Runtime`. It has no `query` or `execute`. Anything that takes a runtime (`orm({ runtime, context, collections })` for custom collection classes, `withTransaction`, a prepared statement's `query(runtime, params)`) receives `db.runtime()`.
+
+`connect` means different things on the two clients. On `postgres()`, `connect(binding)` binds that client to a database once and returns its runtime; a second call fails. On the serverless client, `connect({ url })` opens a new per-request client on every call and leaves the module-scope client unchanged.
 
 Cursor defaults differ to match the dominant per-side shape (off on Node, on under serverless); the serverless factory exposes a `cursor` option.
 
@@ -90,7 +92,7 @@ The static members stay on the module-scope client because they never touch a co
 
 Four concrete differences between the two clients. Each exists to enforce one part of the lifecycle invariant above.
 
-### 1. Static members live at module scope; members bound to a connection live per request
+### 1. Static members live at module scope; runtime-bound members live per request
 
 Both sides expose `sql` (the plan builder), `raw`, `enums`, `nativeEnums`, `context`, `contract` and `stack`. None of these reach a connection.
 
@@ -138,13 +140,14 @@ The serverless client exposes a `cursor` option to opt out; the default reflects
 - **Stale-connection failures are structurally impossible on the serverless side.** The per-request client cannot outlive its `fetch` in any cache the framework owns. An isolate that handles two `fetch` invocations gets two independent connections.
 - **Cross-`fetch` interference is structurally impossible on the serverless side.** Each `fetch` opens its own `pg.Client`. Concurrent invocations within one isolate cannot block on each other's queue or contaminate each other's transaction state.
 - **One way to query on both sides.** `db.orm`, `db.sql`, `db.raw`, `db.transaction(...)`, `db.prepare(...)` and `db.runtime().query(...)` mean the same thing inside a request as in a long-lived process. Documentation, skills and examples are written once.
-- **One implementation of the query members.** `buildPostgresQueryMembers` builds `orm`, `runtime()`, `transaction()` and `prepare()` for both clients, so they cannot drift apart.
+- **One implementation of the runtime-bound members.** `buildPostgresRuntimeBoundMembers` builds `orm`, `runtime()`, `transaction()` and `prepare()` for both clients, so they cannot drift apart.
 - **Cursor default reflects the dominant shape.** Each side's default fits how that side typically reads results.
 
 ### Trade-offs
 
 - **The per-request client builds an ORM client on every `connect()`.** The ORM client is a set of closures over the context and `getRuntime()`, so the cost per request is small, and the serverless bundle includes the ORM client code.
 - **A query through `db` inside `db.transaction(fn)` is not independent of the transaction.** Depending on the operation, it runs inside the open transaction without saying so, or it waits for the connection the transaction holds and the request hangs (see § 3). Nothing detects the mistake at run time; documentation states the rule to run every query through `tx`.
+- **A query must be awaited inside the `await using` scope.** The connection closes when the scope ends, so a query returned from the scope without `await` fails with a "not connected" error. A `postgres()` client is not closed per request, so the same code works there.
 - **Two surfaces to keep symmetric at construction.** The same option keys appear on both factories (`contractJson`, `extensions`, `middleware`, `verifyMarker`). A type test checks this, but drift is still possible for keys the test does not name.
 
 ## Interaction with other ADRs
@@ -159,7 +162,18 @@ The serverless client exposes a `cursor` option to opt out; the default reflects
 
 `connect({ url })` returns the per-request `Runtime`, made `AsyncDisposable`, and nothing else. The ORM client is built per request with `orm({ runtime, context })`, and transactions run through `withTransaction(runtime, fn)`.
 
-**Rejected.** It is safe, because nothing is cached at module scope, but it makes the two sides read differently for no safety gain. Every consumer hand-wrote the same ORM wrapper around the runtime, every documented `db.orm...` and `db.transaction(...)` snippet needed translating before it worked in a request, and the public documentation routed users away from the serverless client because it had no `db.orm`. The argument that holds is against caching connection-bound members at module scope, not against offering them on a per-request object.
+**Rejected.** It is safe, because nothing is cached at module scope, but it makes the two sides read differently for no safety gain. Every consumer would write the same ORM wrapper around the runtime, every documented `db.orm...` and `db.transaction(...)` snippet would need translating before it works in a request, and documentation would steer users away from the serverless client because it has no `db.orm`. The argument that holds is against caching runtime-bound members at module scope, not against offering them on a per-request object.
+
+### The per-request client is also a `Runtime`
+
+The per-request client carries `query` and `execute` itself, so it can be passed wherever a runtime is expected.
+
+**Rejected.** Two reasons:
+
+1. The ORM client calls a no-argument `transaction()` on its runtime when that method exists. On the per-request client, `transaction` is `transaction(fn)`, so passing the client to `orm()` would break ORM writes that span several statements.
+2. `Runtime` has its own `prepare`, with different parameter types from the client's `prepare`. Combining the two in one type needs a type workaround.
+
+`db.runtime()` stays the one way to reach the runtime, as on `postgres()`.
 
 ### One client, runtime always per-call
 

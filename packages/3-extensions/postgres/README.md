@@ -63,7 +63,7 @@ export default {
 };
 ```
 
-Inside a request, `db` does everything the `db` from `postgres()` does: `db.orm`, `db.sql`, `db.raw`, `db.transaction(...)`, `db.prepare(...)` and `db.runtime().query(...)` work unchanged. `db` is not a `Runtime`; anything that takes a runtime gets `db.runtime()`. Never call `connect` at module scope.
+Inside a request, `db` does everything the `db` from `postgres()` does: `db.orm`, `db.sql`, `db.raw`, `db.transaction(...)`, `db.prepare(...)` and `db.runtime().query(...)` work unchanged. Await every query before the `await using` scope ends: the connection closes when the scope ends, so a query returned from the scope without `await` (`return db.orm...` instead of `return await db.orm...`) fails with a "not connected" error. `db` is not a `Runtime`; anything that takes a runtime gets `db.runtime()`. Never call `connect` at module scope.
 
 ## Exports
 
