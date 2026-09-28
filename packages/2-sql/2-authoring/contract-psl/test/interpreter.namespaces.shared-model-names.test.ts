@@ -145,6 +145,129 @@ namespace auth {
     }
   });
 
+  it('checks singular backrelation uniqueness on the resolved source model', () => {
+    const shared = ['public', 'auth']
+      .map(
+        (namespace) => `namespace ${namespace} {
+  model User {
+    id Int @id
+    membership Membership?
+  }
+  model Membership {
+    id Int @id
+    userId Int ${namespace === 'public' ? '@unique' : ''}
+    user User @relation(fields: [userId], references: [id])
+  }
+}`,
+      )
+      .join('\n');
+    const result = interpretPslDocumentToSqlContract({
+      ...baseInput,
+      ...symbolTableInputFromParseArgs({ schema: shared, sourceId: 'schema.prisma' }),
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('Expected a non-unique backrelation');
+    expect(
+      result.failure.diagnostics.map(({ code, span }) => ({ code, line: span?.start.line })),
+    ).toEqual([{ code: 'PSL_NON_UNIQUE_BACKRELATION', line: 15 }]);
+  });
+
+  it("does not consume another namespace's rejected FK pairing", () => {
+    const shared = `namespace public {
+  model User {
+    id Int @id
+    memberships Membership[]
+  }
+  model Membership {
+    id Int @id
+  }
+}
+namespace auth {
+  model User {
+    id Int @id
+    memberships Membership[]
+  }
+  model Membership {
+    id Int @id
+    userId Int?
+    user User @relation(fields: [userId], references: [id])
+  }
+}`;
+    const result = interpretPslDocumentToSqlContract({
+      ...baseInput,
+      ...symbolTableInputFromParseArgs({ schema: shared, sourceId: 'schema.prisma' }),
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('Expected invalid relations');
+    expect(
+      result.failure.diagnostics.map(({ code, span }) => ({ code, line: span?.start.line })),
+    ).toEqual([
+      { code: 'PSL_RELATION_NULLABILITY_MISMATCH', line: 18 },
+      { code: 'PSL_ORPHANED_BACKRELATION', line: 4 },
+    ]);
+  });
+
+  it('pairs junctions by resolved source and target identities', () => {
+    const shared = ['public', 'auth']
+      .map(
+        (namespace) => `namespace ${namespace} {
+  model User {
+    id Int @id
+    groups Group[]
+  }
+  model Group {
+    id Int @id
+    users User[]
+  }
+  model Membership {
+    userId Int
+    groupId Int
+    user User @relation(fields: [userId], references: [id])
+    group Group @relation(fields: [groupId], references: [id])
+    @@id([userId, groupId])
+  }
+}`,
+      )
+      .join('\n');
+    const result = interpretPslDocumentToSqlContract({
+      ...baseInput,
+      ...symbolTableInputFromParseArgs({ schema: shared, sourceId: 'schema.prisma' }),
+    });
+    expect(result.ok ? [] : result.failure.diagnostics).toEqual([]);
+    if (!result.ok) throw new Error(result.failure.summary);
+    for (const namespace of ['public', 'auth']) {
+      const models = modelsOf(result.value, namespace);
+      expect(models?.['User']?.relations).toEqual({
+        groups: {
+          cardinality: 'N:M',
+          to: { namespace, model: 'Group' },
+          on: { localFields: ['id'], targetFields: ['userId'] },
+          through: {
+            namespaceId: namespace,
+            table: 'Membership',
+            parentColumns: ['userId'],
+            childColumns: ['groupId'],
+            targetColumns: ['id'],
+          },
+        },
+      });
+      expect(models?.['Group']?.relations).toEqual({
+        users: {
+          cardinality: 'N:M',
+          to: { namespace, model: 'User' },
+          on: { localFields: ['id'], targetFields: ['groupId'] },
+          through: {
+            namespaceId: namespace,
+            table: 'Membership',
+            parentColumns: ['groupId'],
+            childColumns: ['userId'],
+            targetColumns: ['id'],
+          },
+        },
+      });
+    }
+  });
+
   it('matches each backrelation to the FK side in its own namespace', () => {
     const contract = interpret();
 

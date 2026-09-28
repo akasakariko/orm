@@ -64,7 +64,6 @@ import {
   type SymbolTable,
   typeReferenceNode,
 } from '@internal/psl-parser';
-import { fkRelationPairKey, type InvalidFkPairing } from '@internal/psl-parser/interpret';
 import type { DocumentAst, FieldAttributeAst, PslSources } from '@internal/psl-parser/syntax';
 import { isAuthoredIndexInput } from '@internal/sql-contract/index-naming';
 import type {
@@ -112,6 +111,7 @@ import { resolveNamedTypeDeclarations } from './psl-named-type-resolution';
 import {
   applyBackrelationCandidates,
   type FkRelationMetadata,
+  type InvalidModelFkPairing,
   indexFkRelations,
   interpretRelationAttribute,
   type ModelBackrelationCandidate,
@@ -666,9 +666,9 @@ interface BuildModelNodeInput {
 
 interface BuildModelNodeResult {
   readonly modelNode: ModelNode;
-  readonly fkRelationMetadata: FkRelationMetadata[];
-  readonly invalidFkPairings: InvalidFkPairing[];
-  readonly backrelationCandidates: ModelBackrelationCandidate[];
+  readonly fkRelationMetadata: FkRelationMetadata<ModelSymbol>[];
+  readonly invalidFkPairings: InvalidModelFkPairing<ModelSymbol>[];
+  readonly backrelationCandidates: ModelBackrelationCandidate<ModelSymbol>[];
   readonly resolvedFields: readonly ResolvedField[];
   /** Cross-contract-space relation nodes that bypass the local back-relation matching. */
   readonly crossSpaceRelations: RelationNode[];
@@ -782,7 +782,7 @@ function buildModelNodeFromPsl(input: BuildModelNodeInput): BuildModelNodeResult
   const declaredContributedModelAttributes = new Set<string>();
   const modelAttributeEntities: Record<string, Record<string, unknown>> = {};
 
-  const resultBackrelationCandidates: ModelBackrelationCandidate[] = [];
+  const resultBackrelationCandidates: ModelBackrelationCandidate<ModelSymbol>[] = [];
   for (const field of Object.values(model.fields)) {
     const backrelationTarget = backrelationTargetSymbol(field, input.binder);
     if (backrelationTarget === undefined) {
@@ -849,10 +849,10 @@ function buildModelNodeFromPsl(input: BuildModelNodeInput): BuildModelNodeResult
     }
 
     resultBackrelationCandidates.push({
-      modelName: model.name,
+      modelName: model,
       tableName,
       field,
-      targetModelName: field.typeName,
+      targetModelName: backrelationTarget,
       isList: field.list,
       ...ifDefined('relationName', relationName),
     });
@@ -1199,8 +1199,8 @@ function buildModelNodeFromPsl(input: BuildModelNodeInput): BuildModelNodeResult
     );
   }
 
-  const resultFkRelationMetadata: FkRelationMetadata[] = [];
-  const resultInvalidFkPairings: InvalidFkPairing[] = [];
+  const resultFkRelationMetadata: FkRelationMetadata<ModelSymbol>[] = [];
+  const resultInvalidFkPairings: InvalidModelFkPairing<ModelSymbol>[] = [];
   const resultCrossSpaceRelations: RelationNode[] = [];
   for (const relationAttribute of relationAttributes) {
     const {
@@ -1439,7 +1439,8 @@ function buildModelNodeFromPsl(input: BuildModelNodeInput): BuildModelNodeResult
         relationNullabilityMismatchDiagnostic(model.name, relationAttribute, source),
       );
       resultInvalidFkPairings.push({
-        pairKey: fkRelationPairKey(model.name, targetMapping.model.name),
+        declaringModel: model,
+        targetModel: targetMapping.model,
         ...ifDefined('relationName', parsedRelation.name),
       });
       continue;
@@ -1488,11 +1489,11 @@ function buildModelNodeFromPsl(input: BuildModelNodeInput): BuildModelNodeResult
     });
 
     resultFkRelationMetadata.push({
-      declaringModelName: model.name,
+      declaringModelName: model,
       declaringFieldName: relationAttribute.field.name,
       declaringTableName: tableName,
       ...ifDefined('declaringNamespaceId', mapping.namespaceId),
-      targetModelName: targetMapping.model.name,
+      targetModelName: targetMapping.model,
       targetTableName: targetMapping.tableName,
       ...ifDefined('targetNamespaceId', targetNamespaceId),
       ...ifDefined('relationName', parsedRelation.name),
@@ -2492,14 +2493,12 @@ export function interpretPslDocumentToSqlContract(
   for (const mapping of modelMappingsByCoordinate.values()) {
     modelMappingsBySymbol.set(mapping.model, mapping);
   }
-  const modelNodes: ModelNode[] = [];
-  const fkRelationMetadata: FkRelationMetadata[] = [];
-  const invalidFkPairings: InvalidFkPairing[] = [];
-  const backrelationCandidates: ModelBackrelationCandidate[] = [];
+  const modelNodes = new Map<ModelSymbol, ModelNode>();
+  const fkRelationMetadata: FkRelationMetadata<ModelSymbol>[] = [];
+  const invalidFkPairings: InvalidModelFkPairing<ModelSymbol>[] = [];
+  const backrelationCandidates: ModelBackrelationCandidate<ModelSymbol>[] = [];
   const modelResolvedFields = new Map<string, readonly ResolvedField[]>();
-  // Cross-space relation nodes keyed by declaring model name — merged into
-  // modelRelations after local back-relation matching so they bypass that step.
-  const crossSpaceRelationsByModel = new Map<string, RelationNode[]>();
+  const crossSpaceRelationsByModel = new Map<ModelSymbol, RelationNode[]>();
   // Entities lowered by contributed model attributes, keyed by namespace id
   // then attribute name then entity key — merged into `entries` alongside
   // `namespaceExtensionEntities` once every model has been processed.
@@ -2541,7 +2540,8 @@ export function interpretPslDocumentToSqlContract(
       contributedModelAttributeSpecs: contributedModelSpecs,
       defaultNamespaceId,
     });
-    modelNodes.push(
+    modelNodes.set(
+      model,
       namespaceId !== undefined ? { ...result.modelNode, namespaceId } : result.modelNode,
     );
     fkRelationMetadata.push(...result.fkRelationMetadata);
@@ -2549,8 +2549,8 @@ export function interpretPslDocumentToSqlContract(
     backrelationCandidates.push(...result.backrelationCandidates);
     modelResolvedFields.set(coordinate, result.resolvedFields);
     if (result.crossSpaceRelations.length > 0) {
-      const existing = crossSpaceRelationsByModel.get(model.name) ?? [];
-      crossSpaceRelationsByModel.set(model.name, [...existing, ...result.crossSpaceRelations]);
+      const existing = crossSpaceRelationsByModel.get(model) ?? [];
+      crossSpaceRelationsByModel.set(model, [...existing, ...result.crossSpaceRelations]);
     }
     if (Object.keys(result.modelAttributeEntities).length > 0) {
       const nsKey = namespaceId ?? defaultNamespaceId;
@@ -2565,11 +2565,11 @@ export function interpretPslDocumentToSqlContract(
   const { modelRelations, fkRelationsByPair, fkRelationsByDeclaringModel } = indexFkRelations({
     fkRelationMetadata,
   });
-  const modelIdColumns = new Map<string, readonly string[]>();
-  const modelUniqueColumnSets = new Map<string, readonly (readonly string[])[]>();
-  for (const modelNode of modelNodes) {
+  const modelIdColumns = new Map<ModelSymbol, readonly string[]>();
+  const modelUniqueColumnSets = new Map<ModelSymbol, readonly (readonly string[])[]>();
+  for (const [model, modelNode] of modelNodes) {
     if (modelNode.id) {
-      modelIdColumns.set(modelNode.modelName, modelNode.id.columns);
+      modelIdColumns.set(model, modelNode.id.columns);
     }
     const uniqueColumnSets: (readonly string[])[] = [];
     if (modelNode.id) {
@@ -2578,7 +2578,7 @@ export function interpretPslDocumentToSqlContract(
     for (const unique of modelNode.uniques ?? []) {
       uniqueColumnSets.push(unique.columns);
     }
-    modelUniqueColumnSets.set(modelNode.modelName, uniqueColumnSets);
+    modelUniqueColumnSets.set(model, uniqueColumnSets);
   }
   applyBackrelationCandidates({
     backrelationCandidates,
@@ -2669,7 +2669,16 @@ export function interpretPslDocumentToSqlContract(
 
   const { modelNodes: mtiLinkedModelNodes, syntheticPkFieldsByVariant } =
     materializeMtiVariantStorageLinks(
-      modelNodes,
+      Array.from(modelNodes, ([symbol, model]) => ({
+        ...model,
+        ...(modelRelations.has(symbol)
+          ? {
+              relations: [...(modelRelations.get(symbol) ?? [])].sort((left, right) =>
+                compareStrings(left.fieldName, right.fieldName),
+              ),
+            }
+          : {}),
+      })),
       baseDeclarations,
       stiVariantKeys,
       defaultNamespaceId,
@@ -2766,16 +2775,7 @@ export function interpretPslDocumentToSqlContract(
         ? { namespaces: [...namespaceExtensionEntities.keys()] }
         : {}),
       createNamespace: createNamespaceWithExtensions,
-      models: stiColumnModelNodes.map((model) => ({
-        ...model,
-        ...(modelRelations.has(model.modelName)
-          ? {
-              relations: [...(modelRelations.get(model.modelName) ?? [])].sort((left, right) =>
-                compareStrings(left.fieldName, right.fieldName),
-              ),
-            }
-          : {}),
-      })),
+      models: stiColumnModelNodes,
     },
     input.codecLookup,
   );
