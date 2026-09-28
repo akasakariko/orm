@@ -120,7 +120,7 @@ await db.transaction(async (tx) => {
 
 `db.orm` and `db.transaction(fn)` on the per-request client call `getRuntime()` on every query, and that returns the runtime of this request's connection. Nothing is cached at module scope. Custom collection classes still use `orm({ runtime: db.runtime(), context: db.context, collections })` inside the request.
 
-The per-request client has one `pg.Client`. Inside `db.transaction(async (tx) => ...)`, queries must go through `tx`. A query through `db` inside the callback waits for the connection the transaction holds, and the request hangs.
+A per-request client has one connection, so inside `db.transaction(async (tx) => ...)` a query through `db` is not independent of the transaction; run every query through `tx`. A query that uses the client's connection directly, such as a `db.orm` read, a single-statement `db.orm` write or `db.runtime().query(...)`, runs inside the open transaction without saying so. An operation that asks for a connection of its own, such as `db.runtime().connection()`, a `db.orm` create that also writes related rows, or a nested `db.transaction(...)`, waits for the connection the transaction holds, and the request hangs.
 
 ### 4. Cursor defaults differ to match the dominant per-side shape
 
@@ -144,7 +144,7 @@ The serverless client exposes a `cursor` option to opt out; the default reflects
 ### Trade-offs
 
 - **The per-request client builds an ORM client on every `connect()`.** The ORM client is a set of closures over the context and `getRuntime()`, so the cost per request is small, and the serverless bundle includes the ORM client code.
-- **A query through `db` inside `db.transaction(fn)` hangs.** The per-request client has one connection, and the transaction holds it. Nothing detects the mistake at run time; documentation states the rule.
+- **A query through `db` inside `db.transaction(fn)` is not independent of the transaction.** Depending on the operation, it runs inside the open transaction without saying so, or it waits for the connection the transaction holds and the request hangs (see § 3). Nothing detects the mistake at run time; documentation states the rule to run every query through `tx`.
 - **Two surfaces to keep symmetric at construction.** The same option keys appear on both factories (`contractJson`, `extensions`, `middleware`, `verifyMarker`). A type test checks this, but drift is still possible for keys the test does not name.
 
 ## Interaction with other ADRs
