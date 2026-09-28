@@ -24,13 +24,13 @@ const baseInput = {
 describe('two namespaces declaring the same bare model name', () => {
   const schema = `namespace public {
   model User {
-    id Int @id
+    id Int @id @map("public_id")
     profiles Profile[]
     @@map("public_users")
   }
   model Profile {
     id Int @id
-    userId Int
+    userId Int @map("profile_user_id")
     user User @relation(fields: [userId], references: [id])
     @@map("profile")
   }
@@ -38,13 +38,13 @@ describe('two namespaces declaring the same bare model name', () => {
 
 namespace auth {
   model User {
-    id Int @id
+    id Int @id @map("auth_id")
     sessions Session[]
     @@map("auth_users")
   }
   model Session {
     id Int @id
-    userId Int
+    userId Int @map("session_user_id")
     user User @relation(fields: [userId], references: [id])
     @@map("session")
   }
@@ -80,10 +80,16 @@ namespace auth {
     const storage = interpret().storage as SqlStorage;
 
     expect(foreignKeysOf(storage, 'public', 'profile')).toMatchObject([
-      { target: { namespaceId: 'public', tableName: 'public_users' } },
+      {
+        source: { columns: ['profile_user_id'] },
+        target: { namespaceId: 'public', tableName: 'public_users', columns: ['public_id'] },
+      },
     ]);
     expect(foreignKeysOf(storage, 'auth', 'session')).toMatchObject([
-      { target: { namespaceId: 'auth', tableName: 'auth_users' } },
+      {
+        source: { columns: ['session_user_id'] },
+        target: { namespaceId: 'auth', tableName: 'auth_users', columns: ['auth_id'] },
+      },
     ]);
   });
 

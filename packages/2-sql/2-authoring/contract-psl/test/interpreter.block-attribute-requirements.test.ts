@@ -68,6 +68,38 @@ function interpretWith(schema: string) {
 }
 
 describe('pslBlockDescriptors.requiresModelAttribute enforcement', () => {
+  it.each([
+    ['', ''],
+    ['public', 'public'],
+    ['', 'public'],
+    ['public', ''],
+    ['unbound', 'unbound'],
+    ['__unbound__', '__unbound__'],
+    ['unbound', '__unbound__'],
+  ])(
+    'resolves mapped references from namespace "%s" to namespace "%s"',
+    (namespace, modelNamespace) => {
+      const block = 'audit_rule track_widgets {\n  target = Widget\n}';
+      const model = `model Widget {
+  id Int @id
+  @@map("mapped_widgets")
+  @@audited
+}`;
+      const result = interpretWith(
+        [
+          namespace === '' ? block : `namespace ${namespace} {\n${block}\n}`,
+          modelNamespace === '' ? model : `namespace ${modelNamespace} {\n${model}\n}`,
+        ].join('\n'),
+      );
+      expect(result.ok ? [] : result.failure.diagnostics).toEqual([]);
+      if (!result.ok) return;
+      const namespaceId = namespace === '' || namespace === 'public' ? 'public' : '__unbound__';
+      expect(result.value.storage.namespaces[namespaceId]?.entries['audit_rule']).toMatchObject({
+        track_widgets: { resolvedModelRefs: { target: { tableName: 'mapped_widgets' } } },
+      });
+    },
+  );
+
   it('rejects a block whose target model lacks the required attribute, naming block and model', () => {
     const result = interpretWith(`
 namespace public {

@@ -59,6 +59,36 @@ function expectDiagnosticForSchema(
 }
 
 describe('interpretPslDocumentToSqlContract diagnostics', () => {
+  it.each(['42', '"ignored", extra: true'])(
+    'reports malformed storage names (%s) once despite multiple incoming references',
+    (argument) => {
+      const schema = `model User {
+  id Int @id @map(${argument})
+  @@map(${argument})
+}
+${['First', 'Second', 'Third']
+  .map(
+    (name) => `model ${name} {
+  id Int @id
+  userId Int
+  user User @relation(fields: [userId], references: [id])
+}`,
+  )
+  .join('\n')}`;
+      const result = interpretPslDocumentToSqlContract({
+        ...baseInput,
+        ...symbolTableInputFromParseArgs({ schema, sourceId: 'schema.prisma' }),
+      });
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.failure.diagnostics).toHaveLength(2);
+      expect(result.failure.diagnostics.map(({ code }) => code)).toEqual([
+        'PSL_INVALID_ATTRIBUTE_SYNTAX',
+        'PSL_INVALID_ATTRIBUTE_SYNTAX',
+      ]);
+    },
+  );
+
   it.each([
     { declaration: 'name String @map("")', attribute: '@map("")', column: 15 },
     { declaration: '@@map("")', attribute: '@@map("")', column: 3 },
