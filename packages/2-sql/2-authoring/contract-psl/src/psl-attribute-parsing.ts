@@ -9,24 +9,17 @@ import type {
   FieldAttributeAst,
   ModelAttributeAst,
 } from '@internal/psl-parser/syntax';
-import { StringLiteralExprAst } from '@internal/psl-parser/syntax';
-import { defaultTableName } from './default-table-name';
+import { assertDefined } from '@internal/utils/assertions';
 
 export { parseQuotedStringLiteral };
 
-function mappedName(attributes: readonly ResolvedAttribute[] | undefined): string | undefined {
-  const args = getAttribute(attributes, 'map')?.args;
-  const argument = args?.length === 1 ? args[0] : undefined;
-  const expression = argument?.kind === 'positional' ? argument.expression : undefined;
-  return expression instanceof StringLiteralExprAst ? expression.value() || undefined : undefined;
-}
-
-export function modelStorageName(model: ModelSymbol): string {
-  return mappedName(model.attributes) ?? defaultTableName(model.name);
-}
-
-export function fieldStorageName(field: FieldSymbol): string {
-  return mappedName(field.attributes) ?? field.name;
+export function storageName(
+  symbol: ModelSymbol | FieldSymbol,
+  physicalNames: ReadonlyMap<ModelSymbol | FieldSymbol, string>,
+): string {
+  const name = physicalNames.get(symbol);
+  assertDefined(name, 'Physical names are populated for every model and field before lowering');
+  return name;
 }
 
 export function getAttribute<TNode extends FieldAttributeAst | ModelAttributeAst>(
@@ -76,6 +69,7 @@ export function getPositionalArgumentEntry(
 
 export function mapFieldNamesToColumns(input: {
   readonly model: ModelSymbol;
+  readonly physicalNames: ReadonlyMap<ModelSymbol | FieldSymbol, string>;
   readonly fieldNames: readonly string[];
   readonly source: DiagnosticSource;
   readonly diagnostics: PslDiagnosticCollector;
@@ -93,7 +87,7 @@ export function mapFieldNamesToColumns(input: {
       });
       return undefined;
     }
-    columns.push(fieldStorageName(field));
+    columns.push(storageName(field, input.physicalNames));
   }
   return columns;
 }

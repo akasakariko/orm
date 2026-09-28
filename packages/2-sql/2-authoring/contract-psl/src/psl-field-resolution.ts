@@ -35,9 +35,9 @@ import { ifDefined } from '@internal/utils/defined';
 import { InternalError } from '@internal/utils/internal-error';
 import type { DataTypeSupport } from './data-type-default';
 import {
-  fieldStorageName,
   formatDbAttributeMigrationMessage,
   getAttribute,
+  storageName,
 } from './psl-attribute-parsing';
 import type { ColumnDescriptor, FieldPresetContributions } from './psl-column-resolution';
 import { lowerDefaultForField, resolveFieldTypeDescriptor } from './psl-column-resolution';
@@ -150,6 +150,7 @@ export function modelCoordinateKey(namespaceId: string, modelName: string): stri
 
 export interface CollectResolvedFieldsInput {
   readonly model: ModelSymbol;
+  readonly physicalNames: ReadonlyMap<ModelSymbol | FieldSymbol, string>;
   readonly symbolTable: SymbolTable;
   readonly enumTypeDescriptors: Map<string, ColumnDescriptor>;
   readonly namedTypeDescriptors: Map<string, ColumnDescriptor>;
@@ -448,19 +449,6 @@ export function collectResolvedFields(input: CollectResolvedFieldsInput): Resolv
     declaredControlPolicy === undefined || declaredControlPolicy === 'managed';
 
   for (const field of Object.values(model.fields)) {
-    const mapNode = getAttribute(field.attributes, 'map')?.node;
-    if (mapNode !== undefined) {
-      interpretFieldAttribute({
-        node: mapNode,
-        symbols: symbolTable,
-        spec: sqlAttributeSpecs.field.map(),
-        model,
-        field,
-        sources,
-        binder,
-        diagnostics,
-      });
-    }
     const source = diagnosticSource(sources, field.node.syntax);
     const fieldTypeReference = typeReferenceNode(field);
     const fieldTypeResolution =
@@ -660,7 +648,7 @@ export function collectResolvedFields(input: CollectResolvedFieldsInput): Resolv
       });
       continue;
     }
-    const mappedColumnName = fieldStorageName(field);
+    const mappedColumnName = storageName(field, input.physicalNames);
     const { idAttribute, uniqueAttribute, idName, uniqueName } = extractFieldConstraintNames({
       symbolTable: input.symbolTable,
       model,

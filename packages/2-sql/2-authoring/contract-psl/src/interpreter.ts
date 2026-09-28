@@ -99,12 +99,12 @@ import { InternalError } from '@internal/utils/internal-error';
 import { notOk, ok, type Result } from '@internal/utils/result';
 import { contractError } from './contract-errors';
 import type { DataTypeSupport } from './data-type-default';
+import { defaultTableName } from './default-table-name';
 import {
-  fieldStorageName,
   getAttribute,
   getNamedArgument,
   mapFieldNamesToColumns,
-  modelStorageName,
+  storageName,
 } from './psl-attribute-parsing';
 import type { ColumnDescriptor } from './psl-column-resolution';
 import {
@@ -132,6 +132,7 @@ import {
 } from './psl-relation-resolution';
 import {
   createSqlBinder,
+  interpretFieldAttribute,
   interpretModelAttribute,
   modelAttributeSpecsFrom,
   PSL_CHECK_ON_STI_VARIANT,
@@ -611,6 +612,7 @@ function processEnumDeclarations(input: ProcessEnumDeclarationsInput): {
 
 interface BuildModelNodeInput {
   readonly model: ModelSymbol;
+  readonly physicalNames: ReadonlyMap<ModelSymbol | FieldSymbol, string>;
   readonly namespaceId: string | undefined;
   readonly enumTypeDescriptors: Map<string, ColumnDescriptor>;
   readonly namedTypeDescriptors: Map<string, ColumnDescriptor>;
@@ -715,20 +717,8 @@ function relationNullabilityMismatchDiagnostic(
 function buildModelNodeFromPsl(input: BuildModelNodeInput): BuildModelNodeResult {
   const { model, diagnostics } = input;
   const source = diagnosticSource(input.sources, model.node.syntax);
-  const tableName = modelStorageName(model);
+  const tableName = storageName(model, input.physicalNames);
   const modelNamespaceId = input.namespaceId;
-  const mapNode = getAttribute(model.attributes, 'map')?.node;
-  if (mapNode !== undefined) {
-    interpretModelAttribute({
-      node: mapNode,
-      symbols: input.symbolTable,
-      spec: sqlAttributeSpecs.model.map(),
-      model,
-      sources: input.sources,
-      binder: input.binder,
-      diagnostics,
-    });
-  }
   const namespaceExtensionEntitiesForModel =
     modelNamespaceId !== undefined
       ? input.namespaceExtensionEntities?.get(modelNamespaceId)
@@ -736,6 +726,7 @@ function buildModelNodeFromPsl(input: BuildModelNodeInput): BuildModelNodeResult
 
   const resolvedFields = collectResolvedFields({
     model,
+    physicalNames: input.physicalNames,
     symbolTable: input.symbolTable,
     enumTypeDescriptors: input.enumTypeDescriptors,
     namedTypeDescriptors: input.namedTypeDescriptors,
@@ -966,6 +957,7 @@ function buildModelNodeFromPsl(input: BuildModelNodeInput): BuildModelNodeResult
       }
       const columnNames = mapFieldNamesToColumns({
         model,
+        physicalNames: input.physicalNames,
         fieldNames,
         source,
         diagnostics,
@@ -1001,6 +993,7 @@ function buildModelNodeFromPsl(input: BuildModelNodeInput): BuildModelNodeResult
       }
       const columnNames = mapFieldNamesToColumns({
         model,
+        physicalNames: input.physicalNames,
         fieldNames: parsed.fields,
         source,
         diagnostics,
@@ -1037,6 +1030,7 @@ function buildModelNodeFromPsl(input: BuildModelNodeInput): BuildModelNodeResult
       if (parsed.fields !== undefined) {
         const mapped = mapFieldNamesToColumns({
           model,
+          physicalNames: input.physicalNames,
           fieldNames: parsed.fields,
           source,
           diagnostics,
@@ -1158,7 +1152,7 @@ function buildModelNodeFromPsl(input: BuildModelNodeInput): BuildModelNodeResult
         storageName: tableName,
         fieldStorageName: (fieldName) => {
           const field = model.fields[fieldName];
-          return field === undefined ? undefined : fieldStorageName(field);
+          return field === undefined ? undefined : storageName(field, input.physicalNames);
         },
         fieldCodecId: (fieldName) =>
           resolvedFields.find((resolved) => resolved.field.name === fieldName)?.descriptor.codecId,
@@ -1264,6 +1258,7 @@ function buildModelNodeFromPsl(input: BuildModelNodeInput): BuildModelNodeResult
 
       const localColumns = mapFieldNamesToColumns({
         model,
+        physicalNames: input.physicalNames,
         fieldNames: parsedRelation.fields,
         source,
         diagnostics,
@@ -1417,6 +1412,7 @@ function buildModelNodeFromPsl(input: BuildModelNodeInput): BuildModelNodeResult
 
     const localColumns = mapFieldNamesToColumns({
       model,
+      physicalNames: input.physicalNames,
       fieldNames: parsedRelation.fields,
       source,
       diagnostics,
@@ -1439,6 +1435,7 @@ function buildModelNodeFromPsl(input: BuildModelNodeInput): BuildModelNodeResult
     }
     const referencedColumns = mapFieldNamesToColumns({
       model: targetModel,
+      physicalNames: input.physicalNames,
       fieldNames: parsedRelation.references,
       source,
       diagnostics,
@@ -1469,7 +1466,7 @@ function buildModelNodeFromPsl(input: BuildModelNodeInput): BuildModelNodeResult
       bucketName: targetNamespace?.name()?.name() ?? UNSPECIFIED_PSL_NAMESPACE_ID,
       targetId: input.targetId,
     });
-    const targetTableName = modelStorageName(targetModel);
+    const targetTableName = storageName(targetModel, input.physicalNames);
     foreignKeyNodes.push({
       columns: localColumns,
       references: {
@@ -1754,6 +1751,7 @@ function collectPolymorphismDeclarations(
 
 function resolvePolymorphism(
   models: Record<string, ContractModel>,
+  physicalNames: ReadonlyMap<ModelSymbol | FieldSymbol, string>,
   discriminatorDeclarations: Map<string, DiscriminatorDeclaration>,
   baseDeclarations: Map<string, BaseDeclaration>,
   syntheticPkFieldsByVariant: ReadonlyMap<string, readonly string[]>,
@@ -1844,7 +1842,10 @@ function resolvePolymorphism(
     if (!variantModel) continue;
 
     const hasExplicitMap = getAttribute(baseDecl.model.attributes, 'map') !== undefined;
-    const resolvedTable = modelStorageName(hasExplicitMap ? baseDecl.model : baseDecl.base.model);
+    const resolvedTable = storageName(
+      hasExplicitMap ? baseDecl.model : baseDecl.base.model,
+      physicalNames,
+    );
 
     const patchedVariant: ContractModel = {
       ...variantModel,
@@ -2194,6 +2195,40 @@ export function interpretPslDocumentToSqlContract(
       Object.values(namespace.compositeTypes),
     );
   }
+  const physicalNames = new Map<ModelSymbol | FieldSymbol, string>();
+  for (const model of models) {
+    const mapNode = getAttribute(model.attributes, 'map')?.node;
+    const mapped =
+      mapNode === undefined
+        ? undefined
+        : interpretModelAttribute({
+            node: mapNode,
+            symbols: input.symbolTable,
+            spec: sqlAttributeSpecs.model.map(),
+            model,
+            sources: input.sources,
+            binder,
+            diagnostics,
+          });
+    physicalNames.set(model, mapped?.name ?? defaultTableName(model.name));
+    for (const field of Object.values(model.fields)) {
+      const mapNode = getAttribute(field.attributes, 'map')?.node;
+      const mapped =
+        mapNode === undefined
+          ? undefined
+          : interpretFieldAttribute({
+              node: mapNode,
+              symbols: input.symbolTable,
+              spec: sqlAttributeSpecs.field.map(),
+              model,
+              field,
+              sources: input.sources,
+              binder,
+              diagnostics,
+            });
+      physicalNames.set(field, mapped?.name ?? field.name);
+    }
+  }
   const defaultNamespaceId = input.target.defaultNamespaceId;
 
   const composedExtensions = new Set(input.composedExtensions ?? []);
@@ -2335,7 +2370,7 @@ export function interpretPslDocumentToSqlContract(
         model = ns.models[modelName];
       }
     }
-    return model === undefined ? undefined : modelStorageName(model);
+    return model === undefined ? undefined : storageName(model, physicalNames);
   };
   const composedPslBlockDescriptors = input.authoringContributions?.pslBlockDescriptors ?? {};
   const namespaceExtensionEntities = new Map<
@@ -2496,6 +2531,7 @@ export function interpretPslDocumentToSqlContract(
     const coordinate = modelCoordinateKey(namespaceId ?? defaultNamespaceId, model.name);
     const result = buildModelNodeFromPsl({
       model,
+      physicalNames,
       namespaceId,
       enumTypeDescriptors: allEnumTypeDescriptors,
       namedTypeDescriptors: namedTypeResult.namedTypeDescriptors,
@@ -2781,6 +2817,7 @@ export function interpretPslDocumentToSqlContract(
   const polyDiagnostics = createPslDiagnosticCollector(input.sources);
   patchedModels = resolvePolymorphism(
     patchedModels,
+    physicalNames,
     discriminatorDeclarations,
     baseDeclarations,
     syntheticPkFieldsByVariant,

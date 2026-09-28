@@ -59,7 +59,7 @@ function expectDiagnosticForSchema(
 }
 
 describe('interpretPslDocumentToSqlContract diagnostics', () => {
-  it.each(['42', '"ignored", extra: true'])(
+  it.each(['42', '"ignored", extra: true', 'name: "ignored"', '', '""'])(
     'reports malformed storage names (%s) once despite multiple incoming references',
     (argument) => {
       const schema = `model User {
@@ -81,11 +81,12 @@ ${['First', 'Second', 'Third']
       });
       expect(result.ok).toBe(false);
       if (result.ok) return;
-      expect(result.failure.diagnostics).toHaveLength(2);
-      expect(result.failure.diagnostics.map(({ code }) => code)).toEqual([
-        'PSL_INVALID_ATTRIBUTE_SYNTAX',
-        'PSL_INVALID_ATTRIBUTE_SYNTAX',
-      ]);
+      expect(result.failure.diagnostics.map(({ code }) => code)).toEqual(
+        Array.from(
+          { length: argument.startsWith('name:') ? 4 : 2 },
+          () => 'PSL_INVALID_ATTRIBUTE_SYNTAX',
+        ),
+      );
     },
   );
 
