@@ -1,17 +1,13 @@
 import postgresAdapter from '@internal/adapter-postgres/runtime';
-import type { NamespacedEnums } from '@internal/contract/enum-accessor';
 import type { Contract } from '@internal/contract/types';
 import postgresDriver, {
   type PostgresDriverCreateOptions,
   suppressIdleConnectionErrors,
 } from '@internal/driver-postgres/runtime';
 import { instantiateExecutionStack } from '@internal/framework-components/execution';
-import type { Db, RawLane } from '@internal/sql-builder/types';
 import type { SqlStorage } from '@internal/sql-contract/types';
 import type {
-  ExecutionContext,
   Runtime,
-  SqlExecutionStackWithDriver,
   SqlMiddleware,
   SqlRuntimeExtensionDescriptor,
   VerifyMarkerOption,
@@ -24,30 +20,24 @@ import { InternalError } from '@internal/utils/internal-error';
 import { Client } from 'pg';
 import { postgresError } from '../errors';
 import { buildPostgresStaticContext } from '../static/postgres-static';
-import type { NamespacedNativeEnums } from './native-enums';
-import {
-  buildPostgresQueryMembers,
-  type PostgresClient,
-  type PostgresQueryMembers,
-  type PostgresTargetId,
-} from './postgres';
+import type { PostgresTargetId } from './postgres';
 import { PostgresRuntimeImpl } from './postgres-runtime';
+import {
+  buildPostgresRuntimeBoundMembers,
+  type PostgresClientLifecycle,
+  type PostgresRuntimeBoundMembers,
+  type PostgresStaticMembers,
+} from './postgres-runtime-bound-members';
 
 export type PostgresServerlessCursorOptions = NonNullable<PostgresDriverCreateOptions['cursor']>;
 
-export type PostgresServerlessConnection<TContract extends Contract<SqlStorage>> = Omit<
-  PostgresClient<TContract>,
-  'connect'
->;
+export interface PostgresServerlessConnection<TContract extends Contract<SqlStorage>>
+  extends PostgresStaticMembers<TContract>,
+    PostgresRuntimeBoundMembers<TContract>,
+    PostgresClientLifecycle {}
 
-export interface PostgresServerlessClient<TContract extends Contract<SqlStorage>> {
-  readonly sql: Db<TContract>;
-  readonly raw: RawLane<TContract>;
-  readonly enums: NamespacedEnums<TContract>;
-  readonly nativeEnums: NamespacedNativeEnums<TContract>;
-  readonly context: ExecutionContext<TContract>;
-  readonly stack: SqlExecutionStackWithDriver<PostgresTargetId>;
-  readonly contract: TContract;
+export interface PostgresServerlessClient<TContract extends Contract<SqlStorage>>
+  extends PostgresStaticMembers<TContract> {
   connect(binding: { readonly url: string }): Promise<PostgresServerlessConnection<TContract>>;
 }
 
@@ -165,7 +155,7 @@ export default function postgresServerless<TContract extends Contract<SqlStorage
       closing ??= runtime.close();
       return closing;
     };
-    const queryMembers: PostgresQueryMembers<TContract> = buildPostgresQueryMembers<TContract>({
+    const runtimeBoundMembers = buildPostgresRuntimeBoundMembers<TContract>({
       context,
       rawCodecInferer,
       enums,
@@ -186,7 +176,7 @@ export default function postgresServerless<TContract extends Contract<SqlStorage
       context,
       contract,
       stack,
-      ...queryMembers,
+      ...runtimeBoundMembers,
       close,
       [Symbol.asyncDispose]: close,
     };

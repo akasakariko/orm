@@ -20,6 +20,24 @@ test('the module-scope client has the static members and connect', () => {
   >();
 });
 
+test('the connection has the static members, the runtime-bound members, close and dispose', () => {
+  expectTypeOf<keyof Connection>().toEqualTypeOf<
+    | 'sql'
+    | 'raw'
+    | 'enums'
+    | 'nativeEnums'
+    | 'context'
+    | 'contract'
+    | 'stack'
+    | 'orm'
+    | 'runtime'
+    | 'transaction'
+    | 'prepare'
+    | 'close'
+    | typeof Symbol.asyncDispose
+  >();
+});
+
 test('the connection is not a Runtime', () => {
   expectTypeOf<Connection>().not.toMatchTypeOf<Runtime>();
   expectTypeOf<Extract<keyof Connection, 'query' | 'execute'>>().toBeNever();
