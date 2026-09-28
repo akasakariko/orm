@@ -7,7 +7,7 @@ changes:
       matches:
         - '[''"]@prisma/orm-postgres/serverless[''"]'
   - id: serverless-client-orm-and-transaction
-    summary: "Optional: the per-request client has orm and transaction(fn), so db.orm replaces a hand-built orm({ runtime, context }) that registers no custom collections, and db.transaction(fn) replaces withTransaction(runtime, fn)."
+    summary: "Optional: the per-request client has orm and transaction(fn), so db.orm replaces a hand-built orm({ runtime, context }) in queries that call no custom collection method, and db.transaction(fn) replaces withTransaction(runtime, fn)."
     detection:
       glob: "**/*.{ts,mts,cts,tsx}"
       matches:
@@ -23,7 +23,7 @@ The module-scope client returned by `postgresServerless(...)` still holds no con
 In each file that imports `@prisma/orm-postgres/serverless`, or that uses the result of its `connect()`:
 
 1. Name the module-scope client `postgres` and the result of `connect()` `db`. With these names, code written for a `postgres()` client (`db.orm...`, `db.transaction(...)`, `db.runtime().query(...)`) works unchanged inside a request. Update every import of the module-scope client to the new name.
-2. Replace `runtime.query(plan)` with `db.runtime().query(plan)`, and `runtime.execute(plan)` with `db.runtime().execute(plan)`. `db.sql` is the same object as `postgres.sql`, so `postgres.sql...` inside a request may be written `db.sql...`.
+2. Replace `runtime.query(plan)` with `db.runtime().query(plan)`, and `runtime.execute(plan)` with `db.runtime().execute(plan)`. The old `connect()` result was a full `Runtime`, so the same applies to its other methods: `runtime.connection()`, `runtime.telemetry()` and `runtime.prepare(...)` become `db.runtime().connection()`, `db.runtime().telemetry()` and `db.runtime().prepare(...)`. `db.prepare(...)` also exists and accepts ORM queries as well as SQL plans. `db.sql` is the same object as `postgres.sql`, so `postgres.sql...` inside a request may be written `db.sql...`.
 3. Anything that took the `connect()` result as a runtime takes `db.runtime()` instead: `withTransaction(runtime, fn)`, `orm({ runtime, context })`, `preparedStatement.query(runtime, params)`, and your own functions whose parameter is typed `Runtime`. A function that needs both the runtime and the context can take the client, typed with `PostgresServerlessConnection<Contract>` from `@prisma/orm-postgres/serverless`, and read `db.runtime()` and `db.context`. That removes any cast of the module-scope `context` to `ExecutionContext<Contract>`.
 
 Before:
@@ -84,7 +84,7 @@ The same applies to scripts that connect through the serverless client, for exam
 
 This change is optional. The per-request client builds an ORM client and runs transactions itself.
 
-- Where a hand-built `orm({ runtime, context })` registers no custom collection classes, use `db.orm` instead. For example, `db.orm.public.Post.where({ userId }).all()`. Keep the hand-built client, built from `db.runtime()` and `db.context`, where your code calls methods defined on custom collection classes.
+- For each query on a hand-built `orm({ runtime, context })` client, check whether it calls a method defined on a custom collection class. If it calls none, run it on `db.orm` instead, even when the hand-built client registers custom collections, and drop the hand-built client from that code path when nothing else there uses it. For example, `const orm = createOrmClient(db); const rows = await orm.Post.where({ userId }).all();` becomes `const rows = await db.orm.public.Post.where({ userId }).all();`. Keep the hand-built client, built from `db.runtime()` and `db.context`, for queries that call custom collection methods, such as `orm.User.newestFirst()`.
 - Replace `withTransaction(runtime, async (tx) => ...)` with `db.transaction(async (tx) => ...)`. `tx` has the same `execute` and `query` as before, plus `tx.sql`, `tx.orm`, `tx.enums` and `tx.nativeEnums`. Remove the `withTransaction` import when nothing else uses it.
 
 Before:

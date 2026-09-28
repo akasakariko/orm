@@ -20,11 +20,14 @@ export default {
 
     if (url.pathname === '/sql/users') {
       const limit = parseLimit(url.searchParams.get('limit'), 10);
-      const plan = db.sql.public.user
-        .select('id', 'email', 'displayName', 'kind', 'createdAt')
-        .limit(limit)
-        .build();
-      const rows = await db.runtime().query(plan);
+      const rows = await db
+        .runtime()
+        .query(
+          db.sql.public.user
+            .select('id', 'email', 'displayName', 'kind', 'createdAt')
+            .limit(limit)
+            .build(),
+        );
       return Response.json({ ok: true, route: 'sql/users', count: rows.length, rows });
     }
 
