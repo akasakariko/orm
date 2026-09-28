@@ -6,12 +6,13 @@ This example mirrors `examples/prisma-8-demo` (the Node demo), minus pgvector �
 
 ## What this example demonstrates
 
-- **Module-scope `db`** built once per isolate via `postgresServerless<Contract>({ contractJson, middleware })`.
-- **Per-request `runtime`** via `await using runtime = await db.connect({ url: env.HYPERDRIVE.connectionString })`. The `[Symbol.asyncDispose]` ensures the underlying `pg.Client` is `end()`-ed when the `fetch` handler returns.
-- **All three query surfaces** through `Runtime`:
-  - SQL DSL: `runtime.query(db.sql.public.user.select(...).build())`
-  - ORM client: `createOrmClient(runtime).User.newestFirst().limit(10).all()`
-  - Transactions: `withTransaction(runtime, async (tx) => …)`
+- **Module-scope `postgres`** built once per isolate via `postgresServerless<Contract>({ contractJson, middleware })`. It holds no connection.
+- **Per-request `db`** via `await using db = await postgres.connect({ url: env.HYPERDRIVE.connectionString })`. `db` has the members of a `postgres()` client except `connect`. The `[Symbol.asyncDispose]` ensures the underlying `pg.Client` is `end()`-ed when the `fetch` handler returns.
+- **All query surfaces** through the per-request `db`:
+  - SQL DSL: `db.runtime().query(db.sql.public.user.select(...).build())`
+  - Default ORM client: `db.orm.public.Post.where({ userId }).limit(10).all()`
+  - Custom ORM client with collection classes: `createOrmClient(db).User.newestFirst().limit(10).all()`, built from `db.runtime()` and `db.context`
+  - Transactions: `db.transaction(async (tx) => …)`
 - **Cursor early-break** over a streamed result set (`for await … break`), exercising the cursor path that `postgresServerless` enables by default.
 
 Routes implemented in [`src/worker.ts`](src/worker.ts):
@@ -20,10 +21,10 @@ Routes implemented in [`src/worker.ts`](src/worker.ts):
 | ------------------- | ----------------- | -------------------------------------------------------- |
 | `GET /health`       | —                 | DB-free liveness check                                   |
 | `GET /sql/users`    | SQL DSL           | `db.sql.public.user.select(...).limit(?)`                       |
-| `GET /orm/users`    | ORM client        | `User.newestFirst().limit(?)`                             |
-| `GET /orm/posts`    | ORM client        | `Post.forUser(?).orderBy(...).limit(?)`                   |
-| `GET /tx/commit`    | `withTransaction` | INSERT post + UPDATE user atomically                     |
-| `GET /tx/rollback`  | `withTransaction` | Throws inside the body; verifies ROLLBACK propagates     |
+| `GET /orm/users`    | Custom ORM client | `User.newestFirst().limit(?)`                             |
+| `GET /orm/posts`    | `db.orm`          | `Post.where({ userId }).orderBy(...).limit(?)`            |
+| `GET /tx/commit`    | `db.transaction`  | INSERT post + UPDATE user atomically                     |
+| `GET /tx/rollback`  | `db.transaction`  | Throws inside the body; verifies ROLLBACK propagates     |
 | `GET /cursor/large` | Cursor stream     | `for await … break` after N rows; cursor cancels cleanly |
 
 ## Layout
@@ -155,7 +156,7 @@ The M1 audit's "this works in `wrangler dev`" claim was empirically validated ag
 
 ## Known limitations
 
-- **Transaction affinity** — every `withTransaction` body must run on the same `runtime` instance (the per-request one). Crossing `runtime` boundaries inside a transaction body is undefined.
+- **Transaction affinity** — every `db.transaction` body must run its queries through `tx`, on the same per-request `db`. Crossing connection boundaries inside a transaction body is undefined.
 - **Isolate memory** — large result sets bound through cursor by default (`postgresServerless` enables cursor unconditionally). For ORM `findMany`-style operations the result set is materialised; size your `limit(...)` accordingly.
 - **`pg.Pool` not used** — the serverless facade routes through `PostgresDirectDriverImpl` (`pgClient` binding kind). No connection pooling within the isolate; that's Hyperdrive's job in production.
 - **Production `id`** — the committed `wrangler.jsonc` has a zero-stuffed Hyperdrive `id`. Deploy will fail until a real id is wired in (M4).

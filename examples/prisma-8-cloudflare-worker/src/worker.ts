@@ -1,9 +1,8 @@
 import 'temporal-polyfill/full/global';
 
-import { withTransaction } from '@prisma/orm-postgres/family-runtime';
 import { Client } from 'pg';
 import { createOrmClient } from './orm-client/client';
-import { db } from './prisma/db';
+import { postgres } from './prisma/db';
 
 interface Env {
   HYPERDRIVE: { connectionString: string };
@@ -17,22 +16,21 @@ export default {
       return Response.json({ ok: true });
     }
 
-    await using runtime = await db.connect({ url: env.HYPERDRIVE.connectionString });
+    await using db = await postgres.connect({ url: env.HYPERDRIVE.connectionString });
 
     if (url.pathname === '/sql/users') {
       const limit = parseLimit(url.searchParams.get('limit'), 10);
-      const rows = await runtime.query(
-        db.sql.public.user
-          .select('id', 'email', 'displayName', 'kind', 'createdAt')
-          .limit(limit)
-          .build(),
-      );
+      const plan = db.sql.public.user
+        .select('id', 'email', 'displayName', 'kind', 'createdAt')
+        .limit(limit)
+        .build();
+      const rows = await db.runtime().query(plan);
       return Response.json({ ok: true, route: 'sql/users', count: rows.length, rows });
     }
 
     if (url.pathname === '/orm/users') {
       const limit = parseLimit(url.searchParams.get('limit'), 10);
-      const orm = createOrmClient(runtime);
+      const orm = createOrmClient(db);
       const rows = await orm.User.newestFirst().limit(limit).all();
       return Response.json({ ok: true, route: 'orm/users', count: rows.length, rows });
     }
@@ -43,8 +41,7 @@ export default {
         return Response.json({ ok: false, error: 'userId required' }, { status: 400 });
       }
       const limit = parseLimit(url.searchParams.get('limit'), 10);
-      const orm = createOrmClient(runtime);
-      const rows = await orm.Post.where({ userId })
+      const rows = await db.orm.public.Post.where({ userId })
         .orderBy((post) => post.createdAt.desc())
         .limit(limit)
         .all();
@@ -57,7 +54,7 @@ export default {
       if (!userId) {
         return Response.json({ ok: false, error: 'userId required' }, { status: 400 });
       }
-      const result = await withTransaction(runtime, async (tx) => {
+      const result = await db.transaction(async (tx) => {
         await tx.execute(
           db.sql.public.post
             .insert([
@@ -82,7 +79,7 @@ export default {
 
     if (url.pathname === '/tx/rollback') {
       try {
-        await withTransaction(runtime, async (tx) => {
+        await db.transaction(async (tx) => {
           await tx.execute(
             db.sql.public.user
               .update({ displayName: 'rolled-back-write' })
@@ -108,7 +105,7 @@ export default {
 
       // Open a side-channel pg.Client to instrument the cursor query via
       // pg_stat_statements (loaded via shared_preload_libraries in
-      // docker-compose / CI). Two-client pattern: the runtime owns the
+      // docker-compose / CI). Two-client pattern: `db` owns the
       // primary connection that runs the SELECT; this observer connection
       // resets stats before and reads them after, so the test can prove
       // that with cursor enabled the server transmitted only ~one batch
@@ -128,7 +125,7 @@ export default {
         // server-side cursor and streams in ~100-row batches; an early
         // `break` only fetches one batch and closes. With cursor disabled
         // the driver buffers all 10_000 rows before the first yield.
-        const iter = runtime.query(
+        const iter = db.runtime().query(
           db.sql.public.post
             .select('id', 'title')
             .orderBy((f) => f.createdAt, { direction: 'asc' })

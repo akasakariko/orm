@@ -6,7 +6,7 @@
  */
 
 import 'temporal-polyfill/full/global';
-import { db } from '../src/prisma/db';
+import { postgres } from '../src/prisma/db';
 import { EXAMPLE_ROOT, HYPERDRIVE_VAR, loadLocalEnv } from './env';
 
 const firstPostDay = Temporal.PlainDate.from('2026-04-10');
@@ -19,9 +19,9 @@ async function main() {
     throw new Error(`Set ${HYPERDRIVE_VAR} in .env (or DATABASE_URL) before running pnpm seed.`);
   }
 
-  await using runtime = await db.connect({ url });
+  await using db = await postgres.connect({ url });
 
-  await runtime.execute(
+  await db.runtime().execute(
     db.sql.public.user
       .insert([
         {
@@ -35,7 +35,7 @@ async function main() {
       .build(),
   );
 
-  await runtime.execute(
+  await db.runtime().execute(
     db.sql.public.user
       .insert([
         {
@@ -49,14 +49,14 @@ async function main() {
       .build(),
   );
 
-  const aliceRows = await runtime.query(
+  const aliceRows = await db.runtime().query(
     db.sql.public.user
       .select('id', 'email')
       .where((f, fns) => fns.eq(f.email, 'alice@example.com'))
       .limit(1)
       .build(),
   );
-  const bobRows = await runtime.query(
+  const bobRows = await db.runtime().query(
     db.sql.public.user
       .select('id', 'email')
       .where((f, fns) => fns.eq(f.email, 'bob@example.com'))
@@ -70,7 +70,7 @@ async function main() {
   }
 
   for (let i = 0; i < 5; i++) {
-    await runtime.execute(
+    await db.runtime().execute(
       db.sql.public.post
         .insert([
           {
@@ -84,7 +84,7 @@ async function main() {
   }
 
   for (let i = 0; i < 3; i++) {
-    await runtime.execute(
+    await db.runtime().execute(
       db.sql.public.post
         .insert([
           {

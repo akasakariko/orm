@@ -41,7 +41,7 @@ describe('worker — postgresServerless against Hyperdrive (local)', () => {
     expect(body.rows.every((row) => row.userId === ALICE)).toBe(true);
   });
 
-  it('withTransaction commits a multi-statement transaction (TC-6, AC-10)', async () => {
+  it('db.transaction commits a multi-statement transaction (TC-6, AC-10)', async () => {
     const res = await get(`/tx/commit?userId=${BOB}&displayName=Bob+the+Builder`);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { ok: boolean; committed?: boolean };
@@ -56,7 +56,7 @@ describe('worker — postgresServerless against Hyperdrive (local)', () => {
     expect(bob?.displayName).toBe('Bob the Builder');
   });
 
-  it('withTransaction rolls back on thrown error (AC-10/AC-11)', async () => {
+  it('db.transaction rolls back on thrown error (AC-10/AC-11)', async () => {
     const before = (await (await get('/sql/users?limit=10')).json()) as {
       rows: { email: string; displayName: string }[];
     };
