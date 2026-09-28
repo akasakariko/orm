@@ -187,10 +187,10 @@ describe('postgresServerless connect()', () => {
 describe('queries on a connection use its own pg.Client', () => {
   async function openTwo() {
     const serverless = fixtureClient();
-    const used = await serverless.connect({ url });
-    const usedClient = lastClient();
     const idle = await serverless.connect({ url });
     const idleClient = lastClient();
+    const used = await serverless.connect({ url });
+    const usedClient = lastClient();
     return { used, usedClient, idle, idleClient };
   }
 
