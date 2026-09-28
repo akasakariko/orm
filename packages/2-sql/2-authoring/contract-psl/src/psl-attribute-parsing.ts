@@ -1,4 +1,4 @@
-import type { PslSpan, ResolvedAttribute } from '@internal/psl-parser';
+import type { FieldSymbol, ModelSymbol, PslSpan, ResolvedAttribute } from '@internal/psl-parser';
 import {
   type DiagnosticSource,
   type PslDiagnosticCollector,
@@ -9,8 +9,25 @@ import type {
   FieldAttributeAst,
   ModelAttributeAst,
 } from '@internal/psl-parser/syntax';
+import { StringLiteralExprAst } from '@internal/psl-parser/syntax';
+import { defaultTableName } from './default-table-name';
 
 export { parseQuotedStringLiteral };
+
+function mappedName(attributes: readonly ResolvedAttribute[] | undefined): string | undefined {
+  const args = getAttribute(attributes, 'map')?.args;
+  const argument = args?.length === 1 ? args[0] : undefined;
+  const expression = argument?.kind === 'positional' ? argument.expression : undefined;
+  return expression instanceof StringLiteralExprAst ? expression.value() || undefined : undefined;
+}
+
+export function modelStorageName(model: ModelSymbol): string {
+  return mappedName(model.attributes) ?? defaultTableName(model.name);
+}
+
+export function fieldStorageName(field: FieldSymbol): string {
+  return mappedName(field.attributes) ?? field.name;
+}
 
 export function getAttribute<TNode extends FieldAttributeAst | ModelAttributeAst>(
   attributes: readonly ResolvedAttribute<TNode>[] | undefined,
@@ -58,9 +75,8 @@ export function getPositionalArgumentEntry(
 }
 
 export function mapFieldNamesToColumns(input: {
-  readonly modelName: string;
+  readonly model: ModelSymbol;
   readonly fieldNames: readonly string[];
-  readonly mapping: { readonly fieldColumns: Map<string, string> };
   readonly source: DiagnosticSource;
   readonly diagnostics: PslDiagnosticCollector;
   readonly span: PslSpan;
@@ -68,16 +84,16 @@ export function mapFieldNamesToColumns(input: {
 }): readonly string[] | undefined {
   const columns: string[] = [];
   for (const fieldName of input.fieldNames) {
-    const columnName = input.mapping.fieldColumns.get(fieldName);
-    if (!columnName) {
+    const field = input.model.fields[fieldName];
+    if (field === undefined) {
       input.diagnostics.push({
         code: 'PSL_INVALID_ATTRIBUTE_ARGUMENT',
-        message: `${input.entityLabel} references unknown field "${input.modelName}.${fieldName}"`,
+        message: `${input.entityLabel} references unknown field "${input.model.name}.${fieldName}"`,
         ...input.source.at(input.span),
       });
       return undefined;
     }
-    columns.push(columnName);
+    columns.push(fieldStorageName(field));
   }
   return columns;
 }

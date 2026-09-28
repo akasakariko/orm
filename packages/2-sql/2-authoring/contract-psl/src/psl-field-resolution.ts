@@ -34,14 +34,16 @@ import { blindCast } from '@internal/utils/casts';
 import { ifDefined } from '@internal/utils/defined';
 import { InternalError } from '@internal/utils/internal-error';
 import type { DataTypeSupport } from './data-type-default';
-import { defaultTableName } from './default-table-name';
-import { formatDbAttributeMigrationMessage, getAttribute } from './psl-attribute-parsing';
+import {
+  fieldStorageName,
+  formatDbAttributeMigrationMessage,
+  getAttribute,
+} from './psl-attribute-parsing';
 import type { ColumnDescriptor, FieldPresetContributions } from './psl-column-resolution';
 import { lowerDefaultForField, resolveFieldTypeDescriptor } from './psl-column-resolution';
 import {
   fieldSpecContext,
   interpretFieldAttribute,
-  interpretModelAttribute,
   sqlAttributeSpecs,
 } from './sql-attribute-specs';
 
@@ -128,13 +130,6 @@ export type ResolvedField = {
   readonly scalarCodecId?: string;
 };
 
-export type ModelNameMapping = {
-  readonly model: ModelSymbol;
-  readonly tableName: string;
-  readonly namespaceId: string | undefined;
-  readonly fieldColumns: Map<string, string>;
-};
-
 /**
  * A PSL model paired with its resolved namespace coordinate (undefined when
  * the target leaves the model late-bound). Two models may share a bare name
@@ -156,7 +151,6 @@ export function modelCoordinateKey(namespaceId: string, modelName: string): stri
 export interface CollectResolvedFieldsInput {
   readonly model: ModelSymbol;
   readonly symbolTable: SymbolTable;
-  readonly mapping: ModelNameMapping;
   readonly enumTypeDescriptors: Map<string, ColumnDescriptor>;
   readonly namedTypeDescriptors: Map<string, ColumnDescriptor>;
   readonly composedExtensions: Set<string>;
@@ -415,7 +409,6 @@ export function collectResolvedFields(input: CollectResolvedFieldsInput): Resolv
   const {
     model,
     symbolTable,
-    mapping,
     enumTypeDescriptors,
     namedTypeDescriptors,
     composedExtensions,
@@ -455,6 +448,19 @@ export function collectResolvedFields(input: CollectResolvedFieldsInput): Resolv
     declaredControlPolicy === undefined || declaredControlPolicy === 'managed';
 
   for (const field of Object.values(model.fields)) {
+    const mapNode = getAttribute(field.attributes, 'map')?.node;
+    if (mapNode !== undefined) {
+      interpretFieldAttribute({
+        node: mapNode,
+        symbols: symbolTable,
+        spec: sqlAttributeSpecs.field.map(),
+        model,
+        field,
+        sources,
+        binder,
+        diagnostics,
+      });
+    }
     const source = diagnosticSource(sources, field.node.syntax);
     const fieldTypeReference = typeReferenceNode(field);
     const fieldTypeResolution =
@@ -654,7 +660,7 @@ export function collectResolvedFields(input: CollectResolvedFieldsInput): Resolv
       });
       continue;
     }
-    const mappedColumnName = mapping.fieldColumns.get(field.name) ?? field.name;
+    const mappedColumnName = fieldStorageName(field);
     const { idAttribute, uniqueAttribute, idName, uniqueName } = extractFieldConstraintNames({
       symbolTable: input.symbolTable,
       model,
@@ -736,55 +742,4 @@ export function collectResolvedFields(input: CollectResolvedFieldsInput): Resolv
   }
 
   return resolvedFields;
-}
-
-export function buildModelMappings(
-  symbols: SymbolTable,
-  modelEntries: readonly ModelNamespaceEntry[],
-  defaultNamespaceId: string,
-  diagnostics: PslDiagnosticCollector,
-  sources: PslSources,
-  binder: Binder,
-): Map<string, ModelNameMapping> {
-  const result = new Map<string, ModelNameMapping>();
-  for (const { model, namespaceId } of modelEntries) {
-    const mapNode = getAttribute(model.attributes, 'map')?.node;
-    const tableName =
-      mapNode === undefined
-        ? defaultTableName(model.name)
-        : (interpretModelAttribute({
-            node: mapNode,
-            symbols,
-            spec: sqlAttributeSpecs.model.map(),
-            model,
-            sources,
-            binder,
-            diagnostics,
-          })?.name ?? defaultTableName(model.name));
-    const fieldColumns = new Map<string, string>();
-    for (const field of Object.values(model.fields)) {
-      const fieldMapNode = getAttribute(field.attributes, 'map')?.node;
-      const columnName =
-        fieldMapNode === undefined
-          ? field.name
-          : (interpretFieldAttribute({
-              node: fieldMapNode,
-              symbols,
-              spec: sqlAttributeSpecs.field.map(),
-              model,
-              field,
-              binder,
-              sources,
-              diagnostics,
-            })?.name ?? field.name);
-      fieldColumns.set(field.name, columnName);
-    }
-    result.set(modelCoordinateKey(namespaceId ?? defaultNamespaceId, model.name), {
-      model,
-      tableName,
-      namespaceId,
-      fieldColumns,
-    });
-  }
-  return result;
 }
