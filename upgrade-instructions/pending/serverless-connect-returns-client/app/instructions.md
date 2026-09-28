@@ -22,9 +22,10 @@ The module-scope client returned by `postgresServerless(...)` still holds no con
 
 In each file that imports `@prisma/orm-postgres/serverless`, or that uses the result of its `connect()`:
 
-1. Name the module-scope client `postgres` and the result of `connect()` `db`. With these names, code written for a `postgres()` client (`db.orm...`, `db.transaction(...)`, `db.runtime().query(...)`) works unchanged inside a request. Update every import of the module-scope client to the new name.
+1. Name the module-scope client `postgres` and the result of `connect()` `db`. With these names, code written for a `postgres()` client (`db.orm...`, `db.transaction(...)`, `db.runtime().query(...)`) works unchanged inside a request, as long as every query is awaited before the `await using` scope ends: the connection closes when the scope ends, so a query returned from the scope without `await` fails with a "not connected" error. Update every import of the module-scope client to the new name.
 2. Replace `runtime.query(plan)` with `db.runtime().query(plan)`, and `runtime.execute(plan)` with `db.runtime().execute(plan)`. The old `connect()` result was a full `Runtime`, so the same applies to its other methods: `runtime.connection()`, `runtime.telemetry()` and `runtime.prepare(...)` become `db.runtime().connection()`, `db.runtime().telemetry()` and `db.runtime().prepare(...)`. `db.prepare(...)` also exists and accepts ORM queries as well as SQL plans. `db.sql` is the same object as `postgres.sql`, so `postgres.sql...` inside a request may be written `db.sql...`.
-3. Anything that took the `connect()` result as a runtime takes `db.runtime()` instead: `withTransaction(runtime, fn)`, `orm({ runtime, context })`, `preparedStatement.query(runtime, params)`, and your own functions whose parameter is typed `Runtime`. A function that needs both the runtime and the context can take the client, typed with `PostgresServerlessConnection<Contract>` from `@prisma/orm-postgres/serverless`, and read `db.runtime()` and `db.context`. That removes any cast of the module-scope `context` to `ExecutionContext<Contract>`.
+3. Anything that took the `connect()` result as a runtime takes `db.runtime()` instead: `withTransaction(runtime, fn)`, `orm({ runtime, context })`, `preparedStatement.query(runtime, params)`, and your own functions whose parameter is typed `Runtime`. A function that needs both the runtime and the context can take the client, typed with `PostgresServerlessConnection<Contract>` from `@prisma/orm-postgres/serverless`, and read `db.runtime()` and `db.context`. That removes any cast of the module-scope `context` to `ExecutionContext<Contract>`, and the `Runtime`, `ExecutionContext` and module-scope client imports that only served it.
+4. Update comments that describe the old shape. A comment that names the old variable or says the runtime is acquired through `db.connect(...)` now names `postgres.connect({ url })` and the per-request `db`. For example, the doc comment on the module-scope client says that it is built once per isolate, holds no connection, and that each request gets its own client from `postgres.connect({ url })`; it sits directly above the `postgresServerless(...)` declaration, so move it there if it sits above another declaration. Update any README that describes the old shape in the same way.
 
 Before:
 
@@ -55,10 +56,16 @@ After:
 
 ```ts
 // src/prisma/db.ts
+/**
+ * Module-scope client, built once per isolate. It holds no connection. Each request gets its own client from `postgres.connect({ url })`.
+ */
 export const postgres = postgresServerless<Contract>({ contractJson });
 
 // src/orm-client/client.ts
+import { orm } from '@prisma/orm-postgres/orm-client';
 import type { PostgresServerlessConnection } from '@prisma/orm-postgres/serverless';
+import type { Contract } from '../prisma/contract.d';
+import { UserCollection } from './collections';
 
 export function createOrmClient(
   db: Pick<PostgresServerlessConnection<Contract>, 'runtime' | 'context'>,
