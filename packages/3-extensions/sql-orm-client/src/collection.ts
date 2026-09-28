@@ -92,6 +92,7 @@ import {
   hasNestedMutationCallbacks,
   withMutationScope,
 } from './mutation-executor';
+import { assertCursorCompatibleOrder, assertDistinctOnCompatibleOrder } from './order-by-guards';
 import { ormError } from './orm-errors';
 import type { PreparedCollection } from './prepared-collection';
 import {
@@ -155,13 +156,13 @@ function applyCreateDefaults(
   for (const row of rows) {
     const applied = ctx.context.applyMutationDefaults({
       op: 'create',
-      table: tableName,
+      entry: tableName,
       namespace: namespaceId,
       values: row,
       defaultValueCache,
     });
     for (const def of applied) {
-      row[def.column] = def.value;
+      row[def.field] = def.value;
     }
   }
 }
@@ -174,12 +175,12 @@ function applyUpdateDefaults(
 ): void {
   const applied = ctx.context.applyMutationDefaults({
     op: 'update',
-    table: tableName,
+    entry: tableName,
     namespace: namespaceId,
     values,
   });
   for (const def of applied) {
-    values[def.column] = def.value;
+    values[def.field] = def.value;
   }
 }
 
@@ -1023,6 +1024,7 @@ class CollectionImpl<
       ? Partial<Record<keyof DefaultModelRow<TContract, ModelName> & string, unknown>>
       : never,
   ): Collection<TContract, ModelName, Row, State> {
+    assertCursorCompatibleOrder(this.state.orderBy);
     const mappedCursor = mapCursorValuesToColumns(
       this.contract,
       this.namespaceId,
@@ -1098,6 +1100,7 @@ class CollectionImpl<
       : never
   ): Collection<TContract, ModelName, Row, State> {
     assertDistinctOnCapability(this.contract, 'distinctOn');
+    assertDistinctOnCompatibleOrder(this.state.orderBy, fields.length);
     const distinctOnFields = mapFieldsToColumns(
       this.contract,
       this.namespaceId,
@@ -1643,7 +1646,11 @@ class CollectionImpl<
       );
     }
 
-    this.#assertNotMtiVariant(method);
+    if (method === 'createAll()') {
+      this.#assertConflictSkipNotOnMtiVariant(method);
+    } else {
+      this.#assertNotMtiVariant(method);
+    }
 
     const conflictOn = options.conflictOn ?? [];
     assertInsertConflictSkipCapability(this.contract, method, conflictOn.length > 0);
@@ -1660,21 +1667,29 @@ class CollectionImpl<
   }
 
   #assertNotMtiVariant(method: string): void {
-    const mtiCtx = this.#resolveMtiCreateContext();
-    if (mtiCtx) {
-      throw ormError(
-        'ORM.OPERATION_UNSUPPORTED',
-        `${method} is not supported for MTI variant "${this.state.variantName}" on model "${this.modelName}". Use createAll() instead.`,
-        {
-          meta: {
-            method,
-            model: this.modelName,
-            variant: this.state.variantName,
-            reason: 'mti-variant',
-          },
-        },
-      );
-    }
+    this.#refuseOnMtiVariant(
+      method,
+      `${method} is not supported for MTI variant "${this.state.variantName}" on model "${this.modelName}". Use createAll() instead.`,
+    );
+  }
+
+  #assertConflictSkipNotOnMtiVariant(method: string): void {
+    this.#refuseOnMtiVariant(
+      method,
+      `The onConflict option is not supported on variant "${this.state.variantName}" of model "${this.modelName}" because the variant is stored in its own table. Call createAll(rows) without the option; a duplicate row then makes the call fail.`,
+    );
+  }
+
+  #refuseOnMtiVariant(method: string, message: string): void {
+    if (!this.#resolveMtiCreateContext()) return;
+    throw ormError('ORM.OPERATION_UNSUPPORTED', message, {
+      meta: {
+        method,
+        model: this.modelName,
+        variant: this.state.variantName,
+        reason: 'mti-variant',
+      },
+    });
   }
 
   #resolveMtiCreateContext(): MtiCreateContext | null {

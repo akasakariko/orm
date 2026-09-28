@@ -18,6 +18,7 @@ export type { SqlControlFamilyInstance } from '../core/control-instance';
 export type {
   SqlControlTargetDescriptor,
   SqlDescribedContractSpace,
+  SqlPslBuildContext,
 } from '../core/control-target-descriptor';
 export type {
   ContractToSchemaIROptions,
@@ -96,12 +97,8 @@ export {
   sqlDefaultLiteralTagEntry,
 } from '../core/sql-default-literal-tag';
 export {
-  TIMESTAMP_NOW_GENERATOR_ID,
-  temporalAuthoringPresets,
-  temporalCodecPreset,
   temporalCodecPresetWithPrecision,
   temporalStringAuthoringPresets,
-  timestampNowControlDescriptor,
 } from '../core/timestamp-now-generator';
 
 export default new SqlFamilyDescriptor();

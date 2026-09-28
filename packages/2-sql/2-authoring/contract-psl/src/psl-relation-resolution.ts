@@ -1,4 +1,5 @@
 import type { AuthoringContributions } from '@internal/framework-components/authoring';
+import { checkUncomposedNamespace } from '@internal/framework-components/authoring';
 import type { Binder, FieldSymbol, ModelSymbol, SymbolTable } from '@internal/psl-parser';
 import {
   diagnosticSource,
@@ -8,6 +9,7 @@ import {
 import {
   fkRelationPairKey,
   type InvalidFkPairing,
+  reportUncomposedNamespace,
   requiredOneToOneBackrelationDiagnostic,
 } from '@internal/psl-parser/interpret';
 import type { PslSources } from '@internal/psl-parser/syntax';
@@ -17,7 +19,6 @@ import { assertDefined, invariant } from '@internal/utils/assertions';
 import { ifDefined } from '@internal/utils/defined';
 
 import { getAttribute } from './psl-attribute-parsing';
-import { checkUncomposedNamespace, reportUncomposedNamespace } from './psl-column-resolution';
 import {
   interpretFieldAttribute,
   type SqlRelationOutput,
@@ -371,10 +372,11 @@ function relationsForModel<K>(
 
 /**
  * A set of columns is unique when it exactly matches one of the model's unique
- * column sets — its primary key or any single- or multi-column `@unique` /
- * `@@unique` constraint. Set equality (not subset) is required: a singular
- * back-relation means at most one child per parent, which a unique constraint
- * covering exactly the FK columns guarantees.
+ * column sets — its primary key, any single- or multi-column `@unique` /
+ * `@@unique` constraint, or a unique index over plain columns with no `where`
+ * clause. Set equality (not subset) is required: a singular back-relation means
+ * at most one child per parent, which a unique constraint covering exactly the
+ * FK columns guarantees.
  */
 function fkColumnsAreUnique(
   localColumns: readonly string[],

@@ -98,7 +98,7 @@ export function useDevDatabase(options?: {
 
   afterAll(async () => {
     await close();
-  });
+  }, timeouts.spinUpPpgDev);
 
   return {
     get connectionString() {
@@ -290,6 +290,14 @@ export async function runContractInfer(
   options?: RunCommandOptions,
 ): Promise<EngineCommandResult> {
   return runOnEngine(ctx, ['contract', 'infer', ...extraArgs], options);
+}
+
+export async function runContractPrint(
+  ctx: JourneyContext,
+  extraArgs: readonly string[] = [],
+  options?: RunCommandOptions,
+): Promise<EngineCommandResult> {
+  return runOnEngine(ctx, ['contract', 'print', ...extraArgs], options);
 }
 
 export async function runDbInit(

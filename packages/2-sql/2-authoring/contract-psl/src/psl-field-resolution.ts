@@ -3,6 +3,7 @@ import type {
   ExecutionMutationDefaultPhases,
 } from '@internal/contract/types';
 import type { AuthoringContributions } from '@internal/framework-components/authoring';
+import { checkUncomposedNamespace } from '@internal/framework-components/authoring';
 import type { CodecLookup } from '@internal/framework-components/codec';
 import type { CapabilityMatrix } from '@internal/framework-components/components';
 import type {
@@ -22,6 +23,7 @@ import {
   type PslDiagnosticCollector,
   typeReferenceNode,
 } from '@internal/psl-parser';
+import { uncomposedNamespaceDiagnostic } from '@internal/psl-parser/interpret';
 import type { PslSources } from '@internal/psl-parser/syntax';
 import type {
   AuthoredColumnDefault,
@@ -35,12 +37,7 @@ import type { DataTypeSupport } from './data-type-default';
 import { defaultTableName } from './default-table-name';
 import { formatDbAttributeMigrationMessage, getAttribute } from './psl-attribute-parsing';
 import type { ColumnDescriptor, FieldPresetContributions } from './psl-column-resolution';
-import {
-  checkUncomposedNamespace,
-  lowerDefaultForField,
-  resolveFieldTypeDescriptor,
-  uncomposedNamespaceDiagnostic,
-} from './psl-column-resolution';
+import { lowerDefaultForField, resolveFieldTypeDescriptor } from './psl-column-resolution';
 import {
   fieldSpecContext,
   interpretFieldAttribute,

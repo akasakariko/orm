@@ -1,11 +1,15 @@
-import type { ColumnDefault, ColumnDefaultLiteralInputValue } from '@internal/contract/types';
-import type {
-  DefaultMappingOptions,
-  PslPrinterOptions,
-  PslTypeMap,
-  RelationField,
-} from '@internal/family-sql/psl-infer';
-import { mapDefault, toFieldName, toModelName } from '@internal/family-sql/psl-infer';
+import {
+  type ColumnDefault,
+  type ColumnDefaultLiteralInputValue,
+  isColumnDefault,
+} from '@internal/contract/types';
+import {
+  type DefaultMappingOptions,
+  mapDefault,
+  type PslTypeMap,
+} from '@internal/family-sql/psl-build';
+import type { PslPrinterOptions, RelationField } from '@internal/family-sql/psl-infer';
+import { toFieldName, toModelName } from '@internal/family-sql/psl-infer';
 import type {
   PslAttributeArgument,
   PslField,
@@ -23,28 +27,24 @@ import {
 import type { SqlColumnIR, SqlTableIR } from '@internal/sql-schema-ir/types';
 import { ifDefined } from '@internal/utils/defined';
 import { postgresRenderCheckExpressions } from '../check-expressions';
-import { dataTypeForPrintedType, printedDefaultReadsBack } from './infer-default-codec';
-import { buildDanglingForeignKeyWarning, type DanglingForeignKeyInfo } from './infer-foreign-keys';
 import {
   buildCheckAttribute,
   buildIndexAttribute,
   buildModelConstraintAttribute,
-} from './infer-index-attributes';
-import {
-  createUniqueFieldName,
-  resolveColumnFieldName,
-  type TableColumnFieldNameMap,
-} from './infer-names';
+} from '../psl-build/index-attributes';
 import {
   buildAttribute,
   buildMapAttribute,
   buildSimpleConstraintFieldAttribute,
   namedArg,
-  parseColumnDefault,
   parseDefaultAttributeString,
   positionalArg,
   SYNTHETIC_SPAN,
-} from './psl-literals';
+} from '../psl-build/psl-literals';
+import { createUniqueFieldName } from '../psl-build/unique-name';
+import { dataTypeForInferredType, inferredDefaultReadsBack } from './infer-default-codec';
+import { buildDanglingForeignKeyWarning, type DanglingForeignKeyInfo } from './infer-foreign-keys';
+import { resolveColumnFieldName, type TableColumnFieldNameMap } from './infer-names';
 
 export function buildModel(
   table: SqlTableIR,
@@ -284,11 +284,14 @@ function buildScalarField(
     rawDefaultParser,
     {
       ...defaultMapping,
-      ...ifDefined('columnDataType', dataTypeForPrintedType(resolution.pslType.name, isEnumColumn)),
+      ...ifDefined(
+        'columnDataType',
+        dataTypeForInferredType(resolution.pslType.name, isEnumColumn),
+      ),
       list: column.many === true,
     },
     (value) =>
-      printedDefaultReadsBack(value, resolution.pslType.name, isEnumColumn, column.many === true),
+      inferredDefaultReadsBack(value, resolution.pslType.name, isEnumColumn, column.many === true),
   );
   if (defaultAttribute !== undefined) {
     attributes.push(parseDefaultAttributeString(defaultAttribute));
@@ -470,4 +473,23 @@ export function buildRelationField(
     attributes: attrs,
     span: SYNTHETIC_SPAN,
   };
+}
+
+/**
+ * Resolves a `SqlColumnIR.default` value into a normalized {@link ColumnDefault}.
+ *
+ * `SqlSchemaIR` types the column default as `string` (a raw database default
+ * expression). Some legacy fixtures and tests still pass already-normalized
+ * `ColumnDefault` objects in the same slot, so we accept either shape
+ * defensively at runtime.
+ */
+function parseColumnDefault(
+  value: unknown,
+  nativeType: string | undefined,
+  rawDefaultParser: PslPrinterOptions['parseRawDefault'],
+): ColumnDefault | undefined {
+  if (typeof value === 'string') {
+    return rawDefaultParser ? rawDefaultParser(value, nativeType) : undefined;
+  }
+  return isColumnDefault(value) ? value : undefined;
 }

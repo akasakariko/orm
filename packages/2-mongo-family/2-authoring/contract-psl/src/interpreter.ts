@@ -2,7 +2,7 @@ import type {
   ContractSourceDiagnostic,
   ContractSourceDiagnostics,
 } from '@internal/config/config-types';
-import { computeProfileHash, computeStorageHash } from '@internal/contract/hashing';
+import { buildExecutionSection, computeProfileHash } from '@internal/contract/hashing';
 import {
   type Contract,
   type ContractEnum,
@@ -11,32 +11,34 @@ import {
   type ContractValueObject,
   type CrossReference,
   crossRef,
+  type ExecutionMutationDefault,
+  type ExecutionMutationDefaultPhases,
   type JsonValue,
   type ValueSetRef,
 } from '@internal/contract/types';
 import { type EnumTypeHandle, resolveToOneRelationNullable } from '@internal/contract-authoring';
-import { errorEnumCodecNotInPackStack } from '@internal/errors/control';
 import type {
   AuthoringContributions,
   AuthoringEntityContext,
+  AuthoringTypeNamespace,
 } from '@internal/framework-components/authoring';
 import {
   instantiateAuthoringEntityType,
   isAuthoringEntityTypeDescriptor,
+  isAuthoringTypeConstructorDescriptor,
 } from '@internal/framework-components/authoring';
 import type { CodecLookup } from '@internal/framework-components/codec';
 import type { ControlDefaultRegistries } from '@internal/framework-components/control';
 import { UNBOUND_NAMESPACE_ID } from '@internal/framework-components/ir';
 import {
   applyPolymorphicScopeToMongoIndex,
-  buildMongoNamespace,
+  buildMongoStorage,
+  encodeMongoValueSets,
   type MongoCollectionInput,
   MongoIndex,
   type MongoIndexKeyDirection,
-  MongoStorage,
   type MongoValueSetInput,
 } from '@internal/mongo-contract';
-import { mongoContractCanonicalizationHooks } from '@internal/mongo-contract/canonicalization-hooks';
 import type { CollationOptions } from '@internal/mongo-value/mongodb-types';
 import type {
   AttributeSpecContext,
@@ -55,15 +57,17 @@ import {
   createPslDiagnosticCollector,
   type DiagnosticSource,
   diagnosticSource,
+  mapPslDiagnostics,
   nodePslSpan,
   type PslDiagnostic,
   type PslDiagnosticCollector,
 } from '@internal/psl-parser';
 import {
-  consumeInvalidFkPairing,
+  claimedBlockKeywords,
+  enumMemberAttributeDiagnostics,
   fkRelationPairKey,
   type InvalidFkPairing,
-  requiredOneToOneBackrelationDiagnostic,
+  unsupportedBlockDiagnostic,
 } from '@internal/psl-parser/interpret';
 import type { DocumentAst, PslSources } from '@internal/psl-parser/syntax';
 import { assertDefined } from '@internal/utils/assertions';
@@ -71,6 +75,7 @@ import { blindCast } from '@internal/utils/casts';
 import { ifDefined } from '@internal/utils/defined';
 import { notOk, ok, type Result } from '@internal/utils/result';
 import { deriveJsonSchema, derivePolymorphicJsonSchema } from './derive-json-schema';
+import { type FieldPresetContext, resolveFieldPreset } from './field-presets';
 import {
   createMongoBinder,
   findFieldAttributeNode,
@@ -79,22 +84,12 @@ import {
   interpretModelAttribute,
   mongoAttributeSpecs,
 } from './mongo-attribute-specs';
+import {
+  type MongoBackRelationCandidate,
+  type MongoForeignKeyRelation,
+  pairMongoBackRelations,
+} from './pair-back-relations';
 import { defaultCollectionName, getAttribute } from './psl-helpers';
-
-/**
- * Encode an authored enum value to its codec-encoded JSON form via the codec resolved by id from the
- * contract's codec lookup, so a non-identity `encodeJson` (permitted by the `mongoCodec` factory) is
- * respected. Matches the TS builder's `encodeEnumValue`: the lookup is always threaded in production,
- * and a codecId the lookup cannot resolve is a hard error — the enum uses a codec that is not part of
- * the contract's pack stack.
- */
-function encodeEnumValue(value: unknown, codecId: string, codecLookup: CodecLookup): JsonValue {
-  const codec = codecLookup.get(codecId);
-  if (!codec) {
-    throw errorEnumCodecNotInPackStack({ codecId });
-  }
-  return codec.encodeJson(value);
-}
 
 export interface InterpretPslDocumentToMongoContractInput {
   readonly documents: readonly DocumentAst[];
@@ -105,8 +100,46 @@ export interface InterpretPslDocumentToMongoContractInput {
   readonly codecLookup?: CodecLookup;
   readonly seedDiagnostics?: readonly ContractSourceDiagnostic[];
   readonly authoringContributions?: AuthoringContributions;
+  readonly composedExtensions?: readonly string[];
   /** The target's default codec ids for an `enum` block that omits `@@type`. */
   readonly enumInferenceCodecs?: { readonly text: string; readonly int: string };
+  /** Receives a warning for each field typed with a deprecated scalar name. */
+  readonly reportWarning?: (diagnostic: ContractSourceDiagnostic) => void;
+}
+
+/**
+ * Reports `PSL_DEPRECATED_SCALAR_NAME` at the type of a field whose scalar name is a deprecated alias, naming the replacement. The alias resolves to the same codec, so the contract does not change.
+ */
+function deprecatedScalarWarner(input: {
+  readonly types: AuthoringTypeNamespace | undefined;
+  readonly sources: PslSources;
+  readonly reportWarning: ((diagnostic: ContractSourceDiagnostic) => void) | undefined;
+}): (field: FieldSymbol) => void {
+  const { reportWarning } = input;
+  if (reportWarning === undefined) return () => {};
+  return (field) => {
+    if (field.typeConstructor !== undefined) return;
+    const descriptor = input.types?.[field.typeName];
+    if (
+      descriptor === undefined ||
+      !isAuthoringTypeConstructorDescriptor(descriptor) ||
+      descriptor.deprecated === undefined
+    ) {
+      return;
+    }
+    const typeNode = field.node.typeAnnotation()?.name()?.syntax ?? field.node.syntax;
+    const [warning] = mapPslDiagnostics(
+      [
+        {
+          code: 'PSL_DEPRECATED_SCALAR_NAME',
+          message: `Scalar type "${field.typeName}" is deprecated and will be removed; use "${descriptor.deprecated.replacement}" (stored as BSON ${descriptor.output.nativeType}).`,
+          ...diagnosticSource(input.sources, typeNode).at(),
+        },
+      ],
+      input.sources,
+    );
+    if (warning !== undefined) reportWarning({ ...warning, severity: 'warning' });
+  };
 }
 
 /**
@@ -137,15 +170,6 @@ interface FieldMappings {
 interface MongoModelMetadata {
   readonly collectionName: string;
   readonly fieldMappings: FieldMappings;
-}
-
-interface FkRelation {
-  readonly declaringModel: string;
-  readonly fieldName: string;
-  readonly targetModel: string;
-  readonly relationName?: string;
-  readonly localFields: readonly string[];
-  readonly targetFields: readonly string[];
 }
 
 function relationNullabilityMismatchDiagnostic(
@@ -934,21 +958,88 @@ function resolveFieldCodecId(
   return scalarTypeCodecIds.get(field.typeName);
 }
 
+interface PresetExecutionDefault {
+  readonly modelName: string;
+  readonly field: FieldSymbol;
+  readonly storedField: string;
+  readonly phases: ExecutionMutationDefaultPhases;
+}
+
+/**
+ * Keys each preset's execution defaults by collection and stored field. Rejects presets on variant fields, since a default keyed by collection applies to every document in it, and merges identical defaults that two models declare for the same collection field.
+ */
+function resolvePresetExecutionDefaults(input: {
+  readonly defaults: readonly PresetExecutionDefault[];
+  readonly models: Readonly<Record<string, MongoModelEntry>>;
+  readonly sources: PslSources;
+  readonly diagnostics: PslDiagnosticCollector;
+}): ExecutionMutationDefault[] {
+  const byRef = new Map<
+    string,
+    { readonly owner: PresetExecutionDefault; readonly phasesKey: string }
+  >();
+  const resolved: ExecutionMutationDefault[] = [];
+  for (const preset of input.defaults) {
+    const model = input.models[preset.modelName];
+    if (model === undefined) continue;
+    const collection = model.storage.collection;
+    const call = preset.field.typeConstructor;
+    const presetPath = call?.path.join('.') ?? preset.field.typeName;
+    const at = diagnosticSource(input.sources, preset.field.node.syntax).at(
+      call?.span ?? preset.field.span,
+    );
+    if (model.base !== undefined) {
+      input.diagnostics.push({
+        code: 'PSL_PRESET_ON_VARIANT_FIELD',
+        message: `Preset "${presetPath}" on variant "${preset.modelName}" field "${preset.field.name}": execution defaults apply to every document in collection "${collection}", so declare them on the base model.`,
+        ...at,
+      });
+      continue;
+    }
+    const refKey = JSON.stringify([collection, preset.storedField]);
+    const phasesKey = canonicalJson(preset.phases);
+    const existing = byRef.get(refKey);
+    if (existing === undefined) {
+      byRef.set(refKey, { owner: preset, phasesKey });
+      resolved.push({
+        ref: { namespace: UNBOUND_NAMESPACE_ID, entry: collection, field: preset.storedField },
+        ...preset.phases,
+      });
+      continue;
+    }
+    if (existing.phasesKey !== phasesKey) {
+      input.diagnostics.push({
+        code: 'PSL_PRESET_CONFLICT',
+        message: `Preset "${presetPath}" on "${preset.modelName}.${preset.field.name}" sets different execution defaults than the preset on "${existing.owner.modelName}.${existing.owner.field.name}" for field "${preset.storedField}" of collection "${collection}". Use the same preset on both models.`,
+        ...at,
+      });
+    }
+  }
+  return resolved;
+}
+
+interface ResolvedNonRelationField {
+  readonly field: ContractField;
+  readonly executionDefaults?: ExecutionMutationDefaultPhases;
+}
+
 function resolveNonRelationField(
   field: FieldSymbol,
-  ownerName: string,
+  owner: { readonly name: string; readonly kind: 'model' | 'compositeType' },
   compositeTypeNames: ReadonlySet<string>,
   scalarTypeCodecIds: ReadonlyMap<string, string>,
   codecIdByEnumName: ReadonlyMap<string, string>,
-  sources: PslSources,
-  diagnostics: PslDiagnosticCollector,
-): ContractField | undefined {
+  presetContext: FieldPresetContext,
+  warnDeprecatedScalar: (field: FieldSymbol) => void,
+): ResolvedNonRelationField | undefined {
+  const { sources, diagnostics } = presetContext;
+  const ownerName = owner.name;
   if (compositeTypeNames.has(field.typeName)) {
     const result: ContractField = {
       type: { kind: 'valueObject', name: field.typeName },
       nullable: field.optional,
     };
-    return field.list ? { ...result, many: true } : result;
+    return { field: field.list ? { ...result, many: true } : result };
   }
 
   // If this field's declared type is a known enum name, treat the field as a scalar
@@ -966,12 +1057,28 @@ function resolveNonRelationField(
       nullable: field.optional,
       valueSet,
     };
-    return field.list ? { ...result, many: true } : result;
+    return { field: field.list ? { ...result, many: true } : result };
   }
 
   // Avoid cascading unsupported-type diagnostics after invalid qualification.
   if (field.malformedType) {
     return undefined;
+  }
+
+  const preset = resolveFieldPreset({
+    field,
+    ownerName,
+    ownerKind: owner.kind,
+    context: presetContext,
+  });
+  if (preset.kind === 'invalid') {
+    return undefined;
+  }
+  if (preset.kind === 'preset') {
+    return {
+      field: preset.field,
+      ...ifDefined('executionDefaults', preset.executionDefaults),
+    };
   }
 
   const codecId = resolveFieldCodecId(field, scalarTypeCodecIds);
@@ -984,11 +1091,12 @@ function resolveNonRelationField(
     return undefined;
   }
 
+  warnDeprecatedScalar(field);
   const result: ContractField = {
     type: { kind: 'scalar', codecId },
     nullable: field.optional,
   };
-  return field.list ? { ...result, many: true } : result;
+  return { field: field.list ? { ...result, many: true } : result };
 }
 
 function processEnumDeclarations(input: {
@@ -1024,6 +1132,7 @@ function processEnumDeclarations(input: {
   for (const enumSymbol of input.enumSymbols) {
     const sourceFile = input.sources.sourceFileFor(enumSymbol.node.syntax);
     const decl = enumSymbol.block;
+    input.diagnostics.push(...enumMemberAttributeDiagnostics(enumSymbol, input.sources));
     const handle = instantiateAuthoringEntityType<EnumTypeHandle | undefined>(
       'enum',
       enumDescriptor,
@@ -1052,6 +1161,18 @@ export function interpretPslDocumentToMongoContract(
 ): Result<Contract, ContractSourceDiagnostics> {
   const { symbolTable, sources, scalarTypeCodecIds, codecLookup } = input;
   const diagnostics = createPslDiagnosticCollector(sources);
+  const presetContext: FieldPresetContext = {
+    authoringContributions: input.authoringContributions,
+    composedExtensions: new Set(input.composedExtensions ?? []),
+    sources,
+    diagnostics,
+  };
+  const presetExecutionDefaults: PresetExecutionDefault[] = [];
+  const warnDeprecatedScalar = deprecatedScalarWarner({
+    types: input.authoringContributions?.type,
+    sources,
+    reportWarning: input.reportWarning,
+  });
   const { binder, diagnostics: binderDiagnostics } = createMongoBinder({
     symbolTable,
     sources,
@@ -1099,6 +1220,15 @@ export function interpretPslDocumentToMongoContract(
     });
   }
 
+  const blockKeywords = new Set([
+    'enum',
+    ...claimedBlockKeywords(input.authoringContributions?.pslBlockDescriptors),
+  ]);
+  for (const block of Object.values(topLevel.blocks)) {
+    if (!blockKeywords.has(block.keyword)) {
+      diagnostics.push(unsupportedBlockDiagnostic(block, sources));
+    }
+  }
   const topLevelEnumSymbols = Object.values(topLevel.blocks).filter((b) => b.keyword === 'enum');
 
   const builtEnums = processEnumDeclarations({
@@ -1129,20 +1259,12 @@ export function interpretPslDocumentToMongoContract(
   const models: Record<string, MongoModelEntry> = {};
   const collections: Record<string, Record<string, unknown>> = {};
   const roots: Record<string, CrossReference> = {};
-  const allFkRelations: FkRelation[] = [];
+  const allFkRelations: MongoForeignKeyRelation[] = [];
   const indexSpans = new Map<MongoIndex, PslSpan>();
   const indexSources = new Map<MongoIndex, DiagnosticSource>();
   const modelIndexesByName = new Map<string, readonly MongoIndex[]>();
 
-  interface BackrelationCandidate {
-    readonly modelName: string;
-    readonly fieldName: string;
-    readonly targetModelName: string;
-    readonly relationName?: string;
-    readonly cardinality: '1:1' | '1:N';
-    readonly field: FieldSymbol;
-  }
-  const backrelationCandidates: BackrelationCandidate[] = [];
+  const backrelationCandidates: MongoBackRelationCandidate[] = [];
   const invalidFkPairings: InvalidFkPairing[] = [];
 
   for (const pslModel of allModels) {
@@ -1174,11 +1296,11 @@ export function interpretPslDocumentToMongoContract(
         if (field.list || !(relation?.fields && relation?.references)) {
           backrelationCandidates.push({
             modelName: pslModel.name,
-            fieldName: field.name,
             targetModelName: field.typeName,
             ...ifDefined('relationName', relation?.name),
             cardinality: field.list ? '1:N' : '1:1',
             field,
+            sources,
           });
           continue;
         }
@@ -1218,7 +1340,6 @@ export function interpretPslDocumentToMongoContract(
 
           allFkRelations.push({
             declaringModel: pslModel.name,
-            fieldName: field.name,
             targetModel: field.typeName,
             ...ifDefined('relationName', relation.name),
             localFields: localMapped,
@@ -1230,17 +1351,25 @@ export function interpretPslDocumentToMongoContract(
 
       const resolved = resolveNonRelationField(
         field,
-        pslModel.name,
+        { name: pslModel.name, kind: 'model' },
         compositeTypeNames,
         scalarTypeCodecIds,
         codecIdByEnumName,
-        sources,
-        diagnostics,
+        presetContext,
+        warnDeprecatedScalar,
       );
       if (!resolved) continue;
 
       const mappedName = fieldMappings.pslNameToMapped.get(field.name) ?? field.name;
-      fields[mappedName] = resolved;
+      fields[mappedName] = resolved.field;
+      if (resolved.executionDefaults) {
+        presetExecutionDefaults.push({
+          modelName: pslModel.name,
+          field,
+          storedField: mappedName,
+          phases: resolved.executionDefaults,
+        });
+      }
     }
 
     const isVariantModel = pslModel.attributes.some((attr) => attr.name === 'base');
@@ -1321,83 +1450,28 @@ export function interpretPslDocumentToMongoContract(
     for (const field of Object.values(compositeType.fields)) {
       const resolved = resolveNonRelationField(
         field,
-        compositeType.name,
+        { name: compositeType.name, kind: 'compositeType' },
         compositeTypeNames,
         scalarTypeCodecIds,
         codecIdByEnumName,
-        sources,
-        diagnostics,
+        presetContext,
+        warnDeprecatedScalar,
       );
       if (!resolved) continue;
-      fields[field.name] = resolved;
+      fields[field.name] = resolved.field;
     }
     valueObjects[compositeType.name] = { fields };
   }
 
-  const fkRelationsByPair = new Map<string, FkRelation[]>();
-  for (const fk of allFkRelations) {
-    const key = fkRelationPairKey(fk.declaringModel, fk.targetModel);
-    const existing = fkRelationsByPair.get(key);
-    if (existing) {
-      existing.push(fk);
-    } else {
-      fkRelationsByPair.set(key, [fk]);
-    }
-  }
-
-  for (const candidate of backrelationCandidates) {
-    const candidateSource = diagnosticSource(sources, candidate.field.node.syntax);
-    const pairKey = fkRelationPairKey(candidate.targetModelName, candidate.modelName);
-    const pairMatches = fkRelationsByPair.get(pairKey) ?? [];
-    const matches = candidate.relationName
-      ? pairMatches.filter((r) => r.relationName === candidate.relationName)
-      : [...pairMatches];
-
-    if (matches.length === 0) {
-      if (consumeInvalidFkPairing(candidate, pairKey, invalidFkPairings)) {
-        continue;
-      }
-      diagnostics.push({
-        code: 'PSL_ORPHANED_BACKRELATION',
-        message: `Backrelation list field "${candidate.modelName}.${candidate.fieldName}" has no matching FK-side relation on model "${candidate.targetModelName}". Add @relation(fields: [...], references: [...]) on the FK-side relation or use an explicit join model for many-to-many.`,
-        ...candidateSource.at(candidate.field.span),
-      });
-      continue;
-    }
-    if (matches.length > 1) {
-      diagnostics.push({
-        code: 'PSL_AMBIGUOUS_BACKRELATION',
-        message: `Backrelation list field "${candidate.modelName}.${candidate.fieldName}" matches multiple FK-side relations on model "${candidate.targetModelName}". Add @relation("...") to both sides to disambiguate.`,
-        ...candidateSource.at(candidate.field.span),
-      });
-      continue;
-    }
-
-    const fk = matches[0];
-    if (!fk) continue;
-    const modelEntry = models[candidate.modelName];
-    if (!modelEntry) continue;
-    if (candidate.cardinality === '1:1' && !candidate.field.optional) {
-      diagnostics.push(
-        requiredOneToOneBackrelationDiagnostic({
-          modelName: candidate.modelName,
-          field: candidate.field,
-          targetModelName: candidate.targetModelName,
-          sources,
-          recordNoun: 'document',
-        }),
-      );
-    }
-    modelEntry.relations[candidate.fieldName] = {
-      to: mongoCrossRef(candidate.targetModelName),
-      ...(candidate.cardinality === '1:N'
-        ? { cardinality: '1:N' as const }
-        : { cardinality: '1:1' as const, nullable: true }),
-      on: {
-        localFields: fk.targetFields,
-        targetFields: fk.localFields,
-      },
-    };
+  const paired = pairMongoBackRelations({
+    foreignKeys: allFkRelations,
+    candidates: backrelationCandidates,
+    invalidFkPairings,
+  });
+  diagnostics.push(...paired.diagnostics);
+  for (const { modelName, fieldName, relation } of paired.relations) {
+    const modelEntry = models[modelName];
+    if (modelEntry) modelEntry.relations[fieldName] = relation;
   }
 
   const { discriminatorDeclarations, baseDeclarations } = collectPolymorphismDeclarations(
@@ -1420,6 +1494,12 @@ export function interpretPslDocumentToMongoContract(
     modelMetadataByName,
     indexSources,
   });
+  const executionDefaults = resolvePresetExecutionDefaults({
+    defaults: presetExecutionDefaults,
+    models: polyResult.models,
+    sources,
+    diagnostics,
+  });
 
   if (
     diagnostics.length > 0 ||
@@ -1439,26 +1519,26 @@ export function interpretPslDocumentToMongoContract(
   const resolvedModels = polyResult.models;
   const resolvedCollections = polyResult.collections;
 
+  const target = 'mongo';
+  const targetFamily = 'mongo';
+  const execution = buildExecutionSection({
+    target,
+    targetFamily,
+    defaults: executionDefaults,
+  });
+
   // The storage value set is the source of truth for both the emit typing and the validator's
   // `enum` keyword. Built once, ahead of validator derivation, from each enum's codec-encoded member
   // values (mirroring SQL's build-contract). Encoding needs the codec lookup; production always
   // threads it (the CLI control stack supplies it), so its absence when enums exist is a wiring bug,
   // not a runtime input to tolerate.
-  const storageValueSets: Record<string, MongoValueSetInput> = {};
-  const enumEntries = Object.entries(builtEnums);
-  if (enumEntries.length > 0) {
+  let storageValueSets: Record<string, MongoValueSetInput> = {};
+  if (Object.keys(builtEnums).length > 0) {
     assertDefined(
       codecLookup,
       'Mongo PSL interpretation requires a codec lookup to encode enum values',
     );
-    for (const [enumName, builtEnum] of enumEntries) {
-      storageValueSets[enumName] = {
-        kind: 'valueSet',
-        values: builtEnum.members.map((m) =>
-          encodeEnumValue(m.value, builtEnum.codecId, codecLookup),
-        ),
-      };
-    }
+    storageValueSets = encodeMongoValueSets(builtEnums, codecLookup);
   }
 
   for (const [, modelEntry] of Object.entries(resolvedModels)) {
@@ -1493,8 +1573,6 @@ export function interpretPslDocumentToMongoContract(
     }
   }
 
-  const target = 'mongo';
-  const targetFamily = 'mongo';
   const collectionInputs: Record<string, MongoCollectionInput> = {};
   for (const [name, coll] of Object.entries(resolvedCollections)) {
     const raw: Record<string, unknown> = {};
@@ -1506,47 +1584,10 @@ export function interpretPslDocumentToMongoContract(
       'arktype-validated JSON shapes satisfy MongoCollectionInput by construction'
     >(raw);
   }
-  const hasValueSets = Object.keys(storageValueSets).length > 0;
-
-  const unboundNamespace = buildMongoNamespace({
-    id: UNBOUND_NAMESPACE_ID,
-    entries: {
-      collection: collectionInputs,
-      ...(hasValueSets ? { valueSet: storageValueSets } : {}),
-    },
+  const storage: Contract['storage'] = buildMongoStorage({
+    collections: collectionInputs,
+    valueSets: storageValueSets,
   });
-  // Hash the constructed (normalized) entries, not the raw input literals —
-  // persisted storageHash values were computed over the constructed form.
-  const storageWithoutHash = {
-    namespaces: {
-      [UNBOUND_NAMESPACE_ID]: {
-        id: UNBOUND_NAMESPACE_ID,
-        entries: {
-          collection: unboundNamespace.entries.collection,
-          ...(unboundNamespace.entries.valueSet !== undefined
-            ? { valueSet: unboundNamespace.entries.valueSet }
-            : {}),
-        },
-      },
-    },
-  };
-  const storageHash = computeStorageHash({
-    target,
-    targetFamily,
-    storage: storageWithoutHash,
-    ...mongoContractCanonicalizationHooks,
-  });
-  const storage = blindCast<
-    Contract['storage'],
-    'MongoStorage is the Mongo family concrete storage class constructed here; it structurally satisfies the Contract storage slot.'
-  >(
-    new MongoStorage({
-      storageHash,
-      namespaces: {
-        [UNBOUND_NAMESPACE_ID]: unboundNamespace,
-      },
-    }),
-  );
   const capabilities: Record<string, Record<string, boolean>> = {};
 
   const hasEnums = Object.keys(builtEnums).length > 0;
@@ -1569,5 +1610,6 @@ export function interpretPslDocumentToMongoContract(
     capabilities,
     profileHash: computeProfileHash({ target, targetFamily, capabilities }),
     meta: {},
+    ...ifDefined('execution', execution),
   });
 }

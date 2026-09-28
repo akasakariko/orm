@@ -565,6 +565,26 @@ Patterns to **catch** the F-family modes live in [`grep-library.md`](./grep-libr
 
 **Reference incident.** 2026-08, public-npm-surface switchover: the operator cancelled the switchover-slice dispatch; the privatization flip it carried (64 manifests → `private: true`) was silently dropped from the consolidated delivery PR, which merged with every internal package still publishable. Caught by the operator post-merge; fixed in an emergency PR plus a two-direction publishability lint so the class cannot recur.
 
+### F34. The in-loop reviewer passes SQL lowering by reading it; a review that runs the code finds injection and invalid SQL
+
+**Symptom.** Every dispatch in a slice closes SATISFIED, and a separate review after PR-open finds defects that any execution would have shown: a string interpolated into SQL text with no runtime check, a query shape that the database rejects outright, a guard stricter than the database's own rule. The in-loop reviewer read the diff and the tests and reasoned that they were right. The second review typed a hostile value into the public API and looked at the rendered SQL, compiled the suspect query shape and ran it on PGlite, and read the database documentation for the rule the guard claimed to enforce.
+
+**Detection signal.**
+
+- The reviewer brief says the implementer's gate run is trusted and the reviewer's `pnpm` budget is zero, and the dispatch produces code that renders or rewrites SQL, builds a query plan from user input, or validates user input.
+- The reviewer's round note says "would fail if removed" about a test without saying which input was tried.
+- A renderer or builder takes a string from the public API and interpolates it (`toUpperCase()`, template literal) with the type system as the only check.
+- A guard names a database rule ("DISTINCT ON requires ...") and the round note does not cite where that rule comes from.
+- A new expression kind is accepted on a path (ORDER BY, WHERE, projection) and no test compiles it through every wrapper that path has (dedup wrappers, include remaps, aggregate inputs, cursor keysets).
+
+**Mitigation.**
+
+- A reviewer of code that renders SQL, lowers an AST, or validates user input has a non-zero execution budget by default. The brief names three probes the reviewer must run, not read: (1) push a hostile value through every public entry point that reaches SQL text and show the rendered SQL rejects or escapes it; (2) compile the new construct through every wrapper on its path and run the result on PGlite or SQLite; (3) for any guard that cites a database rule, quote the rule from the database documentation and test both the allowed and the refused side.
+- "Trust the implementer's gates" means the reviewer does not re-run typecheck, lint and the package suite. It never means the reviewer does not execute anything. Reading is for design judgment; correctness of lowering is empirical (sibling of F13 and F15).
+- Run the two-pass local review (`drive-code-review`, architect and principal-engineer lenses, with execution allowed) before opening the PR, not after. Its findings then land as dispatches in the same build loop instead of a fix round on a public PR.
+
+**Reference incident.** prisma/orm#30402 (2026-09-25, relation ordering in the SQL ORM client). Six dispatches and eight review rounds closed SATISFIED. The reviewer brief said the implementer's gates were green and the reviewer's `pnpm` budget was zero. A `drive-code-review` pass after PR-open, with execution allowed, found: `nulls: 'last, (SELECT 1/0)'` rendered as `NULLS LAST, (SELECT 1/0)` on both adapters, and the sql-builder's `direction` had lost its normalisation on the same path; `aggregate()` over `distinct()` rows with a relation order emitted `ORDER BY (SELECT ... WHERE ... = "posts"."user_id")` over a derived table that no longer had `user_id`, which PGlite rejected; and the `distinctOn` guard refused trailing expression orders that Postgres accepts and that worked before the PR. All three were fixed in a second round (`57e5c01b81`, `e9c626fede`, `459774dfd1`).
+
 ## Slice-shape scope traps
 
 Patterns that have produced scope creep in the past — catch these at triage or slice-spec time, not at execution time.
@@ -678,3 +698,13 @@ Per-repo stop conditions beyond the canonical ones:
 - The reviewer checks each fake's possible outcomes against the real implementation, not only the code under test.
 
 **Reference incident.** prisma/orm#30291 (2026-09-24): a scripted prompt returned `false` from `consent`, and a test showed that a declined consent printed the command to remove packages init had installed. The engine's `consent` with a token never returns `false`: it returns `true` or throws `CLI.CONSENT_REQUIRED`, a token mismatch, or `CLI.PROMPT_CANCELLED`. Real users never saw the command. An independent review found it; the fix attached the command to whatever error follows the install.
+
+### F34. Stacked PR fails upgrade coverage because the fragment lives on its base branch
+
+**Symptom.** A stacked PR's local `pnpm check:upgrade-coverage --mode pr` passes, but CI's `Lint` job fails it with `[per-pr-declaration] ... requires a new declaration relative to --prev`.
+
+**Root cause.** CI passes `--prev <PR base sha>`; for a stacked PR that is the previous slice's head, which already carries the earlier fragment. Fragments inherited from the base do not count, so the stacked PR needs its own declaration even for an additive change. Locally the default base is `origin/main`, where the inherited fragment masks the gap.
+
+**Fix.** Run the check with `--prev $(git rev-parse <base-branch>)` in every dispatch gate on a stacked branch, and add a `changes: []` declaration for additive changes under `packages/3-extensions/**` or `examples/**`.
+
+**Reference incident.** 2026-09-24, the Mongo defaults project's slice 5 PR (#30405, stacked on #30403): the facade widening `contract: string | ContractConfig` was additive, the slice 3 fragment sat on the base branch, and CI refused the PR until a `changes: []` extension declaration was added. Same project, slice 3 (#30403): CI `Lint` failed on biome `no-bare-cast` and `noBannedTypes` because the dispatch briefs never listed the always-run per-package `pnpm lint` from `dod.md`; the F14 rule was already on file, the orchestrator did not thread it into the briefs.

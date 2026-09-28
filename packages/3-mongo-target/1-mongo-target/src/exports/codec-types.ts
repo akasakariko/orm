@@ -1,3 +1,12 @@
+import type { JsonValue } from '@internal/contract/types';
+import type { BsonInputValue, BsonValue } from '@internal/mongo-value';
+
+export type { BsonInputValue, BsonScalar, BsonValue } from '@internal/mongo-value';
+
+export type Vector<N extends number = number> = readonly number[] & {
+  readonly __vectorLength?: N;
+};
+
 export type CodecTypes = {
   readonly 'mongo/objectId@1': { readonly input: string; readonly output: string };
   readonly 'mongo/string@1': { readonly input: string; readonly output: string };
@@ -9,4 +18,9 @@ export type CodecTypes = {
     readonly input: readonly number[];
     readonly output: readonly number[];
   };
+  readonly 'mongo/int64@1': { readonly input: bigint; readonly output: bigint };
+  readonly 'mongo/decimal128@1': { readonly input: string; readonly output: string };
+  readonly 'mongo/binary@1': { readonly input: Uint8Array; readonly output: Uint8Array };
+  readonly 'mongo/json@1': { readonly input: JsonValue; readonly output: JsonValue };
+  readonly 'mongo/bson@1': { readonly input: BsonInputValue; readonly output: BsonValue };
 };
