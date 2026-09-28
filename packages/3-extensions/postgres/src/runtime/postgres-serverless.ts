@@ -1,12 +1,12 @@
 import postgresAdapter from '@internal/adapter-postgres/runtime';
+import type { NamespacedEnums } from '@internal/contract/enum-accessor';
 import type { Contract } from '@internal/contract/types';
 import postgresDriver, {
   type PostgresDriverCreateOptions,
   suppressIdleConnectionErrors,
 } from '@internal/driver-postgres/runtime';
 import { instantiateExecutionStack } from '@internal/framework-components/execution';
-import { sql as sqlBuilder } from '@internal/sql-builder/runtime';
-import type { Db } from '@internal/sql-builder/types';
+import type { Db, RawLane } from '@internal/sql-builder/types';
 import type { SqlStorage } from '@internal/sql-contract/types';
 import type {
   ExecutionContext,
@@ -23,17 +23,32 @@ import { ifDefined } from '@internal/utils/defined';
 import { InternalError } from '@internal/utils/internal-error';
 import { Client } from 'pg';
 import { postgresError } from '../errors';
-import type { PostgresTargetId } from './postgres';
+import { buildPostgresStaticContext } from '../static/postgres-static';
+import type { NamespacedNativeEnums } from './native-enums';
+import {
+  buildPostgresQueryMembers,
+  type PostgresClient,
+  type PostgresQueryMembers,
+  type PostgresTargetId,
+} from './postgres';
 import { PostgresRuntimeImpl } from './postgres-runtime';
 
 export type PostgresServerlessCursorOptions = NonNullable<PostgresDriverCreateOptions['cursor']>;
 
+export type PostgresServerlessConnection<TContract extends Contract<SqlStorage>> = Omit<
+  PostgresClient<TContract>,
+  'connect'
+>;
+
 export interface PostgresServerlessClient<TContract extends Contract<SqlStorage>> {
   readonly sql: Db<TContract>;
+  readonly raw: RawLane<TContract>;
+  readonly enums: NamespacedEnums<TContract>;
+  readonly nativeEnums: NamespacedNativeEnums<TContract>;
   readonly context: ExecutionContext<TContract>;
   readonly stack: SqlExecutionStackWithDriver<PostgresTargetId>;
   readonly contract: TContract;
-  connect(binding: { readonly url: string }): Promise<Runtime & AsyncDisposable>;
+  connect(binding: { readonly url: string }): Promise<PostgresServerlessConnection<TContract>>;
 }
 
 export interface PostgresServerlessOptionsBase {
@@ -90,25 +105,28 @@ function validateConnectionString(url: string): string {
   return trimmed;
 }
 
+function closedConnectionError() {
+  return postgresError('DRIVER.NOT_CONNECTED', 'Postgres connection is closed', {
+    why: 'close() was called on this connection, or the await using scope that held it has ended.',
+    fix: 'Call connect({ url }) again to open a new connection.',
+    meta: { extension: 'postgres' },
+  });
+}
+
 /**
- * Per-request Postgres facade for serverless / edge runtimes (Cloudflare Workers + Hyperdrive,
- * AWS Lambda, Vercel, Deno Deploy, Bun edge, etc.).
+ * Postgres client for serverless and edge runtimes (Cloudflare Workers + Hyperdrive, AWS Lambda, Vercel, Deno Deploy).
  *
- * Construction shape mirrors the Node `postgres()` factory but the returned client deliberately
- * omits `orm`, `runtime()`, and `transaction()`. Closure-cached convenience surfaces are unsafe
- * across `fetch` invocations: stale connections after isolate idle, concurrent-query races on a
- * shared `pg.Client`, no clean shutdown. Per-request callers acquire a fresh `Runtime` via
- * `db.connect({ url })` and dispose it via `await using` on scope exit.
+ * The returned client holds no connection and exposes the static query surfaces. Each `connect({ url })` opens one fresh `pg.Client` and returns a per-request client with the members of a `postgres()` client except `connect`. Close it with `await using` or `close()`.
  *
  * @example
  * ```ts
- * const db = postgresServerless<Contract>({ contractJson });
+ * const postgres = postgresServerless<Contract>({ contractJson });
  *
  * export default {
  *   async fetch(_req: Request, env: Env): Promise<Response> {
- *     await using runtime = await db.connect({ url: env.HYPERDRIVE.connectionString });
- *     const rows = await runtime.query(db.sql.from(t).select(...).build());
- *     return Response.json(rows);
+ *     await using db = await postgres.connect({ url: env.HYPERDRIVE.connectionString });
+ *     const users = await db.orm.public.User.all();
+ *     return Response.json(users);
  *   },
  * };
  * ```
@@ -130,18 +148,55 @@ export default function postgresServerless<TContract extends Contract<SqlStorage
     extensions: options.extensions ?? [],
   });
 
-  const context = createExecutionContext({
+  const context = createExecutionContext<TContract, PostgresTargetId>({
     contract,
     stack,
+    driver: postgresDriver,
   });
-
-  const sql: Db<TContract> = sqlBuilder<TContract>({
+  const rawCodecInferer = stack.adapter.rawCodecInferer;
+  const { sql, raw, enums, nativeEnums } = buildPostgresStaticContext<TContract>(
     context,
-    rawCodecInferer: stack.adapter.rawCodecInferer,
-  });
+    rawCodecInferer,
+  );
+
+  const openConnection = (runtime: Runtime): PostgresServerlessConnection<TContract> => {
+    let closing: Promise<void> | undefined;
+    const close = (): Promise<void> => {
+      closing ??= runtime.close();
+      return closing;
+    };
+    const queryMembers: PostgresQueryMembers<TContract> = buildPostgresQueryMembers<TContract>({
+      context,
+      rawCodecInferer,
+      enums,
+      nativeEnums,
+      getRuntime: () => {
+        if (closing !== undefined) {
+          throw closedConnectionError();
+        }
+        return runtime;
+      },
+    });
+
+    return {
+      sql,
+      raw,
+      enums,
+      nativeEnums,
+      context,
+      contract,
+      stack,
+      ...queryMembers,
+      close,
+      [Symbol.asyncDispose]: close,
+    };
+  };
 
   return {
     sql,
+    raw,
+    enums,
+    nativeEnums,
     context,
     stack,
     contract,
@@ -182,17 +237,7 @@ export default function postgresServerless<TContract extends Contract<SqlStorage
         throw err;
       }
 
-      Object.defineProperty(runtime, Symbol.asyncDispose, {
-        value: () => runtime.close(),
-        configurable: true,
-        writable: false,
-        enumerable: false,
-      });
-
-      return blindCast<
-        Runtime & AsyncDisposable,
-        'Symbol.asyncDispose is defined on the runtime before returning'
-      >(runtime);
+      return openConnection(runtime);
     },
   };
 }

@@ -1,5 +1,6 @@
 export type {
   PostgresServerlessClient,
+  PostgresServerlessConnection,
   PostgresServerlessCursorOptions,
   PostgresServerlessOptions,
   PostgresServerlessOptionsBase,

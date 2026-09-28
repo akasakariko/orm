@@ -7,7 +7,7 @@ import { sql as sqlBuilder } from '@internal/sql-builder/runtime';
 import type { Db, RawLane } from '@internal/sql-builder/types';
 import type { ExtractCodecTypes, SqlStorage } from '@internal/sql-contract/types';
 import { orm as ormBuilder, type PreparedFrom, prepareQuery } from '@internal/sql-orm-client';
-import type { CodecTypesBase } from '@internal/sql-relational-core/expression';
+import type { CodecTypesBase, RawCodecInferer } from '@internal/sql-relational-core/expression';
 import type { Preparable, SqlQueryPlan } from '@internal/sql-relational-core/plan';
 import type {
   BindSiteParams,
@@ -152,6 +152,93 @@ function toRuntimeBinding<TContract extends Contract<SqlStorage>>(
   } as const;
 }
 
+export type PostgresQueryMembers<TContract extends Contract<SqlStorage>> = Pick<
+  PostgresClient<TContract>,
+  'orm' | 'runtime' | 'transaction' | 'prepare'
+>;
+
+export interface PostgresQueryMembersOptions<TContract extends Contract<SqlStorage>> {
+  readonly context: ExecutionContext<TContract>;
+  readonly rawCodecInferer: RawCodecInferer;
+  readonly enums: NamespacedEnums<TContract>;
+  readonly nativeEnums: NamespacedNativeEnums<TContract>;
+  readonly getRuntime: () => Runtime;
+}
+
+export function buildPostgresQueryMembers<TContract extends Contract<SqlStorage>>(
+  options: PostgresQueryMembersOptions<TContract>,
+): PostgresQueryMembers<TContract> {
+  const { context, rawCodecInferer, enums, nativeEnums, getRuntime } = options;
+
+  const orm: OrmClient<TContract> = ormBuilder({
+    runtime: {
+      query(plan) {
+        return getRuntime().query(plan);
+      },
+      execute(plan) {
+        return getRuntime().execute(plan);
+      },
+      connection() {
+        return getRuntime().connection();
+      },
+    },
+    context,
+  });
+
+  function prepare<
+    D extends Declaration<CT>,
+    Q extends SqlQueryPlan | Preparable<unknown, unknown>,
+    CT extends CodecTypesBase = ExtractCodecTypes<TContract>,
+  >(
+    declaration: D,
+    callback: (params: BindSiteParams<D>) => Q,
+  ): Promise<PreparedFrom<ParamsFromDeclaration<D, CT>, Q>> {
+    return prepareQuery<D, Q, CT>(getRuntime(), declaration, callback);
+  }
+
+  return {
+    orm,
+
+    runtime() {
+      return getRuntime();
+    },
+
+    prepare,
+
+    transaction<R>(fn: (tx: PostgresTransactionContext<TContract>) => PromiseLike<R>): Promise<R> {
+      return withTransaction(getRuntime(), (txCtx) => {
+        const txSql: Db<TContract> = sqlBuilder<TContract>({
+          context,
+          rawCodecInferer,
+        });
+
+        const txOrm: OrmClient<TContract> = ormBuilder({
+          runtime: {
+            query(plan) {
+              return txCtx.query(plan);
+            },
+            execute(plan) {
+              return txCtx.execute(plan);
+            },
+          },
+          context,
+        });
+
+        // Use `txCtx` as the prototype instead of spreading it so that live
+        // accessors (notably the `invalidated` getter, which reads a closure
+        // variable in `withTransaction`) remain wired to the original object.
+        // Spreading would evaluate the getter once and freeze its value.
+        const tx: PostgresTransactionContext<TContract> = Object.assign(
+          castAs<TransactionContext>(Object.create(txCtx)),
+          { sql: txSql, orm: txOrm, enums, nativeEnums },
+        );
+
+        return fn(tx);
+      });
+    },
+  };
+}
+
 /**
  * Creates a lazy Postgres client from either `contractJson` or a TypeScript-authored `contract`.
  * Static query surfaces are available immediately, while `runtime()` instantiates the driver/pool on first call.
@@ -268,35 +355,17 @@ export default function postgres<TContract extends Contract<SqlStorage>>(
     return runtimeInstance;
   };
 
-  const orm: OrmClient<TContract> = ormBuilder({
-    runtime: {
-      query(plan) {
-        return getRuntime().query(plan);
-      },
-      execute(plan) {
-        return getRuntime().execute(plan);
-      },
-      connection() {
-        return getRuntime().connection();
-      },
-    },
+  const queryMembers = buildPostgresQueryMembers<TContract>({
     context,
+    rawCodecInferer: stack.adapter.rawCodecInferer,
+    enums,
+    nativeEnums,
+    getRuntime,
   });
-
-  function prepare<
-    D extends Declaration<CT>,
-    Q extends SqlQueryPlan | Preparable<unknown, unknown>,
-    CT extends CodecTypesBase = ExtractCodecTypes<TContract>,
-  >(
-    declaration: D,
-    callback: (params: BindSiteParams<D>) => Q,
-  ): Promise<PreparedFrom<ParamsFromDeclaration<D, CT>, Q>> {
-    return prepareQuery<D, Q, CT>(getRuntime(), declaration, callback);
-  }
 
   return {
     sql,
-    orm,
+    ...queryMembers,
     enums,
     nativeEnums,
     raw: rawSqlTag,
@@ -339,45 +408,6 @@ export default function postgres<TContract extends Contract<SqlStorage>>(
 
       await connectDriver(binding);
       return runtime;
-    },
-
-    runtime() {
-      return getRuntime();
-    },
-
-    prepare,
-
-    transaction<R>(fn: (tx: PostgresTransactionContext<TContract>) => PromiseLike<R>): Promise<R> {
-      return withTransaction(getRuntime(), (txCtx) => {
-        const rawCodecInferer = stack.adapter.rawCodecInferer;
-        const txSql: Db<TContract> = sqlBuilder<TContract>({
-          context,
-          rawCodecInferer,
-        });
-
-        const txOrm: OrmClient<TContract> = ormBuilder({
-          runtime: {
-            query(plan) {
-              return txCtx.query(plan);
-            },
-            execute(plan) {
-              return txCtx.execute(plan);
-            },
-          },
-          context,
-        });
-
-        // Use `txCtx` as the prototype instead of spreading it so that live
-        // accessors (notably the `invalidated` getter, which reads a closure
-        // variable in `withTransaction`) remain wired to the original object.
-        // Spreading would evaluate the getter once and freeze its value.
-        const tx: PostgresTransactionContext<TContract> = Object.assign(
-          castAs<TransactionContext>(Object.create(txCtx)),
-          { sql: txSql, orm: txOrm, enums, nativeEnums },
-        );
-
-        return fn(tx);
-      });
     },
 
     async close(): Promise<void> {

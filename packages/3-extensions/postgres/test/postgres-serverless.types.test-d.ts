@@ -8,51 +8,49 @@ import type {
 } from '../src/runtime/postgres';
 import type postgresServerless from '../src/runtime/postgres-serverless';
 import type { PostgresServerlessClient } from '../src/runtime/postgres-serverless';
+import type { Contract as FixtureContract } from './fixtures/generated/contract';
 
 type TestContract = Contract<SqlStorage>;
 type Db = PostgresServerlessClient<TestContract>;
+type Connection = Awaited<ReturnType<Db['connect']>>;
 
-test('exposes only the static authoring surface plus connect()', () => {
-  type Keys = keyof Db;
-  expectTypeOf<Keys>().toEqualTypeOf<'sql' | 'context' | 'stack' | 'contract' | 'connect'>();
+test('the module-scope client has the static members and connect', () => {
+  expectTypeOf<keyof Db>().toEqualTypeOf<
+    'sql' | 'raw' | 'enums' | 'nativeEnums' | 'context' | 'contract' | 'stack' | 'connect'
+  >();
 });
 
-test('does not expose orm', () => {
-  type HasOrm = 'orm' extends keyof Db ? true : false;
-  expectTypeOf<HasOrm>().toEqualTypeOf<false>();
-
-  const db = {} as Db;
-  // @ts-expect-error db.orm is intentionally absent on the serverless facade
-  void db.orm;
+test('the module-scope client has no connection-bound members', () => {
+  expectTypeOf<
+    Extract<keyof Db, 'orm' | 'transaction' | 'prepare' | 'runtime' | 'close'>
+  >().toBeNever();
 });
 
-test('does not expose runtime() helper', () => {
-  type HasRuntime = 'runtime' extends keyof Db ? true : false;
-  expectTypeOf<HasRuntime>().toEqualTypeOf<false>();
-
-  const db = {} as Db;
-  // @ts-expect-error db.runtime is intentionally absent on the serverless facade
-  void db.runtime;
+test('the connection is not a Runtime', () => {
+  expectTypeOf<Connection>().not.toMatchTypeOf<Runtime>();
+  expectTypeOf<Extract<keyof Connection, 'query' | 'execute'>>().toBeNever();
 });
 
-test('does not expose transaction()', () => {
-  type HasTransaction = 'transaction' extends keyof Db ? true : false;
-  expectTypeOf<HasTransaction>().toEqualTypeOf<false>();
-
-  const db = {} as Db;
-  // @ts-expect-error db.transaction is intentionally absent on the serverless facade
-  void db.transaction;
+test('the connection exposes its runtime through runtime()', () => {
+  expectTypeOf<ReturnType<Connection['runtime']>>().toEqualTypeOf<Runtime>();
 });
 
-test('connect() returns Promise<Runtime & AsyncDisposable>', () => {
-  const db = {} as Db;
-  expectTypeOf(db.connect).parameter(0).toEqualTypeOf<{ readonly url: string }>();
-  expectTypeOf<Awaited<ReturnType<Db['connect']>>>().toMatchTypeOf<Runtime>();
-  expectTypeOf<Awaited<ReturnType<Db['connect']>>>().toMatchTypeOf<AsyncDisposable>();
+test('the connection types orm and the transaction context from the contract', async () => {
+  const db = {} as Awaited<ReturnType<PostgresServerlessClient<FixtureContract>['connect']>>;
+
+  expectTypeOf(db.orm.public).not.toBeAny();
+  expectTypeOf(db.orm.public.User).toHaveProperty('all');
+
+  await db.transaction(async (tx) => {
+    expectTypeOf(tx).not.toBeAny();
+    expectTypeOf(tx.orm.public).not.toBeAny();
+    expectTypeOf(tx.orm.public.User).toHaveProperty('all');
+  });
 });
 
 test('connect() rejects bindings other than { url }', () => {
   const db = {} as Db;
+  expectTypeOf(db.connect).parameter(0).toEqualTypeOf<{ readonly url: string }>();
   // @ts-expect-error binding is restricted to { url }; pg/binding shapes are not accepted
   void db.connect({ pg: {} as unknown });
   // @ts-expect-error binding is restricted to { url }; binding shape is not accepted
