@@ -100,6 +100,51 @@ namespace auth {
     });
   });
 
+  it('pairs backrelations within each namespace when both model names are shared', () => {
+    const shared = ['public', 'auth']
+      .map(
+        (namespace) => `namespace ${namespace} {
+  model User {
+    id Int @id
+    memberships Membership[]
+    @@map("${namespace}_users")
+  }
+  model Membership {
+    id Int @id
+    userId Int
+    user User @relation(fields: [userId], references: [id])
+    @@map("${namespace}_memberships")
+  }
+}`,
+      )
+      .join('\n');
+    const result = interpretPslDocumentToSqlContract({
+      ...baseInput,
+      ...symbolTableInputFromParseArgs({ schema: shared, sourceId: 'schema.prisma' }),
+    });
+    expect(result.ok ? [] : result.failure.diagnostics).toEqual([]);
+    if (!result.ok) throw new Error(result.failure.summary);
+
+    for (const namespace of ['public', 'auth']) {
+      const models = modelsOf(result.value, namespace);
+      expect(models?.['User']?.relations).toEqual({
+        memberships: {
+          cardinality: '1:N',
+          to: { namespace, model: 'Membership' },
+          on: { localFields: ['id'], targetFields: ['userId'] },
+        },
+      });
+      expect(models?.['Membership']?.relations).toEqual({
+        user: {
+          cardinality: 'N:1',
+          nullable: false,
+          to: { namespace, model: 'User' },
+          on: { localFields: ['userId'], targetFields: ['id'] },
+        },
+      });
+    }
+  });
+
   it('matches each backrelation to the FK side in its own namespace', () => {
     const contract = interpret();
 
