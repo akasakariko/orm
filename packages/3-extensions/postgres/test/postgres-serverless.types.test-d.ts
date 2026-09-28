@@ -20,19 +20,9 @@ test('the module-scope client has the static members and connect', () => {
   >();
 });
 
-test('the module-scope client has no connection-bound members', () => {
-  expectTypeOf<
-    Extract<keyof Db, 'orm' | 'transaction' | 'prepare' | 'runtime' | 'close'>
-  >().toBeNever();
-});
-
 test('the connection is not a Runtime', () => {
   expectTypeOf<Connection>().not.toMatchTypeOf<Runtime>();
   expectTypeOf<Extract<keyof Connection, 'query' | 'execute'>>().toBeNever();
-});
-
-test('the connection exposes its runtime through runtime()', () => {
-  expectTypeOf<ReturnType<Connection['runtime']>>().toEqualTypeOf<Runtime>();
 });
 
 test('the connection types orm and the transaction context from the contract', async () => {

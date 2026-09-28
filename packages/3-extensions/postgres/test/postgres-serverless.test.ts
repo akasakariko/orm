@@ -2,7 +2,7 @@ import type { SqlStorage } from '@internal/sql-contract/types';
 import { validateSqlContractFully } from '@internal/sql-contract/validators';
 import type { SqlMiddleware } from '@internal/sql-runtime';
 import { createContract } from '@repo/test-utils';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import type { Contract } from './fixtures/generated/contract';
 import fixtureContractJson from './fixtures/generated/contract.json' with { type: 'json' };
 
@@ -72,15 +72,6 @@ function statementsOf(client: RecordedClient): string[] {
   return client.query.mock.calls.map(([request]) =>
     typeof request === 'string' ? request : JSON.stringify(request),
   );
-}
-
-async function failureOf(action: () => unknown): Promise<unknown> {
-  try {
-    await action();
-  } catch (error) {
-    return error;
-  }
-  throw new Error('expected the action to fail');
 }
 
 const closedConnectionError = {
@@ -186,9 +177,9 @@ describe('postgresServerless connect()', () => {
   it('rejects an empty URL without opening a pg.Client', async () => {
     const serverless = postgresServerless({ contract });
 
-    const error = await failureOf(() => serverless.connect({ url: '   ' }));
-
-    expect(error).toMatchObject({ code: 'RUNTIME.BINDING_INVALID' });
+    await expect(serverless.connect({ url: '   ' })).rejects.toMatchObject({
+      code: 'RUNTIME.BINDING_INVALID',
+    });
     expect(recorded.clients).toHaveLength(0);
   });
 });
@@ -261,29 +252,29 @@ describe('a closed connection', () => {
   it('db.runtime() fails with DRIVER.NOT_CONNECTED', async () => {
     const db = await closedConnection();
 
-    expect(await failureOf(() => db.runtime())).toMatchObject(closedConnectionError);
+    expect(() => db.runtime()).toThrow(expect.objectContaining(closedConnectionError));
   });
 
   it('an ORM read fails with DRIVER.NOT_CONNECTED', async () => {
     const db = await closedConnection();
 
-    expect(await failureOf(() => db.orm.public.User.first())).toMatchObject(closedConnectionError);
+    await expect(db.orm.public.User.first()).rejects.toMatchObject(closedConnectionError);
   });
 
   it('db.transaction() fails with DRIVER.NOT_CONNECTED', async () => {
     const db = await closedConnection();
 
-    expect(await failureOf(() => db.transaction(async () => undefined))).toMatchObject(
-      closedConnectionError,
+    expect(() => db.transaction(async () => undefined)).toThrow(
+      expect.objectContaining(closedConnectionError),
     );
   });
 
   it('db.prepare() fails with DRIVER.NOT_CONNECTED', async () => {
     const db = await closedConnection();
 
-    expect(
-      await failureOf(() => db.prepare({}, () => db.sql.public.users.select('id').build())),
-    ).toMatchObject(closedConnectionError);
+    expect(() => db.prepare({}, () => db.sql.public.users.select('id').build())).toThrow(
+      expect.objectContaining(closedConnectionError),
+    );
   });
 });
 
@@ -362,11 +353,11 @@ describe('postgresServerless options', () => {
     const driverDescriptor = serverless.stack.driver;
     if (!driverDescriptor) throw new Error('the serverless stack has no driver');
     const createDriver = vi.spyOn(driverDescriptor, 'create');
+    onTestFinished(() => createDriver.mockRestore());
 
     const db = await serverless.connect({ url });
 
     expect(createDriver).toHaveBeenCalledWith({ cursor });
-    createDriver.mockRestore();
     await db.close();
   });
 });
