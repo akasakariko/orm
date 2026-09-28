@@ -13,7 +13,8 @@ This skill covers the **runtime entry point** — `db.ts` — and how to compose
 - User wants to switch between the Postgres, SQLite, and Mongo façades.
 - User wants to wrap operations in `db.transaction(...)` (Postgres and SQLite).
 - User is running a one-off script (`tsx my-script.ts`, Node CLI, CI task) and the process won't exit after queries finish, or they need script teardown (`db.close()`, `await using`).
-- User mentions: *db.ts, postgres(), mongo(), middleware, lints, budgets, cache, query log, slow query, DATABASE_URL, .env, connection pool, poolOptions, dev vs prod, transactions, read replicas, multi-database, script won't exit, hangs, db.close, db.end, close connection, pool.end, await using*.
+- User is deploying to a per-request runtime (Cloudflare Workers + Hyperdrive, AWS Lambda, Vercel Edge, Deno Deploy, Bun edge) and needs `postgresServerless()` with `postgres.connect({ url })` per request.
+- User mentions: *db.ts, postgres(), mongo(), middleware, lints, budgets, cache, query log, slow query, DATABASE_URL, .env, connection pool, poolOptions, dev vs prod, transactions, read replicas, multi-database, script won't exit, hangs, db.close, db.end, close connection, pool.end, await using, serverless, edge, Cloudflare Workers, Hyperdrive, postgresServerless, connect per request*.
 
 ## When Not to Use
 
@@ -63,7 +64,7 @@ The Mongo façade has the same construction shape — `import mongo from '@inter
 
 ## Workflow — Running as a script (teardown)
 
-The concept: short scripts that connect, query, then expect the process to exit will **hang on Postgres** because the façade-owned `pg.Pool` keeps Node's event loop alive. The data round-trip succeeds; the script never exits. Call `await db.close()` before the script returns (or use `await using` **at the top of a script module** so teardown runs when the module exits — see the block-scope warning below for why this matters).
+The concept: short scripts that connect, query, then expect the process to exit will **hang on Postgres** because the `pg.Pool` owned by `postgres()` keeps Node's event loop alive. The data round-trip succeeds; the script never exits. Call `await db.close()` before the script returns (or use `await using` **at the top of a script module** so teardown runs when the module exits — see the block-scope warning below for why this matters).
 
 **Plain shape** — export `db` from `db.ts`, import it in the script, close at the end:
 
@@ -93,7 +94,9 @@ console.log(user);
 // db.close() runs automatically when the script module exits.
 ```
 
-### `await using` is **block-scoped** — do not put it inside a request handler
+### `await using` on a `postgres()` client is **block-scoped** — do not put it inside a request handler
+
+This rule is about the long-lived `postgres()` client. On a per-request runtime, `await using db = await postgres.connect({ url })` inside the handler is the correct pattern; see *Workflow — Serverless and per-request runtimes* below.
 
 This is the most important rule in this section. `await using db = postgres(...)` disposes when the *enclosing block* exits. In a script module, that block is the module body and disposal fires at process exit — fine. In a request handler, the enclosing block is the handler function, so disposal fires **after every request** — a fresh `pg.Pool` per call, TCP-connect storm, hot loop tearing connections up and down.
 
@@ -131,6 +134,40 @@ Servers (HTTP handlers, workers in a request loop) **do not call `db.close()`** 
 - **Ownership.** `close()` releases only what the façade constructed (`pg.Pool` from `{ url }`, `MongoClient` from `{ url }` / `{ uri, dbName }`, SQLite handle from `{ path }`). If you supplied your own `pg.Pool` / `pg.Client` (Postgres `pg:` option), `mongodb.MongoClient` (Mongo `mongoClient:` option), or a pre-built `binding`, `db.close()` does **not** touch those — you own their lifecycle.
 
 **`db.end()` does not exist.** The universal `node-postgres` name is `pool.end()` on a `pg.Pool`; the Prisma 8 runtime client is not a `pg.Pool`. The right call is `await db.close()`.
+
+## Workflow — Serverless and per-request runtimes
+
+The concept: a per-request runtime (Cloudflare Workers + Hyperdrive, AWS Lambda, Vercel Edge, Deno Deploy, Bun edge) must not keep a connection at module scope. Use `postgresServerless()` from `@internal/postgres/serverless`. Name the module-scope client `postgres`; it holds no connection. In each request, open a per-request client named `db` with `await using db = await postgres.connect({ url })`. It opens one `pg.Client`, and `await using` closes it when the handler returns.
+
+```typescript
+// src/prisma/db.ts — module scope, built once per isolate, holds no connection
+import postgresServerless from '@internal/postgres/serverless';
+import type { Contract } from './contract.d';
+import contractJson from './contract.json' with { type: 'json' };
+
+export const postgres = postgresServerless<Contract>({ contractJson });
+
+// src/worker.ts
+import { postgres } from './prisma/db';
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    await using db = await postgres.connect({ url: env.HYPERDRIVE.connectionString });
+    const users = await db.orm.public.User.all();
+    return Response.json(users);
+  },
+};
+```
+
+The rule to remember: inside a request, `db` does everything the `db` from `postgres()` does, so any documented `db.orm...`, `db.sql...`, `db.raw...`, `db.transaction(...)`, `db.prepare(...)` or `db.runtime().query(...)` snippet works unchanged.
+
+- **Never call `connect` at module scope.** A connection opened there is shared by every request in the isolate: it goes stale after the isolate idles, and concurrent requests queue behind each other on one `pg.Client`.
+- **`db.orm` is the default way to use the ORM.** Build `orm({ runtime: db.runtime(), context: db.context, collections })` only for custom collection classes, and build it inside the request.
+- **Anything that takes a runtime gets `db.runtime()`.** That includes `orm({ runtime, ... })`, `withTransaction(runtime, fn)` and a prepared statement's `query(runtime, params)`. Do not pass `db` itself to `orm()`.
+- **Inside `db.transaction(async (tx) => ...)`, run every query through `tx`.** The per-request client has one connection and the transaction holds it; a query through `db` inside the callback waits for that connection and the request hangs.
+- **After `db.close()`** (or the end of the `await using` scope), `db.runtime()`, ORM queries, `db.transaction(...)` and `db.prepare(...)` fail with `DRIVER.NOT_CONNECTED`. Call `postgres.connect({ url })` again for a new connection.
+
+How the serverless client reads rows (cursors, and the Hyperdrive caveat) is in `references/queries.md` § *Streaming*.
 
 ## Workflow — Custom middleware (query log, slow-query warning)
 
@@ -337,7 +374,7 @@ The runtime side (this skill) is the same regardless: `db.ts` reads `contract.js
 5. **Importing middleware from a non-existent package or subpath.** There is no `@internal/postgres/middleware` subpath and no `@internal/middleware-telemetry` package. `lints` / `budgets` / `SqlMiddleware` come from `@prisma/orm-postgres/family-runtime`; the cache comes from `@prisma/orm-extension-middleware-cache`; a query log or telemetry hook is a custom `afterQuery` middleware (above).
 6. **Confabulating lint / budget option names.** Lints take `severities` (with the five keys above), not `requireWhere` / `maxRowsWithoutLimit`. Budgets use `maxLatencyMs` (not `maxDurationMs`) plus `maxRows` / `defaultTableRows` / `tableRows`. When in doubt, read the source.
 7. **Switching targets without re-emitting.** The contract artefacts are target-shaped; emit after the target change.
-8. **Script hangs after queries finish on Postgres.** The `pg.Pool` keeps Node's event loop alive. Solution: `await db.close()` before the script returns, or `await using db = postgres<Contract>(...)` at the top of a script module. Do not put `await using db = postgres(...)` inside a request handler — it's block-scoped and would close the pool after every request. The right server pattern is a module-level singleton in `db.ts` that lives for the process lifetime.
+8. **Script hangs after queries finish on Postgres.** The `pg.Pool` keeps Node's event loop alive. Solution: `await db.close()` before the script returns, or `await using db = postgres<Contract>(...)` at the top of a script module. Do not put `await using db = postgres(...)` inside a request handler — it's block-scoped and would close the pool after every request. The right server pattern is a module-level singleton in `db.ts` that lives for the process lifetime. On a per-request runtime, use `postgresServerless()` and `await using db = await postgres.connect({ url })` in the handler instead (see *Workflow — Serverless and per-request runtimes*).
 
 ## What Prisma 8 doesn't do yet
 

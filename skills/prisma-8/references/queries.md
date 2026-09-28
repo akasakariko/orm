@@ -130,7 +130,7 @@ await db.close();
 Every read terminal (`.all()`, and `runtime.query(plan)` for a SQL-builder plan) returns an `AsyncIterableResult`, so `for await` is always available. What it buys you depends on the façade:
 
 - **Long-lived `postgres()` façade** (the usual `db.ts`): the driver runs with cursors disabled. The full result set is fetched from the server before the first row is yielded; only *decoding* happens per row. `for await` therefore does not bound the memory held by the raw result. For very large sets, paginate (`.limit()` / `.offset()`, or `.orderBy(...).cursor(...)`) instead.
-- **Serverless façade** (`@prisma/orm-postgres/serverless`, one `connect()` per invocation): the driver reads through a server-side cursor in batches of 100 rows by default (`cursor: { batchSize }` on the façade options), so `for await` really does stream.
+- **Serverless façade** (`@prisma/orm-postgres/serverless`, one `await using db = await postgres.connect({ url })` per invocation): the per-request `db` has the same `db.orm` and `db.runtime()` as a `postgres()` client, and its driver reads through a server-side cursor in batches of 100 rows by default (`cursor: { batchSize }` on the façade options), so `for await` over `db.orm...all()` or `db.runtime().query(plan)` really does stream.
 
 There is no `.stream()` method on either façade.
 

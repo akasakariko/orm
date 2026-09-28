@@ -8,33 +8,32 @@ This guide covers the per-request facade `@internal/postgres/serverless`. If you
 
 `@internal/postgres` exports two facades that compose the same execution stack and differ only in lifecycle ergonomics:
 
-| Surface              | `postgres()` — `/runtime`                        | `postgresServerless()` — `/serverless`                              |
-| -------------------- | ------------------------------------------------ | ------------------------------------------------------------------- |
-| Lifecycle            | Long-lived process                               | Per-request invocation                                              |
-| `sql`                | yes                                              | yes                                                                 |
-| `context`            | yes                                              | yes                                                                 |
-| `stack`              | yes                                              | yes                                                                 |
-| `contract`           | yes                                              | yes                                                                 |
-| `orm`                | closure-cached on the client                     | constructed per request via `createOrmClient(runtime)`              |
-| `runtime()`          | closure-cached `Runtime`                         | (no member) acquired per request via `db.connect({ url })`          |
-| `transaction(...)`   | closure-cached entrypoint                        | (no member) used per request via `withTransaction(runtime, ...)`    |
-| Cursor default       | disabled                                         | enabled                                                             |
-| Disposal             | (none — process owns the lifetime)               | `Symbol.asyncDispose` on the runtime; `await using` disposes        |
+| Surface                                           | `db = postgres()` — `/runtime`        | `postgres = postgresServerless()` — `/serverless`                   |
+| ------------------------------------------------- | ------------------------------------- | ------------------------------------------------------------------- |
+| Lifecycle                                         | Long-lived process                    | Per-request invocation                                              |
+| `sql`, `raw`, `enums`, `nativeEnums`              | on `db`                               | on `postgres` and on each per-request `db` (the same objects)       |
+| `context`, `contract`, `stack`                    | on `db`                               | on `postgres` and on each per-request `db` (the same objects)       |
+| `orm`, `runtime()`, `transaction()`, `prepare()`  | on `db`, bound to one lazy pool       | on the per-request `db` from `postgres.connect({ url })` only       |
+| Cursor default                                    | disabled                              | enabled                                                             |
+| Disposal                                          | `db.close()` at process shutdown      | `await using db = await postgres.connect(...)` closes per request   |
 
-The static authoring surface (`sql`, `context`, `stack`, `contract`) is identical on both sides — it is a pure function of the contract and is closure-cached safely per isolate. The runtime-bound surface differs because long-lived and per-request lifecycles have different invariants. See [ADR 207 — Per-environment facade asymmetry](./architecture%20docs/adrs/ADR%20207%20-%20Per-environment%20facade%20asymmetry.md) for the architectural rationale and the rejected alternatives.
+The static members are the same on both sides. They are a pure function of the contract, so they are safe to build once per isolate. Everything bound to a connection differs in where it lives: `postgres()` keeps it on the long-lived client, and `postgresServerless()` puts it on a per-request client returned by `connect({ url })`. That per-request client has the members of a `postgres()` client except `connect`. See [ADR 207 — Per-environment facade asymmetry](./architecture%20docs/adrs/ADR%20207%20-%20Per-environment%20facade%20asymmetry.md) for the architectural rationale and the rejected alternatives.
 
-The practical version: closure-caching a `Runtime` (and the `pg.Client` wired into it) across `fetch` invocations is two flavors of unsafe in per-request runtimes — stale-connection failures after isolate idle, and concurrent-`fetch` races on a single shared `pg.Client`. The per-request facade makes the lifetime explicit at every call site:
+The practical version: caching a connection (the `pg.Client` inside a runtime) at module scope across `fetch` invocations is two flavors of unsafe in per-request runtimes — stale-connection failures after isolate idle, and concurrent-`fetch` races on a single shared `pg.Client`. The serverless facade makes the lifetime explicit at every call site:
 
 ```ts
 export default {
   async fetch(_req: Request, env: Env): Promise<Response> {
-    await using runtime = await db.connect({ url: env.HYPERDRIVE.connectionString });
-    // ... use runtime, ORM, transactions ...
-    // runtime.close() runs automatically when the fetch body returns
+    await using db = await postgres.connect({ url: env.HYPERDRIVE.connectionString });
+    const users = await db.orm.public.User.all();
+    // db.close() runs automatically when the fetch body returns
     // (including on the throw-and-rethrow path).
+    return Response.json(users);
   },
 };
 ```
+
+Inside a request, `db` does everything the `db` from `postgres()` does, so any documented `db.orm...`, `db.sql...`, `db.raw...`, `db.transaction(...)`, `db.prepare(...)` or `db.runtime().query(...)` snippet works unchanged. Never call `connect` at module scope.
 
 ## Cloudflare Workers + Hyperdrive (worked example)
 
@@ -48,8 +47,8 @@ A complete worked example lives at `examples/prisma-8-cloudflare-worker/`. This 
 ┌─────────────────┐      ┌────────────────┐      ┌─────────────────┐
 │ Worker isolate  │ ───→ │   Hyperdrive   │ ───→ │ Origin Postgres │
 │ (per fetch)     │  pg  │ (edge pooler)  │  pg  │ (PPg, RDS, ...) │
-│   db.connect()  │      │   pgbouncer-   │      │                 │
-│   one pg.Client │      │   equivalent   │      │                 │
+│ connect() opens │      │   pgbouncer-   │      │                 │
+│ one pg.Client   │      │   equivalent   │      │                 │
 └─────────────────┘      └────────────────┘      └─────────────────┘
         ▲                                                 ▲
         │                                                 │
@@ -109,7 +108,7 @@ This goes in `.env`, not `.dev.vars`. `.dev.vars` is for runtime worker secrets;
 
 ### Worker code shape
 
-Module-scope construction; per-request runtime acquisition; three query surfaces; cursor streaming. The full file is `examples/prisma-8-cloudflare-worker/src/worker.ts`.
+Module-scope construction; a per-request client from `connect`; SQL, ORM and transactions on that client; cursor streaming. The full file is `examples/prisma-8-cloudflare-worker/src/worker.ts`.
 
 #### Module scope
 
@@ -119,11 +118,11 @@ import postgresServerless from '@internal/postgres/serverless';
 import type { Contract } from './contract.d';
 import contractJson from './contract.json' with { type: 'json' };
 
-// Constructed once per isolate. Only the static authoring surface
-// (sql / context / stack / contract) is closure-cached — those are
-// pure functions of the contract and are safe to cache. The
-// runtime-bound surface is acquired per fetch via db.connect(...).
-export const db = postgresServerless<Contract>({
+// Constructed once per isolate. Holds no connection: only the static
+// members (sql / raw / enums / nativeEnums / context / contract / stack),
+// which are pure functions of the contract. Each fetch gets its own
+// client from postgres.connect(...).
+export const postgres = postgresServerless<Contract>({
   contractJson,
   // middleware: [...],   // optional — telemetry, lints, budgets, ...
   // extensions: [...],   // optional
@@ -138,9 +137,7 @@ export const db = postgresServerless<Contract>({
 
 ```ts
 // src/worker.ts
-import { withTransaction } from '@internal/sql-runtime';
-import { createOrmClient } from './orm-client/client';
-import { db } from './prisma/db';
+import { postgres } from './prisma/db';
 
 interface Env {
   HYPERDRIVE: { connectionString: string };
@@ -148,35 +145,33 @@ interface Env {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    // Fresh runtime per fetch. AsyncDisposable: when the fetch body
-    // returns (or throws), runtime.close() runs and ends the
-    // underlying pg.Client. No closure cache, no shared state across
-    // concurrent fetches in this isolate.
-    await using runtime = await db.connect({ url: env.HYPERDRIVE.connectionString });
+    // Fresh client per fetch, with its own pg.Client. When the fetch body
+    // returns (or throws), db.close() runs and ends the pg.Client. No
+    // shared connection across concurrent fetches in this isolate.
+    await using db = await postgres.connect({ url: env.HYPERDRIVE.connectionString });
 
     const url = new URL(request.url);
 
-    // SQL DSL plan — runtime.execute returns AsyncIterable<row>.
+    // SQL DSL plan — db.runtime().query returns the rows.
     if (url.pathname === '/sql/users') {
-      const rows = await runtime.execute(
-        db.sql.user.select('id', 'email').limit(10).build(),
+      const rows = await db.runtime().query(
+        db.sql.public.user.select('id', 'email').limit(10).build(),
       );
       return Response.json(rows);
     }
 
-    // ORM — constructed against the per-request runtime.
-    if (url.pathname === '/orm/users') {
-      const orm = createOrmClient(runtime);
-      const rows = await orm.User.newestFirst().limit(10).all();
+    // ORM — db.orm runs on this request's connection.
+    if (url.pathname === '/orm/posts') {
+      const rows = await db.orm.public.Post.orderBy((post) => post.createdAt.desc()).limit(10).all();
       return Response.json(rows);
     }
 
-    // Transactions — withTransaction takes the per-request runtime.
-    // BEGIN/COMMIT/ROLLBACK happen on the same underlying pg.Client.
+    // Transactions — BEGIN/COMMIT/ROLLBACK happen on this request's
+    // pg.Client. Run every query inside the callback through tx.
     if (url.pathname === '/tx/example') {
-      const result = await withTransaction(runtime, async (tx) => {
-        await tx.execute(db.sql.user.update({ /* ... */ }).where(/* ... */).build());
-        await tx.execute(db.sql.post.insert({ /* ... */ }).build());
+      const result = await db.transaction(async (tx) => {
+        await tx.execute(db.sql.public.user.update({ /* ... */ }).where(/* ... */).build());
+        await tx.execute(db.sql.public.post.insert([{ /* ... */ }]).build());
         return { ok: true };
       });
       return Response.json(result);
@@ -198,8 +193,8 @@ if (url.pathname === '/cursor/large') {
   // opens a server-side cursor and streams ~100-row batches — early
   // break only fetches one batch and closes the cursor. Cursor-off
   // would buffer all 10_000 rows before yielding the first one.
-  const iter = runtime.execute(
-    db.sql.post.select('id', 'title').orderBy((f) => f.createdAt, { direction: 'asc' }).limit(10_000).build(),
+  const iter = db.runtime().query(
+    db.sql.public.post.select('id', 'title').orderBy((f) => f.createdAt, { direction: 'asc' }).limit(10_000).build(),
   );
   for await (const row of iter) {
     consumed.push(row);
@@ -213,28 +208,33 @@ The cursor default is the inverse of the long-lived `postgres()` facade's defaul
 
 ### Wiring the ORM client
 
-`createOrmClient(runtime)` is the existing pattern from `examples/prisma-8-demo/src/orm-client/`; the per-request facade reuses it unchanged:
+`db.orm` is the default way to use the ORM on the per-request client. When you register custom collection classes, build an ORM client from the per-request client's runtime and context:
 
 ```ts
 // src/orm-client/client.ts
-import type { Runtime } from '@internal/sql-runtime';
 import { orm } from '@internal/sql-orm-client';
-import { db } from '../prisma/db';
-import { UserCollection, PostCollection } from './collections';
+import type { PostgresServerlessConnection } from '@internal/postgres/serverless';
+import type { Contract } from '../prisma/contract.d';
+import { PostCollection, UserCollection } from './collections';
 
-export function createOrmClient(runtime: Runtime) {
+export function createOrmClient(
+  db: Pick<PostgresServerlessConnection<Contract>, 'runtime' | 'context'>,
+) {
   return orm({
-    runtime,
+    runtime: db.runtime(),
     context: db.context,
     collections: {
       User: UserCollection,
       Post: PostCollection,
     },
-  });
+  }).public;
 }
+
+// in fetch:
+// const rows = await createOrmClient(db).User.newestFirst().limit(10).all();
 ```
 
-Custom collections, repositories, and ORM extensions work the same way they do on Node — the only difference is that you call the factory inside `fetch` against the per-request `runtime` instead of reading a closure-cached `db.orm`.
+Pass `db.runtime()` to `orm()`, not `db` itself. The same holds for anything else that takes a runtime, such as `withTransaction` and a prepared statement's `query(runtime, params)`. Call the factory inside `fetch`, so the ORM client runs on that request's connection.
 
 ## Other per-request runtimes
 
@@ -250,7 +250,7 @@ This guide does not ship worked examples or CI for non-Cloudflare runtimes. The 
 | Deno Deploy                | `Deno.env.get('DATABASE_URL')`                                        |
 | Bun edge                   | `process.env.DATABASE_URL` (Bun's Node-compat env shim)               |
 
-The Worker code shape is the same on all of them: module-scope `db = postgresServerless({...})`, per-request `await using runtime = await db.connect({ url: <sourced URL> })`. Hyperdrive is Cloudflare-specific; on other runtimes the URL points directly at the origin or at whatever pooler your platform exposes (RDS Proxy on Lambda, Vercel Postgres pooler, etc.).
+The Worker code shape is the same on all of them: module-scope `postgres = postgresServerless({...})`, per-request `await using db = await postgres.connect({ url: <sourced URL> })`. Hyperdrive is Cloudflare-specific; on other runtimes the URL points directly at the origin or at whatever pooler your platform exposes (RDS Proxy on Lambda, Vercel Postgres pooler, etc.).
 
 ## Migrations
 
@@ -265,13 +265,13 @@ The existing migration commands accept a connection string (typically via `DATAB
 
 ## Known limitations
 
-- **Transaction affinity within a single underlying connection.** A `withTransaction(runtime, async (tx) => ...)` body runs all of its statements on the per-request runtime's single underlying `pg.Client`. Crossing runtime boundaries inside a transaction body is undefined; constructing a second `await using runtime2 = await db.connect(...)` inside a transaction body and routing some statements through it will not be transactional with the outer body. This is the same invariant Hyperdrive itself documents — transactions need to land on one client connection — and the per-request facade enforces it by structure (one `runtime` per `connect()`, one client per `runtime`).
+- **A per-request client has one connection, so queries inside a transaction go through `tx`.** `db.transaction(async (tx) => ...)` runs BEGIN, the body and COMMIT on the per-request client's single `pg.Client`. Inside the callback, run every query through `tx` (`tx.orm`, `tx.sql` plans through `tx.execute` / `tx.query`). A query through `db` there (for example `db.orm...` or `db.runtime().query(...)`) waits for the connection the transaction holds, and the request hangs. A second client from `postgres.connect(...)` opened inside the callback has its own connection, so its statements are not part of the transaction. Hyperdrive documents the same invariant: a transaction has to land on one client connection.
 
-- **Isolate memory limits.** Workers isolates have bounded memory (128 MiB by default; higher on Workers Unbound). ORM `findMany`-style operations materialize the result set into a JS array before returning; `limit(...)` is your hard memory cap on those. If you need to stream, use the SQL DSL with `runtime.execute(...)` — the iterator is cursor-backed by default and yields rows as they arrive, with `for-await ... break` cancelling cleanly without buffering the rest of the result set.
+- **Isolate memory limits.** Workers isolates have bounded memory (128 MiB by default; higher on Workers Unbound). ORM `findMany`-style operations materialize the result set into a JS array before returning; `limit(...)` is your hard memory cap on those. If you need to stream, use the SQL DSL with `db.runtime().query(...)` — the iterator is cursor-backed by default and yields rows as they arrive, with `for-await ... break` cancelling cleanly without buffering the rest of the result set.
 
 - **Cursor enabled by default.** The default for `postgresServerless` is `cursor: { /* enabled */ }`. Long-lived `postgres()` defaults to `cursor: { disabled: true }`. The asymmetry is intentional (see [ADR 207](./architecture%20docs/adrs/ADR%20207%20-%20Per-environment%20facade%20asymmetry.md) and the cursor section above). To opt out on the per-request side, pass `cursor: { disabled: true }` to `postgresServerless({...})`.
 
-- **Cursor mode hangs on Cloudflare Hyperdrive — pass `cursor: { disabled: true }` if your origin sits behind Hyperdrive.** Empirically verified during the May 2026 production smoke. The default cursor path uses `pg-cursor`'s extended-query named-portal protocol; after rows are returned and the client sends `Close portal + Sync`, Hyperdrive emits `Protocol Error: Unexpected protocol code: C` (SQLSTATE `58000`) and never follows up with the expected `ReadyForQuery`. The connection wedges; Cloudflare's runtime kills the request at 30 s with error 1101. This affects every read path (SQL DSL, ORM `.all()` / `.first()`, `for await`) — there is no per-call short-circuit, the cursor decision is made at the driver layer for every read. Wrapping the read in `withTransaction(...)` does not help: the failure is in Hyperdrive's protocol parser state, not in connection pinning. The driver's catch-block fallback to simple-query mode does **not** save you either — it only fires on certain thrown errors, and a hang doesn't throw. Workaround: pass `cursor: { disabled: true }` to `postgresServerless({...})` to force the simple-protocol path. Tracking upstream as a Cloudflare Hyperdrive bug.
+- **Cursor mode hangs on Cloudflare Hyperdrive — pass `cursor: { disabled: true }` if your origin sits behind Hyperdrive.** Empirically verified during the May 2026 production smoke. The default cursor path uses `pg-cursor`'s extended-query named-portal protocol; after rows are returned and the client sends `Close portal + Sync`, Hyperdrive emits `Protocol Error: Unexpected protocol code: C` (SQLSTATE `58000`) and never follows up with the expected `ReadyForQuery`. The connection wedges; Cloudflare's runtime kills the request at 30 s with error 1101. This affects every read path (SQL DSL, ORM `.all()` / `.first()`, `for await`) — there is no per-call short-circuit, the cursor decision is made at the driver layer for every read. Wrapping the read in `db.transaction(...)` does not help: the failure is in Hyperdrive's protocol parser state, not in connection pinning. The driver's catch-block fallback to simple-query mode does **not** save you either — it only fires on certain thrown errors, and a hang doesn't throw. Workaround: pass `cursor: { disabled: true }` to `postgresServerless({...})` to force the simple-protocol path. Tracking upstream as a Cloudflare Hyperdrive bug.
 
 - **The `@internal/postgres` package statically imports `pg-pool` and `pg-cloudflare`.** The serverless facade does not construct a `pg.Pool` and does not exercise the pool path, but the `pg` library imports both at module load. The bundle includes them. This is not a correctness concern — `pg-cloudflare` activates only when `navigator.userAgent === 'Cloudflare-Workers'` is true at runtime — but it adds bundle weight. The example's full bundle measures around 254 KiB gzipped including these.
 
