@@ -760,8 +760,8 @@ class PostgresDirectDriverImpl
     if (this.#connected) {
       await this.directClient.end();
     } else {
-      // A client whose connect failed has no socket to close, and under
-      // pg-cloudflare its end() never settles, so it is not awaited.
+      // end() is not awaited for a client this driver never connected: after a
+      // failed connect it never settles under pg-cloudflare.
       void this.directClient.end().catch(() => undefined);
     }
     this.#connected = false;
