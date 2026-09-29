@@ -38,6 +38,7 @@ import {
   sqlCharDescriptor,
   sqlFloatDescriptor,
   sqlIntDescriptor,
+  sqlNumberDecode,
   sqlTextDescriptor,
   sqlVarcharDescriptor,
 } from '@internal/sql-relational-core/ast';
@@ -206,9 +207,6 @@ const CANONICAL_NUMERIC_TEXT = /^(?:-?\d+(?:\.\d+)?|NaN|-?Infinity)$/;
 const isCanonicalNumericText = (value: string): boolean => CANONICAL_NUMERIC_TEXT.test(value);
 
 const identityJsonProjection = (expression: ProjectionExpr): ProjectionExpr => expression;
-
-const decodePostgresNumberWire = (wire: string | number): number =>
-  typeof wire === 'string' ? Number(wire) : wire;
 
 const decodePostgresBooleanWire = (wire: string | boolean): boolean => {
   if (typeof wire === 'boolean') return wire;
@@ -608,7 +606,7 @@ export class PgInt4Codec extends CodecImpl<
     return value;
   }
   async decode(wire: string | number, _ctx: CodecCallContext): Promise<number> {
-    return decodePostgresNumberWire(wire);
+    return sqlNumberDecode(wire);
   }
   encodeJson(value: number): JsonValue {
     return value;
@@ -658,7 +656,7 @@ export class PgInt2Codec extends CodecImpl<
     return value;
   }
   async decode(wire: string | number, _ctx: CodecCallContext): Promise<number> {
-    return decodePostgresNumberWire(wire);
+    return sqlNumberDecode(wire);
   }
   encodeJson(value: number): JsonValue {
     return value;
@@ -825,7 +823,7 @@ export class PgFloat4Codec extends CodecImpl<
     return pgFloatEncode(value);
   }
   async decode(wire: string | number, _ctx: CodecCallContext): Promise<number> {
-    return decodePostgresNumberWire(wire);
+    return sqlNumberDecode(wire);
   }
   encodeJson(value: number): JsonValue {
     return pgFloatEncodeJson(value);
@@ -873,7 +871,7 @@ export class PgFloat8Codec extends CodecImpl<
     return pgFloatEncode(value);
   }
   async decode(wire: string | number, _ctx: CodecCallContext): Promise<number> {
-    return decodePostgresNumberWire(wire);
+    return sqlNumberDecode(wire);
   }
   encodeJson(value: number): JsonValue {
     return pgFloatEncodeJson(value);
@@ -1607,18 +1605,6 @@ const PG_VARCHAR_NATIVE_TYPE = 'character varying';
 const PG_INT_NATIVE_TYPE = 'integer';
 const PG_FLOAT_NATIVE_TYPE = 'double precision';
 
-export class PgIntCodec extends SqlIntCodec {
-  override async decode(wire: string | number, _ctx: CodecCallContext): Promise<number> {
-    return decodePostgresNumberWire(wire);
-  }
-}
-
-export class PgFloatCodec extends SqlFloatCodec {
-  override async decode(wire: string | number, _ctx: CodecCallContext): Promise<number> {
-    return decodePostgresNumberWire(wire);
-  }
-}
-
 export class PgCharDescriptor extends PostgresCodecDescriptor<LengthParams> {
   protected override nativeType(): string {
     return PG_CHAR_NATIVE_TYPE;
@@ -1699,8 +1685,8 @@ export class PgIntDescriptor extends PostgresCodecDescriptor<void> {
   override renderValueLiteral(value: JsonValue): string | undefined {
     return renderTsLiteral(value);
   }
-  override factory(): (ctx: CodecInstanceContext) => PgIntCodec {
-    return () => new PgIntCodec(this);
+  override factory(): (ctx: CodecInstanceContext) => SqlIntCodec {
+    return () => new SqlIntCodec(this);
   }
 }
 
@@ -1726,8 +1712,8 @@ export class PgFloatDescriptor extends PostgresCodecDescriptor<void> {
   override renderValueLiteral(value: JsonValue): string | undefined {
     return renderTsLiteral(value);
   }
-  override factory(): (ctx: CodecInstanceContext) => PgFloatCodec {
-    return () => new PgFloatCodec(this);
+  override factory(): (ctx: CodecInstanceContext) => SqlFloatCodec {
+    return () => new SqlFloatCodec(this);
   }
 }
 

@@ -44,10 +44,12 @@ export const sqlVarcharRenderOutputType = (typeParams: { readonly length?: numbe
 };
 
 export const sqlIntEncode = (value: number): number => value;
-export const sqlIntDecode = (wire: number): number => wire;
 
 export const sqlFloatEncode = (value: number): number => value;
-export const sqlFloatDecode = (wire: number): number => wire;
+
+/** A driver hands a number back as a number, or as its decimal text when it reads the text form: a list element, a column default. */
+export const sqlNumberDecode = (wire: number | string): number =>
+  typeof wire === 'string' ? Number(wire) : wire;
 
 /**
  * JSON has no spelling for a non-finite number, and a database that holds one
