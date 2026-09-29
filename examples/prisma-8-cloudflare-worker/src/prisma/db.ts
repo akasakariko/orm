@@ -21,4 +21,6 @@ function createMiddleware() {
 export const postgres = postgresServerless<Contract>({
   contractJson,
   middleware: createMiddleware(),
+  // Remove behind Cloudflare Hyperdrive: reads with cursors on hang there.
+  cursor: { batchSize: 100 },
 });

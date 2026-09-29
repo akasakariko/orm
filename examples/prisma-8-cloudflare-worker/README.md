@@ -13,7 +13,7 @@ This example mirrors `examples/prisma-8-demo` (the Node demo), minus pgvector �
   - Default ORM client: `db.orm.public.Post.where({ userId }).limit(10).all()`
   - Custom ORM client with collection classes: `createOrmClient(db).User.newestFirst().limit(10).all()`, built from `db.runtime()` and `db.context`
   - Transactions: `db.transaction(async (tx) => …)`
-- **Cursor early-break** over a streamed result set (`for await … break`), exercising the cursor path that `postgresServerless` enables by default.
+- **Cursor early-break** over a streamed result set (`for await … break`). Cursors are off by default; `src/prisma/db.ts` turns them on with `cursor: { batchSize: 100 }`.
 
 Routes implemented in [`src/worker.ts`](src/worker.ts):
 
@@ -99,7 +99,7 @@ pnpm run deploy
 
 > Use `pnpm run deploy` (not `pnpm deploy`). The latter collides with pnpm's built-in `deploy` command and fails with `ERR_PNPM_INVALID_DEPLOY_TARGET`.
 
-> If your origin sits behind Cloudflare Hyperdrive, also pass `cursor: { disabled: true }` to `postgresServerless({...})` in `src/prisma/db.ts`. Hyperdrive currently rejects the `Close portal` message that `pg-cursor` (the default streaming path) sends after an extended-query Execute, leaving the connection wedged. See the deployment guide's "Known limitations" for details.
+> Cursors are off by default. This example turns them on with `cursor: { batchSize: 100 }` in `src/prisma/db.ts` to show an early `break` over a streamed result. Reads with cursors on hang behind real Cloudflare Hyperdrive, so remove that option before deploying behind Hyperdrive; see the deployment guide's "Known limitations" for details.
 
 ## Bundle size
 
@@ -157,7 +157,7 @@ The M1 audit's "this works in `wrangler dev`" claim was empirically validated ag
 ## Known limitations
 
 - **Transaction affinity** — every `db.transaction` body must run its queries through `tx`, on the same per-request `db`. Crossing connection boundaries inside a transaction body is undefined.
-- **Isolate memory** — large result sets bound through cursor by default (`postgresServerless` enables cursor unconditionally). For ORM `findMany`-style operations the result set is materialised; size your `limit(...)` accordingly.
+- **Isolate memory** — with `cursor: { batchSize: 100 }`, as this example sets it, `for await` reads large result sets in batches. For ORM `findMany`-style operations the result set is materialised; size your `limit(...)` accordingly.
 - **`pg.Pool` not used** — the serverless facade routes through `PostgresDirectDriverImpl` (`pgClient` binding kind). No connection pooling within the isolate; that's Hyperdrive's job in production.
 - **Production `id`** — the committed `wrangler.jsonc` has a zero-stuffed Hyperdrive `id`. Deploy will fail until a real id is wired in (M4).
 - **Class-table-inheritance ORM queries** — the schema declares `Bug` and `Feature` as `@@base(Task)` discriminator variants for parity with `examples/prisma-8-demo`. The earlier `column "bug.id" does not exist` failure is now resolved: the emitted contract materialises the base-PK link column (`bug.id` / `feature.id`) on each variant table, so the variant join the ORM emits resolves. These queries are not yet exercised by this worker's routes or integration test; `examples/prisma-8-demo` covers the polymorphic-include path end-to-end.

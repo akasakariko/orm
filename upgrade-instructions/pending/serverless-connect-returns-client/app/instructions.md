@@ -12,6 +12,12 @@ changes:
       glob: "**/*.{ts,mts,cts,tsx}"
       matches:
         - '[''"]@prisma/orm-postgres/serverless[''"]'
+  - id: serverless-cursor-default-off
+    summary: "Reads through the client from @prisma/orm-postgres/serverless no longer go through a server-side cursor by default. Pass cursor: { batchSize: 100 } to keep batched streaming, except behind Cloudflare Hyperdrive. PostgresServerlessCursorOptions is now PostgresCursorOptions."
+    detection:
+      glob: "**/*.{ts,mts,cts,tsx}"
+      matches:
+        - '[''"]@prisma/orm-postgres/serverless[''"]'
 ---
 
 ## `serverless-connect-returns-client`
@@ -113,5 +119,46 @@ await using db = await postgres.connect({ url });
 const posts = await db.orm.public.Post.where({ userId }).all();
 await db.transaction(async (tx) => {
   await tx.execute(db.sql.public.user.update({ displayName }).where((f, fns) => fns.eq(f.id, userId)).build());
+});
+```
+
+## `serverless-cursor-default-off`
+
+`postgresServerless()` used to read through `pg-cursor` in batches of 100 rows unless you passed `cursor: { disabled: true }`. Reads are now buffered by default, the same as on `postgres()`: the whole result arrives before the first row is yielded.
+
+1. If code relies on batched streaming, for example `for await` over a large result with an early `break`, pass `cursor: { batchSize: 100 }` to `postgresServerless(...)`, and note next to it that it must be removed behind Cloudflare Hyperdrive. Reads with cursors on hang behind Cloudflare Hyperdrive, so do not add the option there.
+2. Remove `cursor: { disabled: true }` from `postgresServerless(...)` options. It is now the default.
+3. Replace the type `PostgresServerlessCursorOptions` with `PostgresCursorOptions`, exported from `@prisma/orm-postgres/serverless` and `@prisma/orm-postgres/runtime`.
+4. Update comments and README text that say the serverless client streams through a cursor by default.
+
+Before:
+
+```ts
+import postgresServerless, {
+  type PostgresServerlessCursorOptions,
+} from '@prisma/orm-postgres/serverless';
+
+const cursor: PostgresServerlessCursorOptions = { disabled: true };
+
+// behind Cloudflare Hyperdrive
+export const postgres = postgresServerless<Contract>({ contractJson, cursor });
+
+// elsewhere, streaming with the old default
+export const streaming = postgresServerless<Contract>({ contractJson });
+```
+
+After:
+
+```ts
+import postgresServerless from '@prisma/orm-postgres/serverless';
+
+// behind Cloudflare Hyperdrive
+export const postgres = postgresServerless<Contract>({ contractJson });
+
+// elsewhere, streaming
+export const streaming = postgresServerless<Contract>({
+  contractJson,
+  // Remove behind Cloudflare Hyperdrive: reads with cursors on hang there.
+  cursor: { batchSize: 100 },
 });
 ```
