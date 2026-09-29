@@ -453,7 +453,7 @@ No contract marker (database signature) is found in the database at all. `db ver
 
 ### CONTRACT.MARKER_READ_FAILED
 
-A driver-level failure occurred while reading the contract marker table: connectivity, permissions, or locking problems rather than bad marker content. Raised whenever a CLI/control operation reads the marker, and by the runtime when its first query on a database connection reads the marker (with the default `verifyMarker`) and that read fails; a query returned without `await` from an `await using` scope that held a serverless Postgres connection fails this way, with `DRIVER.NOT_CONNECTED` as its `cause`. Payload: `space`.
+A driver-level failure occurred while reading the contract marker table: connectivity, permissions, or locking problems rather than bad marker content. Raised whenever a CLI/control operation reads the marker, and by the runtime when its first query on a database connection reads the marker (with the default `verifyMarker`) and that read fails; the runtime retries the read on its next query. An error the driver itself classifies (`category: 'DRIVER'`, such as `DRIVER.NOT_CONNECTED`) is raised as itself, not wrapped in this code. Payload: `space`.
 
 ### CONTRACT.MARKER_REQUIRED
 
@@ -1192,7 +1192,7 @@ A control-plane driver could not establish a database connection (`driver.create
 
 ### DRIVER.NOT_CONNECTED
 
-Using a driver, a client, or the CLI control client before `connect(...)` has been called, or after it was closed. It surfaces from runtime `query` / `execute`, a prepared statement's `query(target, params, options?)`, `acquireConnection`, or `explain`, including lazily when iterating a query result. A closed Postgres client or serverless connection raises it from `runtime()`, `transaction(...)` and `prepare(...)`, which throw it synchronously, and from ORM queries, which reject with it.
+Using a driver, a client, or the CLI control client before `connect(...)` has been called, or after it was closed. It surfaces from runtime `query` / `execute`, a prepared statement's `query(target, params, options?)`, `acquireConnection`, or `explain`, including lazily when iterating a query result. A closed Postgres client or serverless connection raises it from `runtime()`, `transaction(...)` and `prepare(...)`, which throw it synchronously, and from ORM queries, which reject with it. The SQL runtime raises it with the message "Runtime is closed" for a query, execute, prepared statement, transaction or `connection()` that reaches the driver after `close()` has started, including one returned from an `await using` scope without `await`; its `fix` names that mistake, and the rejection is delivered after the close has settled, so it reaches only the caller. After `close()`, the Postgres driver's own message is "Postgres driver is closed. Call connect(binding) to reconnect."
 
 ### DRIVER.PREPARE_FAILED
 

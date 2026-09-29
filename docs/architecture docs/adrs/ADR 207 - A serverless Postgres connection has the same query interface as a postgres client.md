@@ -118,7 +118,7 @@ The serverless client has only what is safe at module scope. A connection has ev
 
 `await using db = await postgres.connect(...)` closes the connection when the enclosing scope ends, whether the scope returns or throws. Closing ends the `pg.Client`. Calling `close()` or `[Symbol.asyncDispose]` more than once closes it once.
 
-After a connection is closed, `db.runtime()`, ORM queries, `db.transaction(...)` and `db.prepare(...)` fail with the error code `DRIVER.NOT_CONNECTED`.
+After a connection is closed, `db.runtime()`, ORM queries, `db.transaction(...)` and `db.prepare(...)` fail with the error code `DRIVER.NOT_CONNECTED`. A query, transaction or prepared statement started before the close, and not yet at the database, rejects with `DRIVER.NOT_CONNECTED` ("Runtime is closed") once the connection has closed. The runtime holds that rejection until its close has settled, so it reaches only the caller and never Node's unhandled-rejection handler.
 
 The `await using` line shows the lifetime of the connection at the place where the connection is opened. A reader can see that it belongs to this request without reading any documentation.
 
@@ -219,7 +219,7 @@ export async function listUsers(url: string) {
 }
 ```
 
-Writing `return db.orm.public.User.all()` in this function fails. With the default options the error is `CONTRACT.MARKER_READ_FAILED` ("Database error while reading contract marker"), whose cause is `DRIVER.NOT_CONNECTED`, because the first query on a connection reads the contract marker before it runs. After an earlier awaited query on the same connection, or with `verifyMarker: false`, the error is `DRIVER.NOT_CONNECTED` itself. With a client the version without `await` works, because a client is not closed at the end of each request.
+Writing `return db.orm.public.User.all()` in this function rejects with `DRIVER.NOT_CONNECTED` ("Runtime is closed"), whose `fix` names the missing `await`. So do `return db.orm.public.User.first()`, `return db.runtime().query(plan)`, `return db.runtime().execute(plan)` and `return db.transaction(fn)`, whether or not an earlier query on the connection was awaited; the transaction rolls back. The runtime owns this rule: every operation that reaches the driver after `close()` has started fails with this one error, and one that holds no connection is rejected only after the close has settled, so the caller's handler is attached first and Node reports no unhandled rejection. With a client the version without `await` works, because a client is not closed at the end of each request.
 
 ### On a connection with cursors on, a `for await` over a read ends before the next query through `db`
 
@@ -327,3 +327,7 @@ An object at module scope would have `db.orm` and `db.transaction(...)`, and wou
 ### One factory per product
 
 There would be one factory per product, such as `postgresWorkers` and `postgresLambda`, each with conveniences for that product, for example `postgresWorkers({ hyperdrive: env.HYPERDRIVE })`. The convenience would be small, because every per-request runtime gives the application a connection string: `env.HYPERDRIVE.connectionString` on Workers, `process.env.DATABASE_URL` on Lambda, `Deno.env.get('DATABASE_URL')` on Deno Deploy. A factory per product would save one property access, at the cost of several nearly identical factories. The lifetime rule is the same for every product.
+
+### `close()` waits for work in flight
+
+A connection would count the queries, transactions and prepared statements it has started, and `close()` would wait for them before ending the `pg.Client`, so that `return db.transaction(fn)` from an `await using` scope would commit. The same mistake would then have two outcomes: `return db.orm.public.User.all()` would still fail, because its work starts only when the caller awaits it, after the scope has closed, while `return db.transaction(fn)` would succeed. And a read that is started and never finished, such as a `for await` loop left by an exception, would make `close()` wait for ever. Instead the runtime fails every operation that reaches the driver after `close()` has started with one error, and delivers the rejection after the close has settled.
