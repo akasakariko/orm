@@ -1,7 +1,8 @@
 import { Client } from 'pg';
 
 /**
- * Runs `read` and returns how many rows of the post table the server sent while it ran, read from pg_stat_statements through a separate pg.Client.
+ * Runs `read` and returns how many rows of the post table the server sent while it ran, read from
+ * pg_stat_statements through a separate pg.Client.
  */
 export async function countPostRowsSent(
   connectionString: string,

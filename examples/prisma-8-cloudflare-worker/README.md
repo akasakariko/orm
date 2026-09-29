@@ -40,11 +40,13 @@ examples/prisma-8-cloudflare-worker/
 │   ├── prisma/contract.{json,d.ts}     # Emitted by `pnpm emit`
 │   └── orm-client/                     # ORM extensions (collections + factory)
 ├── scripts/
-│   ├── setup-schema.ts                 # `prisma db init`
-│   └── seed.ts                         # Insert sample users + posts
+│   ├── setup-schema.ts                 # `prisma db init`, then the pg_stat_statements extension
+│   ├── seed.ts                         # Empty the tables, then insert sample users + posts
+│   └── seed-posts.ts                   # The generated posts for /cursor/large (shared with the tests)
 ├── test/
 │   ├── global-setup.ts                 # Connects to Docker Postgres, applies schema, seeds
 │   ├── worker.integration.test.ts      # vitest-pool-workers integration suite
+│   ├── rows-sent.ts                    # Counts rows the server sent, through pg_stat_statements
 │   └── cloudflare-test.d.ts            # Pulls in `cloudflare:test` ambient types
 ├── docker-compose.yml                  # Local Postgres origin (port 5433)
 ├── wrangler.jsonc                      # Hyperdrive binding declaration
@@ -108,10 +110,10 @@ pnpm run deploy
 `pnpm deploy:dry-run` (`wrangler deploy --dry-run --outdir dist`) reports:
 
 ```
-Total Upload: 1289.96 KiB / gzip: 254.14 KiB
+Total Upload: 1981.92 KiB / gzip: 399.05 KiB
 ```
 
-(254 KiB compressed, well under the 1 MB budget.)
+(399 KiB compressed, well under the 1 MB budget.)
 
 The bundle includes `pg`, `pg-protocol`, `pg-types`, `pg-cursor`, `pg-pool` (statically imported by the Postgres driver the serverless client wires in even though `postgresServerless` does not construct a `Pool` at runtime), `pg-cloudflare` (auto-pulled by `pg` when `navigator.userAgent === 'Cloudflare-Workers'`), and `@cloudflare/unenv-preset` polyfills.
 
@@ -160,6 +162,6 @@ The earlier check that `pg` works in `wrangler dev` ran against a real Postgres 
 
 - **Transaction affinity** — every `db.transaction` body must run its queries through `tx`. A query through `db` inside the body runs inside the open transaction or waits forever, depending on the operation, and a second connection opened inside the body is not part of the transaction; the deployment guide's "Known limitations" lists which operations do what.
 - **Isolate memory** — on the `/cursor/large` route, which uses `cursor: { batchSize: 100 }`, `for await` reads large result sets in batches. The other routes buffer their results. For ORM `findMany`-style operations the result set is materialised; size your `limit(...)` accordingly.
-- **`pg.Pool` not used** — the serverless client routes through `PostgresDirectDriverImpl` (`pgClient` binding kind). No connection pooling within the isolate; that's Hyperdrive's job in production.
+- **`pg.Pool` not used** — each connection routes through `PostgresDirectDriverImpl` (`pgClient` binding kind). No connection pooling within the isolate; that's Hyperdrive's job in production.
 - **Production `id`** — the committed `wrangler.jsonc` has a zero-stuffed Hyperdrive `id`. Deploy fails until a real id is wired in.
 - **Class-table-inheritance ORM queries** — the schema declares `Bug` and `Feature` as `@@base(Task)` discriminator variants for parity with `examples/prisma-8-demo`. The earlier `column "bug.id" does not exist` failure is now resolved: the emitted contract materialises the base-PK link column (`bug.id` / `feature.id`) on each variant table, so the variant join the ORM emits resolves. These queries are not yet exercised by this worker's routes or integration test; `examples/prisma-8-demo` covers the polymorphic-include path end-to-end.

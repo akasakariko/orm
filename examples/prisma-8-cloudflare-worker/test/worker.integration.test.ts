@@ -147,7 +147,7 @@ describe('worker — postgresServerless against Hyperdrive (local)', () => {
     expect(JSON.stringify(error)).not.toContain(':postgres@');
   }, 10_000);
 
-  it('a 404 and a 400 open no database connection', async () => {
+  it('/health, a 404 and a 400 open no database connection', async () => {
     const observer = new Client({ connectionString: env.HYPERDRIVE.connectionString });
     observer.on('error', () => {});
     await observer.connect();
@@ -163,6 +163,7 @@ describe('worker — postgresServerless against Hyperdrive (local)', () => {
       await sessions();
       const before = await sessions();
 
+      expect((await get('/health')).status).toBe(200);
       expect((await get('/no/such/route')).status).toBe(404);
       expect((await get('/orm/posts?userId=')).status).toBe(400);
       expect((await get('/tx/commit')).status).toBe(400);

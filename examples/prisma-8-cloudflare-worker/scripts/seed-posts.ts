@@ -1,7 +1,8 @@
 import type { Client } from 'pg';
 
 /**
- * Enough posts for the `/cursor/large` route to stream and break early. Sized to the post-table budget in `src/prisma/db.ts`.
+ * Enough posts for the `/cursor/large` route to stream and break early. Sized to the post-table
+ * budget in `src/prisma/db.ts`.
  */
 export const GENERATED_POST_COUNT = 10_000;
 

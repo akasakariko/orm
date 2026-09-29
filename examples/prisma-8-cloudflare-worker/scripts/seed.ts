@@ -23,6 +23,14 @@ async function main() {
 
   const bulk = new Client({ connectionString: url });
   await bulk.connect();
+  try {
+    await seed(bulk, url);
+  } finally {
+    await bulk.end();
+  }
+}
+
+async function seed(bulk: Client, url: string) {
   await using db = await postgres.connect({ url });
 
   await bulk.query('TRUNCATE "post", "task", "user" RESTART IDENTITY CASCADE');
@@ -106,11 +114,7 @@ async function main() {
     );
   }
 
-  try {
-    await insertGeneratedPosts(bulk, [alice.id, bob.id], GENERATED_POST_COUNT);
-  } finally {
-    await bulk.end();
-  }
+  await insertGeneratedPosts(bulk, [alice.id, bob.id], GENERATED_POST_COUNT);
 
   console.log(`Seeded users: alice=${alice.id}, bob=${bob.id}`);
   console.log(
