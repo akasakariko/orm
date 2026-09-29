@@ -2,11 +2,11 @@
 
 How to deploy Prisma 8 to per-request runtimes — Cloudflare Workers + Hyperdrive as the primary worked path, with pointers for AWS Lambda (Node), Vercel Edge / Vercel Serverless, Deno Deploy, and Bun edge.
 
-This guide covers the serverless client from `@internal/postgres/serverless` and the connections it opens. If you are deploying to a long-lived Node process (a server, a container, a non-edge Vercel function with bundling that keeps the process warm), use the `postgres()` client from `@internal/postgres/runtime` — the long-lived shape is unchanged and not in scope here.
+This guide covers the serverless client from `@prisma/orm-postgres/serverless` and the connections it opens. If you are deploying to a long-lived Node process (a server, a container, a non-edge Vercel function with bundling that keeps the process warm), use the `postgres()` client from `@prisma/orm-postgres/runtime` — the long-lived shape is unchanged and not in scope here.
 
 ## Two factories, one driver
 
-`@internal/postgres` exports two factories, `postgres()` and `postgresServerless()`, that compose the same execution stack and differ only in lifecycle:
+`@prisma/orm-postgres` exports two factories, `postgres()` and `postgresServerless()`, that compose the same execution stack and differ only in lifecycle:
 
 | Surface                                           | `db = postgres()` — `/runtime`        | `postgres = postgresServerless()` — `/serverless`                   |
 | ------------------------------------------------- | ------------------------------------- | ------------------------------------------------------------------- |
@@ -110,11 +110,13 @@ This goes in `.env`, not `.dev.vars`. `.dev.vars` is for runtime worker secrets;
 
 A serverless client at module scope; a connection from `connect` in each request; SQL, ORM and transactions on that connection; cursor streaming. The full file is `examples/prisma-8-cloudflare-worker/src/worker.ts`.
 
+The samples use extensionless relative imports and `./contract.d`, which need `moduleResolution: "bundler"` in `tsconfig.json`; Worker projects built with wrangler use that setting, and so does the example. On Node.js 24 and older, reading a `DateTime` column needs a Temporal polyfill: add `temporal-polyfill` and import `temporal-polyfill/full/global` before the first query, as the example does at the top of `worker.ts` and `seed.ts`.
+
 #### Module scope
 
 ```ts
 // src/prisma/db.ts
-import postgresServerless from '@internal/postgres/serverless';
+import postgresServerless from '@prisma/orm-postgres/serverless';
 import type { Contract } from './contract.d';
 import contractJson from './contract.json' with { type: 'json' };
 
@@ -237,8 +239,8 @@ if (url.pathname === '/cursor/large') {
 
 ```ts
 // src/orm-client/client.ts
-import { orm } from '@internal/sql-orm-client';
-import type { PostgresServerlessConnection } from '@internal/postgres/serverless';
+import { orm } from '@prisma/orm-postgres/orm-client';
+import type { PostgresServerlessConnection } from '@prisma/orm-postgres/serverless';
 import type { Contract } from '../prisma/contract.d';
 import { PostCollection, UserCollection } from './collections';
 
@@ -286,7 +288,7 @@ There is no per-request migration story and there is no Hyperdrive control-plane
 - Migration commands (`prisma db migrate`, `prisma db init`) are control-plane operations: they speak to the `migration` plane through the control-plane Postgres driver, run in long-lived Node processes (CI runners, dev workstations, deploy hooks), and are inherently long-lived shapes — DDL does not benefit from per-request lifecycle.
 - Hyperdrive caches query results at the edge. That is desirable for many runtime read patterns and undesirable for DDL: a stale read of the migration ledger or marker leads to duplicate-apply or skipped-apply confusion. The Cloudflare-recommended pattern is to bypass Hyperdrive for control-plane operations, and we follow that.
 
-The existing migration commands accept a connection string (typically via `DATABASE_URL`) and use the `@internal/driver-postgres/control` driver. Run them from CI / your deploy pipeline / a one-shot Node task pointed at the origin URL — see the existing migration docs and the [Getting Started guide](./onboarding/Getting-Started.md) for the command surface. Nothing about deploying to a per-request runtime changes that.
+The existing migration commands accept a connection string (typically via `DATABASE_URL`) and use the `@prisma/orm-postgres/driver/control` driver. Run them from CI / your deploy pipeline / a one-shot Node task pointed at the origin URL — see the existing migration docs and the [Getting Started guide](./onboarding/Getting-Started.md) for the command surface. Nothing about deploying to a per-request runtime changes that.
 
 ## Known limitations
 
@@ -296,7 +298,7 @@ The existing migration commands accept a connection string (typically via `DATAB
 
 - **Reads with cursors on hang on Cloudflare Hyperdrive — cursors are off by default; behind Hyperdrive, only routes whose connections come from a serverless client without the `cursor` option work.** Empirically verified during the May 2026 production smoke. The cursor path uses `pg-cursor`'s extended-query named-portal protocol; after rows are returned and the client sends `Close portal + Sync`, Hyperdrive emits `Protocol Error: Unexpected protocol code: C` (SQLSTATE `58000`) and never follows up with the expected `ReadyForQuery`. The database connection wedges; Cloudflare's runtime kills the request at 30 s with error 1101. With cursors on, this affects every read path (SQL DSL, ORM `.all()` / `.first()`, `for await`) — there is no per-call short-circuit, the cursor decision is made at the driver layer for every read. Wrapping the read in `db.transaction(...)` does not help: the failure is in Hyperdrive's protocol parser state, not in connection pinning. The driver's catch-block fallback to simple-query mode does **not** save you either — it only fires on certain thrown errors, and a hang doesn't throw. Workaround: behind Hyperdrive, open connections from a serverless client without the `cursor` option, so reads take the buffered path. A route whose connection comes from a streaming serverless client hangs. Tracking upstream as a Cloudflare Hyperdrive bug.
 
-- **The `@internal/postgres` package statically imports `pg-pool` and `pg-cloudflare`.** The serverless client does not construct a `pg.Pool` and does not exercise the pool path, but the `pg` library imports both at module load. The bundle includes them. This is not a correctness concern — `pg-cloudflare` activates only when `navigator.userAgent === 'Cloudflare-Workers'` is true at runtime — but it adds bundle weight. The example's full bundle measures around 254 KiB gzipped including these.
+- **The `@prisma/orm-postgres` package statically imports `pg-pool` and `pg-cloudflare`.** The serverless client does not construct a `pg.Pool` and does not exercise the pool path, but the `pg` library imports both at module load. The bundle includes them. This is not a correctness concern — `pg-cloudflare` activates only when `navigator.userAgent === 'Cloudflare-Workers'` is true at runtime — but it adds bundle weight. The example's full bundle measures around 254 KiB gzipped including these.
 
 - **Migrations run from Node.** As above — no per-request migration story, no Hyperdrive control-plane driver. If your deploy pipeline expects to apply migrations from the same surface that runs the Worker, you need a separate Node task (CI step, deploy hook, one-shot script).
 
