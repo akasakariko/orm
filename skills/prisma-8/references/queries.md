@@ -70,7 +70,7 @@ You do **not** need a `collect()` / `toArray()` helper — `await` is enough. In
 const rows: Promise<User[]> = db.orm.public.User.select('id', 'email').all().toArray();
 
 // Iterate — decode and handle rows one at a time. Whether the raw rows are
-// also fetched incrementally depends on the façade; see *Streaming* below.
+// also fetched incrementally depends on the `cursor` option; see *Streaming* below.
 for await (const user of db.orm.public.User.select('id', 'email').all()) {
   process(user);
 }

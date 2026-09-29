@@ -187,7 +187,7 @@ Writing `return db.orm.public.User.all()` in this function fails. On a `postgres
 
 ## Cursors are off by default on both clients
 
-Both factories accept `cursor?: PostgresCursorOptions`. When the option is unset, both clients read without a cursor: the driver fetches the whole result before it returns the first row. Setting the option turns cursors on. With `cursor: { batchSize: 100 }`, reads on either client stream through a server-side cursor in batches of 100 rows. Streaming suits a request that reads a large result and stops early.
+Both factories accept `cursor?: PostgresCursorOptions`. When the option is unset or `{ disabled: true }`, both clients read without a cursor: the driver fetches the whole result before it returns the first row. Any other value, such as `{}` or `{ batchSize: 50 }`, turns cursors on: reads on either client stream through a server-side cursor in batches of `batchSize` rows, or 100 rows when `batchSize` is omitted. Streaming suits a request that reads a large result and stops early.
 
 ```ts
 const postgres = postgresServerless<Contract>({ contractJson, cursor: { batchSize: 100 } });
@@ -206,8 +206,7 @@ The default is off because, with cursors on, every read hangs behind Cloudflare 
 
 ### Costs
 
-- **This shape is a breaking change for users of `@prisma/orm-postgres/serverless`.** The value `connect` returns is not a `Runtime`, so code that uses it as one must call `db.runtime()`.
-- **The serverless bundle grows by about 32 kB gzipped.** The per-request client always includes the ORM client, even in a Worker that uses only `db.sql`.
+- **The serverless entry includes the ORM client, about 32 kB gzipped.** It is in the bundle even for code that uses only the SQL builder, `db.sql`.
 - **The transaction and `await` rules are documented, not enforced.** A query through `db` inside a transaction, or a query not awaited inside the `await using` scope, fails or hangs at run time with no earlier warning.
 
 ## Related ADRs
@@ -228,7 +227,7 @@ The per-request client would carry `query` and `execute` itself, so that it coul
 
 ### `postgresServerless()` returns a bare connect function
 
-`postgresServerless()` would return only a function that opens a per-request client. The static members would then have nowhere to live without a connection. Code outside a request, such as a module that builds query plans or reads enum values, would have to open a connection to reach them.
+`postgresServerless()` would return only a function that opens a per-request client. Code that needs the static members at module scope as well as per-request clients, such as a module that builds query plans or reads enum values, would import and configure a second entry point, `@prisma/orm-postgres/static`, with the same contract. Each factory validates the contract when it is called, so the contract would be validated twice.
 
 ### A second serverless entry point without the ORM client
 
