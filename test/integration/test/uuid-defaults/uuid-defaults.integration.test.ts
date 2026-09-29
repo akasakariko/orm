@@ -2,10 +2,18 @@ import { existsSync, rmSync, writeFileSync } from 'node:fs';
 import { int4Column } from '@internal/adapter-postgres/column-types';
 import postgresAdapter from '@internal/adapter-postgres/control';
 import { createControlClient } from '@internal/cli/control-api';
+import type { Contract } from '@internal/contract/types';
 import postgresDriver from '@internal/driver-postgres/control';
 import sql from '@internal/family-sql/control';
 import { createControlStack } from '@internal/framework-components/control';
-import { defineContract, field, model } from '@internal/postgres/contract-builder';
+import {
+  defineContract,
+  enumType,
+  field,
+  member,
+  model,
+} from '@internal/postgres/contract-builder';
+import postgresClient from '@internal/postgres/runtime';
 import { sqlContractCanonicalizationHooks } from '@internal/sql-contract/canonicalization-hooks';
 import { sqlEmission } from '@internal/sql-contract-emitter';
 import { prismaContract } from '@internal/sql-contract-psl/provider';
@@ -32,6 +40,35 @@ model T {
 `;
 
 const uuidColumn = { codecId: 'pg/uuid@1', nativeType: 'uuid' } as const;
+
+interface EmittedEnum {
+  readonly domain: {
+    readonly namespaces: {
+      readonly public: { readonly enum: { readonly Key: unknown } };
+    };
+  };
+  readonly storage: {
+    readonly namespaces: {
+      readonly public: {
+        readonly entries: {
+          readonly valueSet: { readonly Key: unknown };
+          readonly table: {
+            readonly T: { readonly checks: readonly { readonly expression: string }[] };
+          };
+        };
+      };
+    };
+  };
+}
+
+/**
+ * The runtime enum accessor, read with a value from the database. Its declared member types are
+ * the literals as authored, while its values are what the codec stores.
+ */
+interface RuntimeEnumAccessor {
+  readonly members: Record<string, unknown>;
+  has(value: unknown): boolean;
+}
 
 interface EmittedColumns {
   readonly storage: {
@@ -98,19 +135,53 @@ async function initAndVerify(
   }
 }
 
-/** Runs db init and db verify --strict, then inserts a row that takes every default and reads it back. */
-async function initVerifyAndRead(contractJson: Record<string, unknown>, migrationsDir: string) {
+/** Runs db init and db verify --strict, then runs `insertSql` and reads every row of `T` back. */
+async function initVerifyAndRead(
+  contractJson: Record<string, unknown>,
+  migrationsDir: string,
+  insertSql = 'INSERT INTO "T" (id) VALUES (1)',
+) {
   return withDevDatabase(async ({ connectionString }) => {
     const checked = await initAndVerify(connectionString, contractJson, migrationsDir);
     if (checked.init !== 'applied') return checked;
     const stored = await withClient(connectionString, async (raw) => {
-      await raw.query('INSERT INTO "T" (id) VALUES (1)');
+      await raw.query(insertSql);
       const rows = await raw.query<{ row: Record<string, unknown> }>(
-        `SELECT to_jsonb(t) - 'id' AS row FROM "T" t`,
+        `SELECT to_jsonb(t) - 'id' AS row FROM "T" t ORDER BY id`,
       );
       return rows.rows.map((row) => row.row);
     });
     return { ...checked, stored };
+  });
+}
+
+async function emitTypeScriptContract(contract: Contract): Promise<Record<string, unknown>> {
+  const emitted = await emit(
+    contract,
+    createControlStack({ family: sql, target: postgres, adapter: postgresAdapter }),
+    sqlEmission,
+    {
+      serializeContract: (c) =>
+        postgres.contractSerializer.serializeContract(
+          c as Parameters<typeof postgres.contractSerializer.serializeContract>[0],
+        ),
+      ...sqlContractCanonicalizationHooks,
+    },
+  );
+  return JSON.parse(emitted.contractJson) as Record<string, unknown>;
+}
+
+function emitPsl(testDir: string, source: string) {
+  const schemaPath = join(testDir, 'schema.prisma');
+  writeFileSync(schemaPath, source, 'utf-8');
+  return createClient().emit({
+    contractConfig: {
+      source: prismaContract(schemaPath, {
+        target: postgresPackRef,
+        createNamespace: postgresCreateNamespace,
+      }).source,
+      output: join(testDir, 'contract.json'),
+    },
   });
 }
 
@@ -135,18 +206,7 @@ describe(
     it(
       'in PSL, emit as the lower-case text Postgres stores, are created by db init, and pass db verify --strict',
       async () => {
-        const schemaPath = join(testDir, 'schema.prisma');
-        writeFileSync(schemaPath, schema, 'utf-8');
-
-        const emitted = await createClient().emit({
-          contractConfig: {
-            source: prismaContract(schemaPath, {
-              target: postgresPackRef,
-              createNamespace: postgresCreateNamespace,
-            }).source,
-            output: join(testDir, 'contract.json'),
-          },
-        });
+        const emitted = await emitPsl(testDir, schema);
         if (!emitted.ok) throw new Error(JSON.stringify(emitted.failure, null, 2));
         const contractJson = JSON.parse(emitted.value.contractJson) as Record<string, unknown>;
 
@@ -206,19 +266,7 @@ describe(
             }).sql({ table: 'T' }),
           },
         });
-        const emitted = await emit(
-          contract,
-          createControlStack({ family: sql, target: postgres, adapter: postgresAdapter }),
-          sqlEmission,
-          {
-            serializeContract: (c) =>
-              postgres.contractSerializer.serializeContract(
-                c as Parameters<typeof postgres.contractSerializer.serializeContract>[0],
-              ),
-            ...sqlContractCanonicalizationHooks,
-          },
-        );
-        const contractJson = JSON.parse(emitted.contractJson) as Record<string, unknown>;
+        const contractJson = await emitTypeScriptContract(contract);
 
         expect(defaultsOf(contractJson)).toEqual({
           id: undefined,
@@ -239,6 +287,84 @@ describe(
             ],
           },
         );
+      },
+      timeouts.spinUpPpgDev,
+    );
+
+    it(
+      'in a TypeScript enumType, store the lower-case text Postgres returns, and the runtime enum accessor agrees with a value read back',
+      async () => {
+        const Key = enumType(
+          'Key',
+          uuidColumn,
+          member('A', 'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'),
+          member('B', '{B0EEBC99-9C0B4EF8-BB6D6BB9-BD380A11}'),
+        );
+        const contract = defineContract({
+          enums: { Key },
+          models: {
+            T: model('T', {
+              fields: { id: field.column(int4Column).id(), key: field.namedType(Key) },
+            }).sql({ table: 'T' }),
+          },
+        });
+        const contractJson = await emitTypeScriptContract(contract);
+        const emitted = contractJson as unknown as EmittedEnum;
+
+        expect({
+          domainEnum: emitted.domain.namespaces.public.enum.Key,
+          valueSet: emitted.storage.namespaces.public.entries.valueSet.Key,
+          checks: emitted.storage.namespaces.public.entries.table.T.checks.map(
+            (check) => check.expression,
+          ),
+        }).toEqual({
+          domainEnum: {
+            codecId: 'pg/uuid@1',
+            members: [
+              { name: 'A', value: 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11' },
+              { name: 'B', value: 'b0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11' },
+            ],
+          },
+          valueSet: {
+            kind: 'valueSet',
+            values: [
+              'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11',
+              'b0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11',
+            ],
+          },
+          checks: [
+            `"key" IN ('a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', 'b0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11')`,
+          ],
+        });
+
+        const result = await initVerifyAndRead(
+          contractJson,
+          join(testDir, 'migrations'),
+          `INSERT INTO "T" (id, key) VALUES (1, 'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'), (2, '{B0EEBC99-9C0B4EF8-BB6D6BB9-BD380A11}')`,
+        );
+        expect(result).toEqual({
+          ...initializedAndVerified,
+          stored: [
+            { key: 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11' },
+            { key: 'b0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11' },
+          ],
+        });
+
+        const readBack = ('stored' in result ? result.stored : []).map((row) => row['key']);
+        const db = postgresClient({ contract });
+        try {
+          const accessor: RuntimeEnumAccessor | undefined = db.enums['public']?.['Key'];
+          if (accessor === undefined) throw new Error('db.enums.public.Key is missing');
+          expect({
+            members: accessor.members,
+            has: readBack.map((value) => accessor.has(value)),
+          }).toEqual({
+            members: { A: readBack[0], B: readBack[1] },
+            has: [true, true],
+          });
+        } finally {
+          await db.close();
+        }
       },
       timeouts.spinUpPpgDev,
     );
