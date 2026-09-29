@@ -273,6 +273,44 @@ describe('Runtime Errors', () => {
     ).toThrow(existing);
   });
 
+  it('rethrowMarkerReadError passes a DRIVER error through unchanged', () => {
+    const driverError = Object.assign(new Error('Postgres driver is closed'), {
+      code: 'DRIVER.NOT_CONNECTED',
+      category: 'DRIVER',
+      severity: 'error',
+    });
+    const invoke = () =>
+      rethrowMarkerReadError(driverError, {
+        space: 'app',
+        markerLocation: 'prisma_contract.marker',
+      });
+
+    expect(invoke).toThrow(
+      expect.objectContaining({
+        code: 'DRIVER.NOT_CONNECTED',
+        category: 'DRIVER',
+        message: 'Postgres driver is closed',
+      }),
+    );
+    expect(invoke).not.toThrow(CliStructuredError);
+  });
+
+  it('withMarkerReadErrorHandling passes a DRIVER error through unchanged', async () => {
+    const driverError = Object.assign(new Error('connection lost'), {
+      code: 'DRIVER.NOT_CONNECTED',
+      category: 'DRIVER',
+    });
+
+    await expect(
+      withMarkerReadErrorHandling(
+        async () => {
+          throw driverError;
+        },
+        { space: 'app', markerLocation: 'prisma_contract.marker' },
+      ),
+    ).rejects.toBe(driverError);
+  });
+
   it('withMarkerReadErrorHandling wraps async query failures', async () => {
     await expect(
       withMarkerReadErrorHandling(

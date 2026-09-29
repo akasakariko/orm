@@ -114,6 +114,10 @@ export function errorMarkerReadFailed(options: {
   );
 }
 
+function isDriverError(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && 'category' in err && err.category === 'DRIVER';
+}
+
 function isMarkerRowParseError(err: unknown): err is Error {
   return (
     err instanceof Error &&
@@ -160,7 +164,7 @@ export function rethrowMarkerReadError(
   err: unknown,
   context: { readonly space: string; readonly markerLocation: string },
 ): never {
-  if (CliStructuredError.is(err)) {
+  if (CliStructuredError.is(err) || isDriverError(err)) {
     throw err;
   }
   if (isMarkerRowParseError(err)) {
