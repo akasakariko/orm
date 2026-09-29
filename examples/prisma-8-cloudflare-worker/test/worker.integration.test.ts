@@ -135,6 +135,18 @@ describe('worker — postgresServerless against Hyperdrive (local)', () => {
     expect(res.status).toBe(404);
   });
 
+  it('connect rejects with DRIVER.CONNECTION_FAILED when the database refuses the connection', async () => {
+    const error = await postgres
+      .connect({ url: 'postgres://postgres:postgres@127.0.0.1:1/prisma_8_cloudflare_worker' })
+      .then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+
+    expect(error).toMatchObject({ code: 'DRIVER.CONNECTION_FAILED' });
+    expect(JSON.stringify(error)).not.toContain(':postgres@');
+  }, 10_000);
+
   it('a 404 and a 400 open no database connection', async () => {
     const observer = new Client({ connectionString: env.HYPERDRIVE.connectionString });
     observer.on('error', () => {});

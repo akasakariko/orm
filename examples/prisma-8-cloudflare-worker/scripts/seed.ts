@@ -6,8 +6,10 @@
  */
 
 import 'temporal-polyfill/full/global';
+import { Client } from 'pg';
 import { postgres } from '../src/prisma/db';
 import { EXAMPLE_ROOT, HYPERDRIVE_VAR, loadLocalEnv } from './env';
+import { GENERATED_POST_COUNT, insertGeneratedPosts } from './seed-posts';
 
 const firstPostDay = Temporal.PlainDate.from('2026-04-10');
 
@@ -100,8 +102,18 @@ async function main() {
     );
   }
 
+  const bulk = new Client({ connectionString: url });
+  await bulk.connect();
+  try {
+    await insertGeneratedPosts(bulk, [alice.id, bob.id], GENERATED_POST_COUNT);
+  } finally {
+    await bulk.end();
+  }
+
   console.log(`Seeded users: alice=${alice.id}, bob=${bob.id}`);
-  console.log('Seed complete (tasks/bugs/features intentionally empty — exercised by tests).');
+  console.log(
+    `Seeded 8 posts of theirs plus ${GENERATED_POST_COUNT} generated posts for /cursor/large (tasks/bugs/features intentionally empty — exercised by tests).`,
+  );
 }
 
 main().catch((err) => {
