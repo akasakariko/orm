@@ -137,7 +137,21 @@ describe('what each cast converts', () => {
       '-Infinity',
     ],
     ['pg/json to pg/jsonb, the document unchanged', pgJsonb, pgJson.id, { a: [1] }, { a: [1] }],
-    ['pg/text to pg/uuid, the text unchanged', pgUuid, pgText.id, 'abc', 'abc'],
+    [
+      'pg/text to pg/uuid, upper case to the lower case Postgres prints',
+      pgUuid,
+      pgText.id,
+      'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11',
+      'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11',
+    ],
+    [
+      'pg/text to pg/uuid, braces and regrouped hyphens to the form Postgres prints',
+      pgUuid,
+      pgText.id,
+      '{A0EEBC99-9C0B4EF8-BB6D6BB9-BD380A11}',
+      'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11',
+    ],
+    ['pg/text to pg/uuid, text that is not a uuid unchanged', pgUuid, pgText.id, 'abc', 'abc'],
     [
       'pg/text to pg/timestamp, the text to its canonical form',
       pgTimestamp,
@@ -187,6 +201,7 @@ describe('what each cast converts', () => {
 
   it.each([
     ['a value in a shape the source type does not store', pgInt8, pgInt2.id, 'not a number'],
+    ['a uuid that is not text', pgUuid, pgText.id, 42],
     ['a magnitude no double holds', pgFloat8, pgNumeric.id, '1'.padEnd(400, '0')],
     ['a magnitude no float4 holds', pgFloat4, pgNumeric.id, '3.5e38'],
     ['a date that does not exist', pgDate, pgText.id, '2024-02-30'],

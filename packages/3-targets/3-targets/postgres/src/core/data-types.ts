@@ -23,6 +23,7 @@ import {
 } from '@internal/sql-relational-core/ast';
 import { structuredError } from '@internal/utils/structured-error';
 import { pgIntervalCanonical } from './codec-helpers';
+import { canonicalUuidText } from './uuid-text';
 
 /** A cast between two types that store the same shape: the value is already the form this type stores. */
 const unchanged: Cast = (value) => value;
@@ -116,7 +117,11 @@ const fromText: Readonly<Record<string, Cast>> = { [pgText.id]: unchanged };
 
 export const pgChar: DataType = dataType('pg/char', { casts: fromText });
 export const pgVarchar: DataType = dataType('pg/varchar', { casts: fromText });
-export const pgUuid: DataType = dataType('pg/uuid', { casts: fromText });
+/** Text as the uuid Postgres stores for it, so a contract states the default the database reports. */
+const asUuidText: Cast = (value) =>
+  typeof value === 'string' ? canonicalUuidText(value) : wrongShape(value, 'text');
+
+export const pgUuid: DataType = dataType('pg/uuid', { casts: { [pgText.id]: asUuidText } });
 export const pgInet: DataType = dataType('pg/inet', { casts: fromText });
 export const pgBit: DataType = dataType('pg/bit', { casts: fromText });
 export const pgVarbit: DataType = dataType('pg/varbit', { casts: fromText });
