@@ -36,6 +36,7 @@ const TEXT_CODEC_ID = 'mongo/string@1';
 const INT_CODEC_ID = 'mongo/int32@1';
 const JSON_CODEC_ID = 'test/json@1';
 const FOLDING_CODEC_ID = 'test/folding-text@1';
+const ENCODE_FOLDING_CODEC_ID = 'test/encode-folding-text@1';
 
 const textCodec: Codec = {
   id: TEXT_CODEC_ID,
@@ -81,12 +82,24 @@ const foldingCodec: Codec = {
   },
 };
 
+const encodeFoldingCodec: Codec = {
+  id: ENCODE_FOLDING_CODEC_ID,
+  encode: async (v: unknown) => v,
+  decode: async (w: unknown) => w,
+  encodeJson: (value) => String(value).toLowerCase(),
+  decodeJson(json) {
+    if (typeof json !== 'string') throw new Error(`expected string, got ${typeof json}`);
+    return json;
+  },
+};
+
 const testCodecLookup: CodecLookup = {
   get(id: string): Codec | undefined {
     if (id === TEXT_CODEC_ID) return textCodec;
     if (id === INT_CODEC_ID) return intCodec;
     if (id === JSON_CODEC_ID) return jsonCodec;
     if (id === FOLDING_CODEC_ID) return foldingCodec;
+    if (id === ENCODE_FOLDING_CODEC_ID) return encodeFoldingCodec;
     return undefined;
   },
   targetTypesFor(id: string): readonly string[] | undefined {
@@ -98,6 +111,7 @@ const testCodecLookup: CodecLookup = {
     if (id === 'mongo/bson@1') return [];
     if (id === JSON_CODEC_ID) return ['json'];
     if (id === FOLDING_CODEC_ID) return ['text'];
+    if (id === ENCODE_FOLDING_CODEC_ID) return ['text'];
     return undefined;
   },
   renderOutputTypeFor: () => undefined,
@@ -344,6 +358,42 @@ describe('mongoFamilyEnumEntityDescriptor: explicit @@type bypasses inference, n
       expect.objectContaining({
         code: 'PSL_ENUM_DUPLICATE_MEMBER_VALUE',
         message: expect.stringContaining('"admin"'),
+      }),
+    ]);
+  });
+
+  it('holds each member as the value the codec stores', () => {
+    const handle = factory(
+      enumBlock({
+        name: 'Folded',
+        values: { first: 'Admin', second: 'Owner' },
+        typeCodecId: ENCODE_FOLDING_CODEC_ID,
+      }),
+      makeContext([]),
+    );
+
+    expect(handle?.enumMembers).toEqual([
+      { name: 'first', value: 'admin' },
+      { name: 'second', value: 'owner' },
+    ]);
+  });
+
+  it('collides on the values the contract stores, naming both members', () => {
+    const diagnostics: unknown[] = [];
+    const handle = factory(
+      enumBlock({
+        name: 'Folded',
+        values: { first: 'Admin', second: 'admin' },
+        typeCodecId: ENCODE_FOLDING_CODEC_ID,
+      }),
+      makeContext(diagnostics),
+    );
+
+    expect(handle).toBeUndefined();
+    expect(diagnostics).toEqual([
+      expect.objectContaining({
+        code: 'PSL_ENUM_DUPLICATE_MEMBER_VALUE',
+        message: 'enum "Folded": members "first" and "second" both store "admin"',
       }),
     ]);
   });
