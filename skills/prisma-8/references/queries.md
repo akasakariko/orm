@@ -130,7 +130,7 @@ await db.close();
 Every read terminal (`.all()`, and `runtime.query(plan)` for a SQL-builder plan) returns an `AsyncIterableResult`, so `for await` is always available. What it buys you depends on the `cursor` option, which the long-lived `postgres()` façade and the serverless façade (`@prisma/orm-postgres/serverless`) both accept:
 
 - **Default (cursors off), on both façades:** the full result set is fetched from the server before the first row is yielded; only *decoding* happens per row. `for await` therefore does not bound the memory held by the raw result. For very large sets, paginate (`.limit()` / `.offset()`, or `.orderBy(...).cursor(...)`) instead.
-- **`cursor: { batchSize: 100 }` in the factory options, on either façade:** the driver reads through a server-side cursor in batches of that size, so `for await` over `db.orm...all()` or `db.runtime().query(plan)` really does stream, and an early `break` stops reading. Do not turn cursors on behind Cloudflare Hyperdrive: reads with cursors on hang there.
+- **`cursor: { batchSize: 100 }` in the factory options, on either façade:** the driver reads through a server-side cursor in batches of that size, so `for await` over `db.orm...all()` or `db.runtime().query(plan)` really does stream, and an early `break` stops reading. In a Worker, put the option only on a second serverless client that the streaming paths connect through, and keep the client every other path uses without it. Behind Cloudflare Hyperdrive, reads with cursors on hang, so the streaming paths hang there and the other paths do not.
 
 There is no `.stream()` method on either façade.
 

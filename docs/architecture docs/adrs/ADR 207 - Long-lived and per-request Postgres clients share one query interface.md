@@ -187,10 +187,11 @@ Writing `return db.orm.public.User.all()` in this function fails. On a `postgres
 
 ## Cursors are off by default on both clients
 
-Both factories accept `cursor?: PostgresCursorOptions`. When the option is unset or `{ disabled: true }`, both clients read without a cursor: the driver fetches the whole result before it returns the first row. Any other value, such as `{}` or `{ batchSize: 50 }`, turns cursors on: reads on either client stream through a server-side cursor in batches of `batchSize` rows, or 100 rows when `batchSize` is omitted. Streaming suits a request that reads a large result and stops early.
+Both factories accept `cursor?: PostgresCursorOptions`. When the option is unset or `{ disabled: true }`, both clients read without a cursor: the driver fetches the whole result before it returns the first row. Any other value, such as `{}` or `{ batchSize: 50 }`, turns cursors on: reads on either client stream through a server-side cursor in batches of `batchSize` rows, or 100 rows when `batchSize` is omitted. Streaming suits a request that reads a large result and stops early. A Worker that streams on one route gives that route a second client with the option, and every other route keeps the client without it:
 
 ```ts
-const postgres = postgresServerless<Contract>({ contractJson, cursor: { batchSize: 100 } });
+const postgres = postgresServerless<Contract>({ contractJson });
+const streamingPostgres = postgresServerless<Contract>({ contractJson, cursor: { batchSize: 100 } });
 ```
 
 The default is off because, with cursors on, every read hangs behind Cloudflare Hyperdrive, and Hyperdrive is the usual way for a Worker to reach a Postgres database other than Prisma Postgres. The hang raises no error: the connection stops responding, and Cloudflare ends the request after 30 seconds. The [Serverless Deployment Guide](../../Serverless%20Deployment%20Guide.md#known-limitations) records the protocol-level cause. A buffered read works in every deployment, so it is the default for both clients.

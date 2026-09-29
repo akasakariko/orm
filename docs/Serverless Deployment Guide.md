@@ -93,7 +93,7 @@ Wrangler prints a binding ID. Wire it into `wrangler.jsonc`:
 
 `nodejs_compat` is required: the Postgres driver (`pg`) uses several Node built-ins that workerd polyfills under that flag. An audit confirmed `pg` + `pg-cursor` work under `nodejs_compat` end-to-end (open / read / cursor early-break / close) when validated against a localhost Postgres origin and against `vitest-pool-workers`'s miniflare emulator — i.e., paths that do not put real Hyperdrive in front of the origin.
 
-> **Production caveat — read this before deploying.** Against real Hyperdrive, reads with cursors on hang (`pg-cursor`'s extended-query named portal trips a Hyperdrive parser bug — full diagnostic in the [Reads with cursors on hang on Cloudflare Hyperdrive](#known-limitations) entry below). Cursors are off by default; until the upstream fix lands, do not turn them on behind Hyperdrive. The miniflare emulator and localhost Postgres paths above don't reproduce the hang, so the example's local tests pass with cursors on — the bug only surfaces against a real deployed Hyperdrive config.
+> **Production caveat — read this before deploying.** Against real Hyperdrive, reads with cursors on hang (`pg-cursor`'s extended-query named portal trips a Hyperdrive parser bug — full diagnostic in the [Reads with cursors on hang on Cloudflare Hyperdrive](#known-limitations) entry below). Cursors are off by default; until the upstream fix lands, keep the `cursor` option off the client your routes use behind Hyperdrive. A route that connects through a client with the option, as in *Cursor streaming* below, hangs there. The miniflare emulator and localhost Postgres paths above don't reproduce the hang, so the example's local tests pass with cursors on — the bug only surfaces against a real deployed Hyperdrive config.
 
 #### 3. Local dev
 
@@ -126,9 +126,6 @@ export const postgres = postgresServerless<Contract>({
   contractJson,
   // middleware: [...],   // optional — telemetry, lints, budgets, ...
   // extensions: [...],   // optional
-  // cursor: { batchSize: 100 },  // optional — stream reads in batches. Off by
-                                  // default. Do not turn on behind Cloudflare
-                                  // Hyperdrive — see Production caveat above.
 });
 ```
 
@@ -183,16 +180,26 @@ export default {
 
 #### Cursor streaming
 
-Reads are buffered by default. To stream, pass `cursor: { batchSize: 100 }` to `postgresServerless({...})`; the driver then reads through `pg-cursor` in batches of that size:
+Reads are buffered by default. To stream on one route, create a second module-scope client with `cursor: { batchSize: 100 }` and connect through it only on that route. The driver then reads through `pg-cursor` in batches of that size on that route, and every other route keeps the client without the option. Each request still opens one connection:
 
 ```ts
-export const postgres = postgresServerless<Contract>({
+// src/prisma/db.ts
+export const postgres = postgresServerless<Contract>({ contractJson });
+
+/**
+ * Module-scope client with cursors on, used only by the `/cursor/large` route to stream a large result. Reads through it hang behind Cloudflare Hyperdrive.
+ */
+export const streamingPostgres = postgresServerless<Contract>({
   contractJson,
   cursor: { batchSize: 100 },
 });
+
+// src/worker.ts, in fetch
+const routeClient = url.pathname === '/cursor/large' ? streamingPostgres : postgres;
+await using db = await routeClient.connect({ url: env.HYPERDRIVE.connectionString });
 ```
 
-With cursors on, the `for-await ... break` shape exits early without materializing the rest of the result; the cursor closes cleanly on `break`:
+On that route, the `for-await ... break` shape exits early without materializing the rest of the result; the cursor closes cleanly on `break`:
 
 ```ts
 if (url.pathname === '/cursor/large') {
@@ -212,7 +219,7 @@ if (url.pathname === '/cursor/large') {
 }
 ```
 
-Both facades default to cursors off and accept the same `cursor` option. Turn cursors on where a request streams a large result and returns early, because isolate memory pressure makes buffering a 10k-row result before yielding the first row a foot-gun. Do not turn them on behind Cloudflare Hyperdrive.
+Both facades default to cursors off and accept the same `cursor` option. Turn cursors on, through a separate client, only for a route that streams a large result and returns early, because isolate memory pressure makes buffering a 10k-row result before yielding the first row a foot-gun. Behind real Cloudflare Hyperdrive, that route hangs; the routes that use the client without the option do not.
 
 ### Wiring the ORM client
 
@@ -275,9 +282,9 @@ The existing migration commands accept a connection string (typically via `DATAB
 
 - **Inside a transaction, run every query through `tx`.** A per-request client has one connection, so inside `db.transaction(async (tx) => ...)` a query through `db` is not independent of the transaction; run every query through `tx`. A query that uses the client's connection directly, such as a `db.orm` read, a single-statement `db.orm` write or `db.runtime().query(...)`, runs inside the open transaction without saying so. An operation that asks for a connection of its own, such as `db.runtime().connection()`, a `db.orm` create that also writes related rows, or a nested `db.transaction(...)`, waits for the connection the transaction holds, and the request hangs. A second client opened inside the callback with `await using db2 = await postgres.connect(...)` has its own connection, so statements sent through it are not part of the transaction.
 
-- **Isolate memory limits.** Workers isolates have bounded memory (128 MiB by default; higher on Workers Unbound). ORM `findMany`-style operations materialize the result set into a JS array before returning; `limit(...)` is your hard memory cap on those. If you need to stream, pass `cursor: { batchSize }` and use the SQL DSL with `db.runtime().query(...)` — the iterator then reads through a cursor and yields rows as they arrive, with `for-await ... break` cancelling cleanly without buffering the rest of the result set. Not behind Cloudflare Hyperdrive; see the next entry.
+- **Isolate memory limits.** Workers isolates have bounded memory (128 MiB by default; higher on Workers Unbound). ORM `findMany`-style operations materialize the result set into a JS array before returning; `limit(...)` is your hard memory cap on those. If you need to stream, connect through a separate client created with `cursor: { batchSize }` (see *Cursor streaming*) and use the SQL DSL with `db.runtime().query(...)` — the iterator then reads through a cursor and yields rows as they arrive, with `for-await ... break` cancelling cleanly without buffering the rest of the result set. That route hangs behind real Cloudflare Hyperdrive; see the next entry.
 
-- **Reads with cursors on hang on Cloudflare Hyperdrive — cursors are off by default; do not turn them on if your origin sits behind Hyperdrive.** Empirically verified during the May 2026 production smoke. The cursor path uses `pg-cursor`'s extended-query named-portal protocol; after rows are returned and the client sends `Close portal + Sync`, Hyperdrive emits `Protocol Error: Unexpected protocol code: C` (SQLSTATE `58000`) and never follows up with the expected `ReadyForQuery`. The connection wedges; Cloudflare's runtime kills the request at 30 s with error 1101. With cursors on, this affects every read path (SQL DSL, ORM `.all()` / `.first()`, `for await`) — there is no per-call short-circuit, the cursor decision is made at the driver layer for every read. Wrapping the read in `db.transaction(...)` does not help: the failure is in Hyperdrive's protocol parser state, not in connection pinning. The driver's catch-block fallback to simple-query mode does **not** save you either — it only fires on certain thrown errors, and a hang doesn't throw. Workaround: leave the `cursor` option unset behind Hyperdrive, so reads take the buffered path. Tracking upstream as a Cloudflare Hyperdrive bug.
+- **Reads with cursors on hang on Cloudflare Hyperdrive — cursors are off by default; behind Hyperdrive, only routes that use a client without the `cursor` option work.** Empirically verified during the May 2026 production smoke. The cursor path uses `pg-cursor`'s extended-query named-portal protocol; after rows are returned and the client sends `Close portal + Sync`, Hyperdrive emits `Protocol Error: Unexpected protocol code: C` (SQLSTATE `58000`) and never follows up with the expected `ReadyForQuery`. The connection wedges; Cloudflare's runtime kills the request at 30 s with error 1101. With cursors on, this affects every read path (SQL DSL, ORM `.all()` / `.first()`, `for await`) — there is no per-call short-circuit, the cursor decision is made at the driver layer for every read. Wrapping the read in `db.transaction(...)` does not help: the failure is in Hyperdrive's protocol parser state, not in connection pinning. The driver's catch-block fallback to simple-query mode does **not** save you either — it only fires on certain thrown errors, and a hang doesn't throw. Workaround: behind Hyperdrive, connect through a client without the `cursor` option, so reads take the buffered path. A route that connects through a streaming client hangs. Tracking upstream as a Cloudflare Hyperdrive bug.
 
 - **The `@internal/postgres` package statically imports `pg-pool` and `pg-cloudflare`.** The serverless facade does not construct a `pg.Pool` and does not exercise the pool path, but the `pg` library imports both at module load. The bundle includes them. This is not a correctness concern — `pg-cloudflare` activates only when `navigator.userAgent === 'Cloudflare-Workers'` is true at runtime — but it adds bundle weight. The example's full bundle measures around 254 KiB gzipped including these.
 
