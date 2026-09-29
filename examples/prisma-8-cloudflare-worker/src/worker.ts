@@ -1,7 +1,9 @@
 import 'temporal-polyfill/full/global';
 
+import type { PostgresServerlessConnection } from '@prisma/orm-postgres/serverless';
 import { Client } from 'pg';
 import { createOrmClient } from './orm-client/client';
+import type { Contract } from './prisma/contract.d';
 import { postgres, streamingPostgres } from './prisma/db';
 
 interface Env {
@@ -16,8 +18,8 @@ export default {
       return Response.json({ ok: true });
     }
 
-    const routeClient = url.pathname === '/cursor/large' ? streamingPostgres : postgres;
-    await using db = await routeClient.connect({ url: env.HYPERDRIVE.connectionString });
+    const routePostgres = url.pathname === '/cursor/large' ? streamingPostgres : postgres;
+    await using db = await routePostgres.connect({ url: env.HYPERDRIVE.connectionString });
 
     if (url.pathname === '/sql/users') {
       const limit = parseLimit(url.searchParams.get('limit'), 10);
@@ -102,71 +104,10 @@ export default {
       }
     }
 
-    if (url.pathname === '/cursor/large') {
+    if (url.pathname === '/cursor/large' || url.pathname === '/cursor/buffered') {
       const breakAfter = parseLimit(url.searchParams.get('break'), 50);
-      const consumed: { id: string; title: string }[] = [];
-      let cancelled = false;
-
-      // Open a side-channel pg.Client to instrument the cursor query via
-      // pg_stat_statements (loaded via shared_preload_libraries in
-      // docker-compose / CI). Two database connections: `db` owns the one
-      // that runs the SELECT; this observer pg.Client resets stats before
-      // and reads them after, so the test can prove
-      // that with cursor enabled the server transmitted only ~one batch
-      // worth of rows (not the full LIMIT). With cursor disabled the
-      // observer would see the full ~10_000 rows row count.
-      const observer = new Client({ connectionString: env.HYPERDRIVE.connectionString });
-      // A dropped database connection emits 'error' on the pg.Client; without a listener
-      // that is an uncaught exception and kills the isolate mid-response.
-      observer.on('error', () => {});
-      await observer.connect();
-      try {
-        await observer.query('SELECT pg_stat_statements_reset()');
-
-        const t0 = Date.now();
-        // SELECT bounded to the post-table budget cap (10_000 — see
-        // `src/prisma/db.ts`). `db` was opened from `streamingPostgres`, so the
-        // cursor is enabled: the driver opens a
-        // server-side cursor and streams in ~100-row batches; an early
-        // `break` only fetches one batch and closes. With cursor disabled
-        // the driver buffers all 10_000 rows before the first yield.
-        const iter = db.runtime().query(
-          db.sql.public.post
-            .select('id', 'title')
-            .orderBy((f) => f.createdAt, { direction: 'asc' })
-            .limit(10_000)
-            .build(),
-        );
-        for await (const row of iter) {
-          consumed.push(row);
-          if (consumed.length >= breakAfter) {
-            cancelled = true;
-            break;
-          }
-        }
-        const elapsedMs = Date.now() - t0;
-
-        // Sum rows over every statement that touched the post table since
-        // the reset above. pg_stat_statements normalizes parameters but
-        // preserves table names, so the LIKE filter is precise enough.
-        const statsResult = await observer.query<{ rows: string }>(
-          `SELECT COALESCE(SUM(rows), 0)::text AS rows
-           FROM pg_stat_statements
-           WHERE query ILIKE '%from%post%'`,
-        );
-        const rowsTransmitted = Number(statsResult.rows[0]?.rows ?? '0');
-
-        return Response.json({
-          ok: true,
-          route: 'cursor/large',
-          consumed: consumed.length,
-          cancelled,
-          elapsedMs,
-          rowsTransmitted,
-        });
-      } finally {
-        await observer.end();
-      }
+      const result = await readPostsUntilBreak(db, env.HYPERDRIVE.connectionString, breakAfter);
+      return Response.json({ ok: true, route: url.pathname.slice(1), ...result });
     }
 
     // The Task collection (and its Bug/Feature variants) is wired in
@@ -181,6 +122,65 @@ export default {
     );
   },
 };
+
+/**
+ * Reads posts with `for await` and breaks after `breakAfter` rows, then reports how many rows the server sent. On `/cursor/large`, `db` comes from `streamingPostgres`, so the driver streams ~100-row batches and the early `break` fetches one batch. On `/cursor/buffered`, `db` comes from `postgres`, so the driver receives all 10_000 rows before the first yield.
+ */
+async function readPostsUntilBreak(
+  db: Pick<PostgresServerlessConnection<Contract>, 'runtime' | 'sql'>,
+  connectionString: string,
+  breakAfter: number,
+) {
+  const consumed: { id: string; title: string }[] = [];
+  let cancelled = false;
+
+  // Open a side-channel pg.Client to instrument the query via
+  // pg_stat_statements (loaded via shared_preload_libraries in
+  // docker-compose / CI). Two database connections: `db` owns the one
+  // that runs the SELECT; this observer pg.Client resets stats before
+  // and reads them after, so a test can compare the rows the server
+  // transmitted with the rows the loop consumed.
+  const observer = new Client({ connectionString });
+  // A dropped database connection emits 'error' on the pg.Client; without a listener
+  // that is an uncaught exception and kills the isolate mid-response.
+  observer.on('error', () => {});
+  await observer.connect();
+  try {
+    await observer.query('SELECT pg_stat_statements_reset()');
+
+    const t0 = Date.now();
+    // SELECT bounded to the post-table budget cap (10_000 — see `src/prisma/db.ts`).
+    const iter = db.runtime().query(
+      db.sql.public.post
+        .select('id', 'title')
+        .orderBy((f) => f.createdAt, { direction: 'asc' })
+        .limit(10_000)
+        .build(),
+    );
+    for await (const row of iter) {
+      consumed.push(row);
+      if (consumed.length >= breakAfter) {
+        cancelled = true;
+        break;
+      }
+    }
+    const elapsedMs = Date.now() - t0;
+
+    // Sum rows over every statement that touched the post table since
+    // the reset above. pg_stat_statements normalizes parameters but
+    // preserves table names, so the LIKE filter is precise enough.
+    const statsResult = await observer.query<{ rows: string }>(
+      `SELECT COALESCE(SUM(rows), 0)::text AS rows
+       FROM pg_stat_statements
+       WHERE query ILIKE '%from%post%'`,
+    );
+    const rowsTransmitted = Number(statsResult.rows[0]?.rows ?? '0');
+
+    return { consumed: consumed.length, cancelled, elapsedMs, rowsTransmitted };
+  } finally {
+    await observer.end();
+  }
+}
 
 function parseLimit(raw: string | null, fallback: number): number {
   if (!raw) return fallback;

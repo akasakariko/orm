@@ -13,19 +13,20 @@ This example mirrors `examples/prisma-8-demo` (the Node demo), minus pgvector �
   - Default ORM client: `db.orm.public.Post.where({ userId }).limit(10).all()`
   - Custom ORM client with collection classes: `createOrmClient(db).User.newestFirst().limit(10).all()`, built from `db.runtime()` and `db.context`
   - Transactions: `db.transaction(async (tx) => …)`
-- **Cursor early-break** over a streamed result set (`for await … break`). Cursors are off by default; only the `/cursor/large` route opens its connection from a separate serverless client, `streamingPostgres`, with `cursor: { batchSize: 100 }`.
+- **Cursor early-break** over a streamed result set (`for await … break`). Cursors are off by default; only the `/cursor/large` route opens its connection from a separate serverless client, `streamingPostgres`, with `cursor: { batchSize: 100 }`. `/cursor/buffered` runs the same read through a connection from `postgres`, so the server sends the whole result before the first row.
 
 Routes implemented in [`src/worker.ts`](src/worker.ts):
 
-| Route               | Surface           | Notes                                                    |
-| ------------------- | ----------------- | -------------------------------------------------------- |
-| `GET /health`       | —                 | DB-free liveness check                                   |
-| `GET /sql/users`    | SQL DSL           | `db.sql.public.user.select(...).limit(?)`                       |
-| `GET /orm/users`    | Custom ORM client | `User.newestFirst().limit(?)`                             |
-| `GET /orm/posts`    | `db.orm`          | `Post.where({ userId }).orderBy(...).limit(?)`            |
-| `GET /tx/commit`    | `db.transaction`  | INSERT post + UPDATE user atomically                     |
-| `GET /tx/rollback`  | `db.transaction`  | Throws inside the body; verifies ROLLBACK propagates     |
-| `GET /cursor/large` | Cursor stream     | `for await … break` after N rows; cursor cancels cleanly |
+| Route                  | Surface           | Notes                                                                  |
+| ---------------------- | ----------------- | ---------------------------------------------------------------------- |
+| `GET /health`          | —                 | DB-free liveness check                                                 |
+| `GET /sql/users`       | SQL DSL           | `db.sql.public.user.select(...).limit(?)`                              |
+| `GET /orm/users`       | Custom ORM client | `User.newestFirst().limit(?)`                                          |
+| `GET /orm/posts`       | `db.orm`          | `Post.where({ userId }).orderBy(...).limit(?)`                         |
+| `GET /tx/commit`       | `db.transaction`  | INSERT post + UPDATE user atomically                                   |
+| `GET /tx/rollback`     | `db.transaction`  | Throws inside the body; verifies ROLLBACK propagates                   |
+| `GET /cursor/large`    | Cursor stream     | `for await … break` after N rows on `streamingPostgres`; cursor cancels cleanly |
+| `GET /cursor/buffered` | Buffered read     | The same read on `postgres`; the server sends all rows before the first |
 
 ## Layout
 
@@ -156,7 +157,7 @@ The M1 audit's "this works in `wrangler dev`" claim was empirically validated ag
 
 ## Known limitations
 
-- **Transaction affinity** — every `db.transaction` body must run its queries through `tx`, on the same connection `db`. Crossing database connection boundaries inside a transaction body is undefined.
+- **Transaction affinity** — every `db.transaction` body must run its queries through `tx`. A query through `db` inside the body runs inside the open transaction or waits forever, depending on the operation, and a second connection opened inside the body is not part of the transaction; the deployment guide's "Known limitations" lists which operations do what.
 - **Isolate memory** — on the `/cursor/large` route, which uses `cursor: { batchSize: 100 }`, `for await` reads large result sets in batches. The other routes buffer their results. For ORM `findMany`-style operations the result set is materialised; size your `limit(...)` accordingly.
 - **`pg.Pool` not used** — the serverless client routes through `PostgresDirectDriverImpl` (`pgClient` binding kind). No connection pooling within the isolate; that's Hyperdrive's job in production.
 - **Production `id`** — the committed `wrangler.jsonc` has a zero-stuffed Hyperdrive `id`. Deploy will fail until a real id is wired in (M4).

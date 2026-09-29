@@ -9,13 +9,13 @@ async function get(path: string): Promise<Response> {
 }
 
 describe('worker — postgresServerless against Hyperdrive (local)', () => {
-  it('boots and responds to /health (TC-3 — module load under nodejs_compat)', async () => {
+  it('boots and responds to /health without a database connection', async () => {
     const res = await get('/health');
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
   });
 
-  it('SQL DSL select returns seeded users (TC-4)', async () => {
+  it('SQL DSL select returns seeded users', async () => {
     const res = await get('/sql/users?limit=5');
     expect(res.status).toBe(200);
     const body = (await res.json()) as { ok: boolean; rows: { id: string; email: string }[] };
@@ -24,7 +24,7 @@ describe('worker — postgresServerless against Hyperdrive (local)', () => {
     expect(body.rows.map((r) => r.email).sort()).toEqual(['alice@example.com', 'bob@example.com']);
   });
 
-  it('ORM client list returns seeded users (TC-5)', async () => {
+  it('ORM client list returns seeded users', async () => {
     const res = await get('/orm/users?limit=10');
     expect(res.status).toBe(200);
     const body = (await res.json()) as { ok: boolean; rows: { id: string; email: string }[] };
@@ -41,7 +41,7 @@ describe('worker — postgresServerless against Hyperdrive (local)', () => {
     expect(body.rows.every((row) => row.userId === ALICE)).toBe(true);
   });
 
-  it('db.transaction commits a multi-statement transaction (TC-6, AC-10)', async () => {
+  it('db.transaction commits a multi-statement transaction', async () => {
     const res = await get(`/tx/commit?userId=${BOB}&displayName=Bob+the+Builder`);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { ok: boolean; committed?: boolean };
@@ -56,7 +56,7 @@ describe('worker — postgresServerless against Hyperdrive (local)', () => {
     expect(bob?.displayName).toBe('Bob the Builder');
   });
 
-  it('db.transaction rolls back on thrown error (AC-10/AC-11)', async () => {
+  it('db.transaction rolls back on thrown error', async () => {
     const before = (await (await get('/sql/users?limit=10')).json()) as {
       rows: { email: string; displayName: string }[];
     };
@@ -76,7 +76,7 @@ describe('worker — postgresServerless against Hyperdrive (local)', () => {
     expect(aliceAfter?.displayName).not.toBe('rolled-back-write');
   });
 
-  it('cursor early-break consumes only the requested rows (TC-9, AC-6)', async () => {
+  it('cursor early-break consumes only the requested rows', async () => {
     const breakAfter = 7;
     const res = await get(`/cursor/large?break=${breakAfter}`);
     expect(res.status).toBe(200);
@@ -102,6 +102,22 @@ describe('worker — postgresServerless against Hyperdrive (local)', () => {
     // failing decisively at 10_000.
     expect(body.rowsTransmitted).toBeGreaterThan(0);
     expect(body.rowsTransmitted).toBeLessThan(500);
+  });
+
+  it('a route on the serverless client without the cursor option receives the whole result before the first row', async () => {
+    const breakAfter = 7;
+    const res = await get(`/cursor/buffered?break=${breakAfter}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      ok: boolean;
+      consumed: number;
+      cancelled: boolean;
+      rowsTransmitted: number;
+    };
+    expect(body.ok).toBe(true);
+    expect(body.consumed).toBe(breakAfter);
+    expect(body.cancelled).toBe(true);
+    expect(body.rowsTransmitted).toBe(10_000);
   });
 
   it('returns 404 for unknown routes', async () => {
