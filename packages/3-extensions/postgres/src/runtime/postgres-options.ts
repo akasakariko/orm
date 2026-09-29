@@ -11,12 +11,16 @@ import type { PostgresTargetId } from './postgres-target-id';
 
 type PostgresDriverCursorOptions = NonNullable<PostgresDriverCreateOptions['cursor']>;
 
-/** Default time to wait for the database to accept a connection: a client's pool and a connection's `pg.Client`. */
+/**
+ * Default time to wait for the database to accept a connection, for a client's pool and for a
+ * connection's `pg.Client`.
+ */
 export const DEFAULT_CONNECT_TIMEOUT_MILLIS = 20_000;
 
 /**
  * Server-side cursor for reads. Unset reads the whole result before the first row; set streams
- * rows in batches of `batchSize`, 100 when omitted.
+ * rows in batches of `batchSize`, 100 when omitted or `undefined`. A `batchSize` that is not a
+ * positive integer fails the factory call.
  */
 export interface PostgresCursorOptions {
   readonly batchSize?: number | undefined;

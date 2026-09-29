@@ -19,7 +19,7 @@ test('the serverless client has the static members and connect', () => {
   >();
 });
 
-test('the connection is a client without connect', () => {
+test('the connection has the members of a client except connect', () => {
   expectTypeOf<Connection>().toEqualTypeOf<Omit<PostgresClient<TestContract>, 'connect'>>();
 });
 

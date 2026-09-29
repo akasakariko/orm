@@ -991,11 +991,11 @@ The authored SQL AST uses a feature this target cannot render, e.g. DEFAULT as a
 
 ### RUNTIME.BINDING_INVALID
 
-A target facade client (`@internal/postgres`, `@internal/sqlite`, `@internal/mongo`) received a connection binding whose shape is wrong for the target: malformed connection string, unsupported binding kind, or missing required fields. Raised at `connect(...)` / client construction. Payload: `received`, `reason`.
+A client (`postgres()`, `sqlite()`, `mongo()`) received a connection binding whose shape is wrong for the target: malformed connection string, unsupported binding kind, or missing required fields. Raised at `connect(...)` / client construction. A serverless Postgres client raises it from `connect({ url })` for an empty URL, a string that is not a URL, or a scheme other than `postgres://` or `postgresql://`, before any `pg.Client` exists. Payload: `received`, `reason`.
 
 ### RUNTIME.BINDING_MISSING
 
-A target facade client was asked to connect with no binding at all (no connection string, no environment fallback). Payload: `expected`.
+A client (`postgres()`, `sqlite()`, `mongo()`) was asked to connect with no binding at all (no connection string, no environment fallback). Payload: `expected`.
 
 ### RUNTIME.CODEC_DESCRIPTOR_ARRAY_UNSUPPORTED
 
@@ -1184,7 +1184,7 @@ A parameterized codec's `paramsSchema` rejected the `typeParams` carried by a co
 
 ### DRIVER.ALREADY_CONNECTED
 
-Calling `connect(binding)` on a driver, or `connect()` on a target facade client (Postgres, SQLite, Mongo) or the CLI control client, when it is already connected. Close with `close()` before reconnecting with a new binding. Payload: `bindingKind`.
+Calling `connect(binding)` on a driver, or `connect()` on a client (`postgres()`, `sqlite()`, `mongo()`) or the CLI control client, when it is already connected. Close with `close()` before reconnecting with a new binding. Payload: `bindingKind`.
 
 ### DRIVER.CONNECTION_FAILED
 

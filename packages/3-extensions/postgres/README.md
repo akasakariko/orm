@@ -186,7 +186,7 @@ When URL binding is used, pool timeouts are configurable via `poolOptions`:
 - `poolOptions.connectionTimeoutMillis` (default `20_000`)
 - `poolOptions.idleTimeoutMillis` (default `30_000`)
 
-Reads are buffered by default. Pass `cursor` (typed `PostgresCursorOptions`, `{ batchSize?: number }`) to read through a server-side cursor (`pg-cursor`): `{ batchSize: 50 }` streams in batches of 50, `{}` in batches of 100. There is no flag that turns cursors off; leaving the option out does that. A `cursor` value with any other key, or a `batchSize` that is not a positive integer, fails the factory call with `RUNTIME.ARGUMENT_INVALID`. `postgresServerless()` accepts the same option.
+Reads are buffered by default. Pass `cursor` (typed `PostgresCursorOptions`, `{ batchSize?: number | undefined }`) to read through a server-side cursor (`pg-cursor`): `{ batchSize: 50 }` streams in batches of 50; `{}` or `{ batchSize: undefined }` in batches of 100; a `batchSize` that is not a positive integer fails the factory call. There is no flag that turns cursors off; leaving the option out does that. A `cursor` value with any other key, or a `batchSize` that is not a positive integer, fails the factory call with `RUNTIME.ARGUMENT_INVALID`. `postgresServerless()` accepts the same option.
 
 ### Prepared SQL and ORM rows
 

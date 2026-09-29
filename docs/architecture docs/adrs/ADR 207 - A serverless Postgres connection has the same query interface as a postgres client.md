@@ -114,7 +114,7 @@ The serverless client has only what is safe at module scope. A connection has ev
 
 ## The lifetime of a connection
 
-`postgres.connect({ url })` creates one `pg.Client`, connects it to the database, and returns a new connection on every call. There is no pool, and the serverless client is not changed. When the database refuses the connection, rejects the credentials, or does not answer within 20 seconds, `connect` rejects with `DRIVER.CONNECTION_FAILED`, ends the `pg.Client`, and leaves nothing open. An empty URL rejects with `RUNTIME.BINDING_INVALID` before any `pg.Client` exists. A handler that answers an unreachable database with an error response catches the error at `connect`.
+`postgres.connect({ url })` creates one `pg.Client`, connects it to the database, and returns a new connection on every call. There is no pool, and the serverless client is not changed. When the database refuses the connection, rejects the credentials, or does not answer within 20 seconds, `connect` rejects with `DRIVER.CONNECTION_FAILED`, ends the `pg.Client`, and leaves nothing open. An empty URL, a string that is not a URL, or a URL whose scheme is not `postgres://` or `postgresql://` rejects with `RUNTIME.BINDING_INVALID` before any `pg.Client` exists. A handler that answers an unreachable database with an error response catches the error at `connect`.
 
 `await using db = await postgres.connect(...)` closes the connection when the enclosing scope ends, whether the scope returns or throws. Closing ends the `pg.Client`. Calling `close()` or `[Symbol.asyncDispose]` more than once closes it once.
 
@@ -156,10 +156,10 @@ A custom ORM like this is built inside the request, so that it runs on that requ
 
 ## Cursors are off by default
 
-`postgres()` and `postgresServerless()` both accept `cursor?: PostgresCursorOptions`, where `PostgresCursorOptions` is `{ readonly batchSize?: number }`, with the same meaning:
+`postgres()` and `postgresServerless()` both accept `cursor?: PostgresCursorOptions`, where `PostgresCursorOptions` is `{ readonly batchSize?: number | undefined }`, with the same meaning:
 
 - When the option is unset, reads use no cursor. The driver fetches the whole result before it returns the first row.
-- When the option is set, reads stream through a server-side cursor in batches of `batchSize` rows, or 100 rows when `batchSize` is omitted. `{}` streams in batches of 100.
+- When the option is set, reads stream through a server-side cursor in batches of `batchSize` rows, or 100 rows when `batchSize` is omitted or `undefined`. `{}` streams in batches of 100. A `batchSize` that is not a positive integer fails the factory call.
 
 There is no flag that turns cursors off; leaving the option out does that. Each factory maps the option to the driver's own setting. Each factory checks the value at the call: a key other than `batchSize`, including the driver's own `disabled` setting, or a `batchSize` that is not a positive integer, fails the call with `RUNTIME.ARGUMENT_INVALID`. The check protects JavaScript code and options loaded from JSON, which the type does not.
 
