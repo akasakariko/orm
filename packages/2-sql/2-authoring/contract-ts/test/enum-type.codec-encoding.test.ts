@@ -173,7 +173,7 @@ describe('enum lowering encodes member values through the codec', () => {
       expect.objectContaining({
         code: 'CONTRACT.ENUM_INVALID',
         message:
-          'enumType("Ratio"): member "Half" is written 1.5, but the column stores 1.5, which codec "test/decimal@1" cannot read back: database JSON value must be a decimal string. Write the member as a value of the codec\'s input type.',
+          'enumType("Ratio"): member "Half" is written 1.5, which codec "test/decimal@1" cannot read back: database JSON value must be a decimal string. Write the member as a value of the codec\'s input type.',
         meta: expect.objectContaining({
           enumName: 'Ratio',
           member: 'Half',

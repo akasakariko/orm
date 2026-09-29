@@ -516,7 +516,7 @@ function assertStoredAsWritten(
   codec: Codec,
 ): void {
   if (!hasLiteralType(member.value)) return;
-  const written = `enumType("${enumName}"): member "${member.name}" is written ${canonicalStringify(member.value)}, but the column stores ${JSON.stringify(stored)}`;
+  const written = `enumType("${enumName}"): member "${member.name}" is written ${canonicalStringify(member.value)}`;
   const meta = { enumName, member: member.name, reason: 'member-not-stored-as-written' };
   let readBack: unknown;
   try {
@@ -537,9 +537,11 @@ function assertStoredAsWritten(
     return;
   }
   const writeAs = hasLiteralType(readBack) ? canonicalStringify(readBack) : JSON.stringify(stored);
-  throw contractError('CONTRACT.ENUM_INVALID', `${written}. Write the member as ${writeAs}.`, {
-    meta,
-  });
+  throw contractError(
+    'CONTRACT.ENUM_INVALID',
+    `${written}, but the column stores ${JSON.stringify(stored)}. Write the member as ${writeAs}.`,
+    { meta },
+  );
 }
 
 /**
