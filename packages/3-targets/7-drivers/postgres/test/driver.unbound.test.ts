@@ -85,6 +85,44 @@ describe('@internal/driver-postgres runtime driver lifecycle', () => {
       });
     });
 
+    describe('after close()', () => {
+      const closedMessage = 'Postgres driver is closed. Call connect(binding) to reconnect.';
+      const closedError = {
+        code: 'DRIVER.NOT_CONNECTED',
+        category: 'DRIVER',
+        message: closedMessage,
+      };
+
+      async function closedDriver() {
+        const db = newDb();
+        const { Pool: MemPool } = db.adapters.createPg();
+        const driver = createDriver();
+        await driver.connect({ kind: 'pgPool', pool: new MemPool() as unknown as Pool });
+        await driver.close();
+        return driver;
+      }
+
+      it('acquireConnection rejects with the closed message', async () => {
+        const driver = await closedDriver();
+        await expect(driver.acquireConnection()).rejects.toMatchObject(closedError);
+      });
+
+      it('query rejects with the closed message when iterated', async () => {
+        const driver = await closedDriver();
+        await expect(queryRows(driver, 'select 1')).rejects.toMatchObject(closedError);
+      });
+
+      it('execute rejects with the closed message', async () => {
+        const driver = await closedDriver();
+        await expect(executeSql(driver, 'select 1')).rejects.toMatchObject(closedError);
+      });
+
+      it('explain rejects with the closed message', async () => {
+        const driver = await closedDriver();
+        await expect(driver.explain!({ sql: 'select 1' })).rejects.toMatchObject(closedError);
+      });
+    });
+
     it(
       'exposes state transitions across connect close reconnect',
       async () => {

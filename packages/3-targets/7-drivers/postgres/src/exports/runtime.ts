@@ -22,15 +22,16 @@ export type PostgresRuntimeDriver = RuntimeDriverInstance<'sql', 'postgres'> &
 
 const USE_BEFORE_CONNECT_MESSAGE =
   'Postgres driver not connected. Call connect(binding) before acquireConnection or execute.';
+const CLOSED_MESSAGE = 'Postgres driver is closed. Call connect(binding) to reconnect.';
 const ALREADY_CONNECTED_MESSAGE =
   'Postgres driver already connected. Call close() before reconnecting with a new binding.';
 
-function unboundQuery<Row>(): AsyncIterable<Row> {
+function unboundQuery<Row>(notConnected: () => Error): AsyncIterable<Row> {
   return {
     [Symbol.asyncIterator]() {
       return {
         async next() {
-          throw driverError('DRIVER.NOT_CONNECTED', USE_BEFORE_CONNECT_MESSAGE);
+          throw notConnected();
         },
       };
     },
@@ -61,10 +62,17 @@ class PostgresUnboundDriverImpl implements PostgresRuntimeDriver {
     return 'unbound';
   }
 
+  #notConnectedError(): Error {
+    return driverError(
+      'DRIVER.NOT_CONNECTED',
+      this.#closed ? CLOSED_MESSAGE : USE_BEFORE_CONNECT_MESSAGE,
+    );
+  }
+
   #requireDelegate(): SqlDriver<PostgresBinding> {
     const delegate = this.#delegate;
     if (delegate === null) {
-      throw driverError('DRIVER.NOT_CONNECTED', USE_BEFORE_CONNECT_MESSAGE);
+      throw this.#notConnectedError();
     }
     return delegate;
   }
@@ -138,15 +146,13 @@ class PostgresUnboundDriverImpl implements PostgresRuntimeDriver {
 
   query<Row = Record<string, unknown>>(request: SqlExecuteRequest): AsyncIterable<Row> {
     const delegate = this.#delegate;
-    return delegate === null ? unboundQuery<Row>() : delegate.query<Row>(request);
+    return delegate === null
+      ? unboundQuery<Row>(() => this.#notConnectedError())
+      : delegate.query<Row>(request);
   }
 
   async execute(request: SqlExecuteRequest): Promise<SqlStatementStats> {
-    const delegate = this.#delegate;
-    if (delegate === null) {
-      throw driverError('DRIVER.NOT_CONNECTED', USE_BEFORE_CONNECT_MESSAGE);
-    }
-    return delegate.execute(request);
+    return this.#requireDelegate().execute(request);
   }
 
   async explain(request: SqlExecuteRequest): Promise<SqlExplainResult> {
