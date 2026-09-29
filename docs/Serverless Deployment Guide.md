@@ -19,7 +19,7 @@ This guide covers the serverless client from `@internal/postgres/serverless` and
 
 The static members are the same on both sides. They are a pure function of the contract, so they are safe to build once per isolate. Everything bound to a database connection differs in where it lives: `postgres()` keeps it on the client, and `postgresServerless()` puts it on a connection returned by `connect({ url })`. A connection has the members of a `postgres()` client except `connect`. See [ADR 207 — A serverless Postgres connection has the same query interface as a `postgres()` client](./architecture%20docs/adrs/ADR%20207%20-%20A%20serverless%20Postgres%20connection%20has%20the%20same%20query%20interface%20as%20a%20postgres%20client.md) for the architectural rationale and the rejected alternatives.
 
-The practical version: caching a database connection (the `pg.Client` inside a runtime) at module scope across `fetch` invocations is two flavors of unsafe in per-request runtimes — stale-connection failures after isolate idle, and concurrent-`fetch` races on a single shared `pg.Client`. The serverless client makes the lifetime explicit at every call site:
+The practical version: a database connection (the `pg.Client` inside a runtime) kept at module scope across `fetch` invocations fails in the four ways ADR 207 lists: it goes stale after the isolate idles, concurrent `fetch` calls share it, nothing closes it, and Workers reject a socket used across requests. The serverless client makes the lifetime explicit at every call site:
 
 ```ts
 export default {
@@ -33,7 +33,7 @@ export default {
 };
 ```
 
-Inside a request, `db` does everything the `db` from `postgres()` does, so any documented `db.orm...`, `db.sql...`, `db.raw...`, `db.transaction(...)`, `db.prepare(...)` or `db.runtime().query(...)` snippet works unchanged. Await every query before the `await using` scope ends: the connection closes when the scope ends, so a query returned from the scope without `await` (`return db.orm...` instead of `return await db.orm...`) fails with a "not connected" error. Never call `connect` at module scope.
+Inside a request, `db` does everything the `db` from `postgres()` does, so any documented `db.orm...`, `db.sql...`, `db.raw...`, `db.transaction(...)`, `db.prepare(...)` or `db.runtime().query(...)` snippet works unchanged. Await every query before the `await using` scope ends: the connection closes when the scope ends, so a query returned from the scope without `await` (`return db.orm...` instead of `return await db.orm...`) fails when its rows are read. With the default options that error is `CONTRACT.MARKER_READ_FAILED` ("Database error while reading contract marker"), whose cause is `DRIVER.NOT_CONNECTED`; after an earlier awaited query on the connection, or with `verifyMarker: false`, it is `DRIVER.NOT_CONNECTED` itself. `connect` connects to the database before it returns; when the database cannot be reached, it rejects with `DRIVER.CONNECTION_FAILED`, so a handler that answers with a 503 catches it there. Never call `connect` at module scope.
 
 ## Cloudflare Workers + Hyperdrive (worked example)
 
@@ -141,9 +141,11 @@ interface Env {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    // Fresh connection per fetch, with its own pg.Client. When the fetch
-    // body returns (or throws), db.close() runs and ends the pg.Client. No
-    // shared database connection across concurrent fetches in this isolate.
+    // Fresh connection per fetch, with its own pg.Client, connected before
+    // connect() resolves (an unreachable database rejects here with
+    // DRIVER.CONNECTION_FAILED). When the fetch body returns (or throws),
+    // db.close() runs and ends the pg.Client. No shared database connection
+    // across concurrent fetches in this isolate.
     await using db = await postgres.connect({ url: env.HYPERDRIVE.connectionString });
 
     const url = new URL(request.url);
@@ -195,9 +197,11 @@ export const streamingPostgres = postgresServerless<Contract>({
 });
 
 // src/worker.ts, in fetch
-const routeClient = url.pathname === '/cursor/large' ? streamingPostgres : postgres;
-await using db = await routeClient.connect({ url: env.HYPERDRIVE.connectionString });
+const routePostgres = url.pathname === '/cursor/large' ? streamingPostgres : postgres;
+await using db = await routePostgres.connect({ url: env.HYPERDRIVE.connectionString });
 ```
+
+On a connection from `streamingPostgres`, finish or `break` the `for await` loop before sending another query through `db`. The cursor holds the connection's only database connection until the loop ends, so a query inside the loop waits forever and the request hangs. On a client, the same query takes another database connection from the pool.
 
 On that route, the `for-await ... break` shape exits early without materializing the rest of the result; the cursor closes cleanly on `break`:
 
@@ -219,7 +223,7 @@ if (url.pathname === '/cursor/large') {
 }
 ```
 
-`postgres()` and `postgresServerless()` both default to cursors off and accept the same `cursor` option. Turn cursors on, through a separate serverless client, only for a route that streams a large result and returns early, because isolate memory pressure makes buffering a 10k-row result before yielding the first row a foot-gun. Behind real Cloudflare Hyperdrive, that route hangs; the routes whose connections come from the serverless client without the option do not.
+`postgres()` and `postgresServerless()` both default to cursors off and accept the same `cursor` option, `{ batchSize?: number }`. Setting the option turns cursors on: `{}` streams in batches of 100, `{ batchSize: 50 }` in batches of 50; there is no flag that turns them off. Turn cursors on, through a separate serverless client, only for a route that streams a large result and returns early, because isolate memory pressure makes buffering a 10k-row result before yielding the first row a foot-gun. Behind real Cloudflare Hyperdrive, that route hangs; the routes whose connections come from the serverless client without the option do not.
 
 ### Wiring the ORM client
 
@@ -280,9 +284,9 @@ The existing migration commands accept a connection string (typically via `DATAB
 
 ## Known limitations
 
-- **Inside a transaction, run every query through `tx`.** A connection has one database connection, so inside `db.transaction(async (tx) => ...)` a query through `db` is not independent of the transaction; run every query through `tx`. A query that uses the connection's database connection directly, such as a `db.orm` read, a single-statement `db.orm` write or `db.runtime().query(...)`, runs inside the open transaction without saying so. An operation that asks for a database connection of its own, such as `db.runtime().connection()`, a `db.orm` create that also writes related rows, or a nested `db.transaction(...)`, waits for the database connection the transaction holds, and the request hangs. A second connection opened inside the callback with `await using db2 = await postgres.connect(...)` has its own database connection, so statements sent through it are not part of the transaction.
+- **Inside a transaction, run every query through `tx`.** A connection has one database connection, so inside `db.transaction(async (tx) => ...)` a query through `db` is not independent of the transaction; run every query through `tx`. A query that uses the connection's database connection directly, such as a `db.orm` read, a `db.orm` create of one row, an `updateAll(...)` or `deleteAll()`, or `db.runtime().query(...)`, runs inside the open transaction without saying so. An operation that asks for a database connection of its own, such as a `db.orm` `update(...)` or `delete()` of one row, `db.runtime().connection()`, a `db.orm` create that also writes related rows, or a nested `db.transaction(...)`, waits for the database connection the transaction holds, and the request hangs. A second connection opened inside the callback with `await using db2 = await postgres.connect(...)` has its own database connection, so statements sent through it are not part of the transaction.
 
-- **Isolate memory limits.** Workers isolates have bounded memory (128 MiB by default; higher on Workers Unbound). ORM `findMany`-style operations materialize the result set into a JS array before returning; `limit(...)` is your hard memory cap on those. If you need to stream, open the route's connection from a separate serverless client created with `cursor: { batchSize }` (see *Cursor streaming*) and use the SQL DSL with `db.runtime().query(...)` — the iterator then reads through a cursor and yields rows as they arrive, with `for-await ... break` cancelling cleanly without buffering the rest of the result set. That route hangs behind real Cloudflare Hyperdrive; see the next entry.
+- **Isolate memory limits.** Workers isolates have bounded memory (128 MiB by default; higher on Workers Unbound). ORM `findMany`-style operations materialize the result set into a JS array before returning; `limit(...)` is your hard memory cap on those. If you need to stream, open the route's connection from a separate serverless client created with `cursor: { batchSize }` (see *Cursor streaming*) and use the SQL DSL with `db.runtime().query(...)` — the iterator then reads through a cursor and yields rows as they arrive, with `for-await ... break` cancelling cleanly without buffering the rest of the result set. On that connection, end the loop before the next query through `db` (see *Cursor streaming*). That route hangs behind real Cloudflare Hyperdrive; see the next entry.
 
 - **Reads with cursors on hang on Cloudflare Hyperdrive — cursors are off by default; behind Hyperdrive, only routes whose connections come from a serverless client without the `cursor` option work.** Empirically verified during the May 2026 production smoke. The cursor path uses `pg-cursor`'s extended-query named-portal protocol; after rows are returned and the client sends `Close portal + Sync`, Hyperdrive emits `Protocol Error: Unexpected protocol code: C` (SQLSTATE `58000`) and never follows up with the expected `ReadyForQuery`. The database connection wedges; Cloudflare's runtime kills the request at 30 s with error 1101. With cursors on, this affects every read path (SQL DSL, ORM `.all()` / `.first()`, `for await`) — there is no per-call short-circuit, the cursor decision is made at the driver layer for every read. Wrapping the read in `db.transaction(...)` does not help: the failure is in Hyperdrive's protocol parser state, not in connection pinning. The driver's catch-block fallback to simple-query mode does **not** save you either — it only fires on certain thrown errors, and a hang doesn't throw. Workaround: behind Hyperdrive, open connections from a serverless client without the `cursor` option, so reads take the buffered path. A route whose connection comes from a streaming serverless client hangs. Tracking upstream as a Cloudflare Hyperdrive bug.
 

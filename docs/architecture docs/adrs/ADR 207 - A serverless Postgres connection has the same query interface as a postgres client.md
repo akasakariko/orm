@@ -57,7 +57,7 @@ The samples contain three objects. This ADR uses one name for each, and the name
 | **serverless client** | `postgres` in the Worker | `PostgresServerlessClient` | `postgresServerless(...)` | the whole isolate or function instance |
 | **connection** | `db` in the Worker | `PostgresServerlessConnection` | `postgres.connect({ url })` | one request |
 
-A connection owns exactly one database connection, which is one `pg.Client`. Where this ADR means the `pg.Client` and not the object that owns it, it says "database connection".
+A connection owns exactly one database connection, which is one `pg.Client`. Where this ADR means the `pg.Client` and not the object that owns it, it says "database connection". `db.runtime().connection()` returns a runtime connection (`RuntimeConnection`), which reserves the database connection for a sequence of queries. It is not a connection in the sense of this ADR.
 
 `@prisma/orm-postgres` is the published package. Inside this repository it is `@internal/postgres`. `postgres()` comes from its `/runtime` entry point and `postgresServerless()` from its `/serverless` entry point.
 
@@ -69,6 +69,8 @@ The serverless client holds no database connection and has no member that needs 
 
 This gives users one rule: inside a request, `db` does everything the `db` from `postgres()` does. `db.orm...`, `db.sql...`, `db.raw...`, `db.transaction(...)`, `db.prepare(...)` and `db.runtime().query(...)` all work. Documentation and examples name the serverless client `postgres` and the connection `db`, so that code taken from a Node application reads the same inside a request.
 
+`postgres()` and `postgresServerless()` take the same options, apart from where the database is, with the same defaults. Both read without a cursor unless `cursor` is set.
+
 ## Why a Worker cannot share one client
 
 A long-lived process has one lifetime, from start to shutdown. A client creates a `pg.Pool` on first use, and the pool stays valid for all of that lifetime. The pool gives each query a database connection, takes it back afterwards, and replaces database connections that fail. So one client can serve every request.
@@ -79,6 +81,8 @@ Cloudflare Workers, AWS Lambda, Vercel functions and Deno Deploy run code per re
 - **Concurrent requests share it.** Requests handled at the same time in one isolate share module scope. A `pg.Client` runs one query at a time, so one request's queries wait behind another's. If one request opens a transaction, another request's queries can run inside it.
 - **It is never closed.** The end of a request is the moment to close its database connection, but an object at module scope cannot tell when a request ends. The database connection stays open until the isolate is discarded, and counts against the database's connection limit until then.
 - **Workers reject it.** Cloudflare Workers do not let a socket opened while handling one request be used while handling another.
+
+A client at module scope keeps its pool, and so its database connections, at module scope, and fails in the same four ways.
 
 A `pg.Pool` per request would avoid the sharing, but a pool is built for a long-lived process. It keeps timers that close idle database connections, and a pool per request would start and stop that work on every request.
 
@@ -108,7 +112,7 @@ The serverless client has only what is safe at module scope. A connection has ev
 
 ## The lifetime of a connection
 
-`postgres.connect({ url })` opens one `pg.Client`, with no pool, and returns a new connection on every call. It does not change the serverless client.
+`postgres.connect({ url })` creates one `pg.Client`, connects it to the database, and returns a new connection on every call. There is no pool, and the serverless client is not changed. When the database cannot be reached, or the URL is wrong, `connect` rejects with `DRIVER.CONNECTION_FAILED`, ends the `pg.Client`, and leaves nothing open. A handler that answers an unreachable database with an error response catches it at `connect`.
 
 `await using db = await postgres.connect(...)` closes the connection when the enclosing scope ends, whether the scope returns or throws. Closing ends the `pg.Client`. Calling `close()` or `[Symbol.asyncDispose]` more than once closes it once.
 
@@ -148,9 +152,9 @@ export async function listAdmins(url: string) {
 
 A custom ORM like this is built inside the request, so that it runs on that request's connection.
 
-## Two rules that follow from one database connection
+## Three rules that follow from one database connection
 
-A client has a pool. A connection has one database connection. Two rules follow for code that uses a connection. Nothing detects a break of either rule when the code runs, so the documentation states both.
+A client has a pool. A connection has one database connection. Three rules follow for code that uses a connection. Nothing detects a break of any of them when the code runs, so the documentation states all three.
 
 ### Inside a transaction, every query goes through `tx`
 
@@ -160,12 +164,14 @@ A client has a pool. A connection has one database connection. Two rules follow 
 | --- | --- |
 | a `db.orm` read | runs inside the open transaction |
 | a `db.orm` create of a single row | runs inside the open transaction |
+| a `db.orm` `updateAll(...)` or `deleteAll()` | runs inside the open transaction |
 | `db.runtime().query(...)` | runs inside the open transaction |
+| a `db.orm` `update(...)` or `delete()` of one row | waits forever, and the request hangs |
 | `db.runtime().connection()` | waits forever, and the request hangs |
 | a `db.orm` create that also writes related rows | waits forever, and the request hangs |
 | a nested `db.transaction(...)` | waits forever, and the request hangs |
 
-The calls that hang are the ones that ask for a database connection of their own. The transaction holds the only one, so they wait for it, and the transaction waits for them.
+The calls that hang are the ones that ask for a database connection of their own. The transaction holds the only one, so they wait for it, and the transaction waits for them. `update(...)` and `delete()` of one row are among them: they reserve a database connection to find the row and then change it.
 
 On a client, the same calls take another database connection from the pool and run outside the transaction. That is also a mistake, because their writes are not rolled back with the transaction. Sending every query through `tx` is correct on both:
 
@@ -182,7 +188,7 @@ export async function publish(url: string, email: string, title: string) {
 
 ### Every query is awaited before the `await using` scope ends
 
-The connection closes when the scope ends. A query that the scope returns without `await` runs after the connection has closed, and fails with `DRIVER.NOT_CONNECTED`:
+The connection closes when the scope ends. A query that the scope returns without `await` runs after the connection has closed, and fails when its rows are read:
 
 ```ts
 export async function listUsers(url: string) {
@@ -191,7 +197,25 @@ export async function listUsers(url: string) {
 }
 ```
 
-Writing `return db.orm.public.User.all()` in this function fails. With a client the version without `await` works, because a client is not closed at the end of each request.
+Writing `return db.orm.public.User.all()` in this function fails. With the default options the error is `CONTRACT.MARKER_READ_FAILED` ("Database error while reading contract marker"), whose cause is `DRIVER.NOT_CONNECTED`, because the first query on a connection reads the contract marker before it runs. After an earlier awaited query on the same connection, or with `verifyMarker: false`, the error is `DRIVER.NOT_CONNECTED` itself. With a client the version without `await` works, because a client is not closed at the end of each request.
+
+### On a connection with cursors on, a `for await` over a read ends before the next query through `db`
+
+With `cursor` set, a read holds the connection's only database connection until the `for await` loop over it ends or breaks. A query sent through `db` inside the loop waits for that database connection, and the loop waits for the query, so the request hangs. In this sample, `streamingPostgres` is a serverless client created with the `cursor` option, as in the section on cursors below:
+
+```ts
+export async function firstTitles(url: string) {
+  await using db = await streamingPostgres.connect({ url });
+  const titles: string[] = [];
+  for await (const post of db.runtime().query(db.sql.public.post.select('title').limit(500).build())) {
+    titles.push(post.title);
+    if (titles.length === 100) break;
+  }
+  return titles;
+}
+```
+
+A query such as `await db.orm.public.User.first()` inside this loop never returns. On a client, the same query takes another database connection from the pool and the loop completes. With cursors off, the driver reads the whole result before the loop starts, so a query inside the loop works on a connection too.
 
 ## `connect` on a client and on a serverless client
 
@@ -200,16 +224,19 @@ Both have a method named `connect`, and the two methods do different things.
 | | `connect` on a client | `connect` on a serverless client |
 | --- | --- | --- |
 | Effect | connects that client to its database | opens a new connection and leaves the serverless client unchanged |
+| Reaches the database | on the first query; the pool connects in the background | before `connect` resolves; an unreachable database rejects `connect` with `DRIVER.CONNECTION_FAILED` |
 | Returns | the client's runtime | the new connection |
 | How often | at most once; it fails with `DRIVER.ALREADY_CONNECTED` if the client is already connected or connecting | once per request |
 | Required | no; a client created with a `url`, `pg` or `binding` option connects on first use | yes; it is the only way to get a connection |
 
 ## Cursors are off by default
 
-`postgres()` and `postgresServerless()` both accept `cursor?: PostgresCursorOptions`, with the same meaning:
+`postgres()` and `postgresServerless()` both accept `cursor?: PostgresCursorOptions`, where `PostgresCursorOptions` is `{ readonly batchSize?: number }`, with the same meaning:
 
-- When the option is unset or `{ disabled: true }`, reads use no cursor. The driver fetches the whole result before it returns the first row.
-- Any other value, such as `{}` or `{ batchSize: 50 }`, turns cursors on. Reads stream through a server-side cursor in batches of `batchSize` rows, or 100 rows when `batchSize` is omitted.
+- When the option is unset, reads use no cursor. The driver fetches the whole result before it returns the first row.
+- When the option is set, reads stream through a server-side cursor in batches of `batchSize` rows, or 100 rows when `batchSize` is omitted. `{}` streams in batches of 100.
+
+There is no flag that turns cursors off; leaving the option out does that. Each factory maps the option to the driver's own setting.
 
 Streaming suits a request that reads a large result and stops early.
 
@@ -222,9 +249,11 @@ const postgres = postgresServerless<Contract>({ contractJson });
 const streamingPostgres = postgresServerless<Contract>({ contractJson, cursor: { batchSize: 100 } });
 ```
 
+On a connection from `streamingPostgres`, a `for await` over a read must end before the next query through `db`, as the third rule above says. A query inside the loop waits forever.
+
 ## How the two are kept the same
 
-The three member groups are three interfaces: `PostgresStaticMembers`, `PostgresRuntimeBoundMembers` and `PostgresClientLifecycle`. `PostgresClient` and `PostgresServerlessConnection` both extend all three. A member added to one of the interfaces reaches both. A member added to `PostgresClient` alone does not reach a connection.
+The three member groups are three interfaces: `PostgresStaticMembers`, `PostgresRuntimeBoundMembers` and `PostgresLifecycleMembers`. `PostgresStaticMembers` is `PostgresStaticContext`, the object that `postgresStatic()` from the `/static` entry point returns, plus `stack`, which `/static` cannot offer because its stack has no driver. `PostgresClient` and `PostgresServerlessConnection` both extend all three. A member added to one of the interfaces reaches both. A member added to `PostgresClient` alone does not reach a connection.
 
 Two functions build the members for both:
 
@@ -233,7 +262,7 @@ Two functions build the members for both:
 
 A client and a connection differ only in what they pass as `getRuntime`. A client passes a function that creates its pool-backed runtime on first use. A connection passes a function that returns the runtime of its one database connection, and throws `DRIVER.NOT_CONNECTED` once the connection is closed.
 
-`postgres()` and `postgresServerless()` take the same options, apart from how they reach the database: `contractJson` or `contract`, `extensions`, `middleware`, `verifyMarker` and `cursor`. `postgres()` also takes `url`, `pg` or `binding`, and `poolOptions`. `postgresServerless()` takes none of those, because the URL is given to each `connect` call. A type test checks that the shared option keys match. Both compose the same execution stack of `postgresTarget`, `postgresAdapter` and `postgresDriver`.
+`postgres()` and `postgresServerless()` share one declaration of the options that say how queries run: `extensions`, `middleware`, `verifyMarker` and `cursor`. Both also take `contractJson` or `contract`. `postgres()` alone takes `url`, `pg` or `binding`, because a connection gets its URL from each `connect` call, and `poolOptions`, because a connection has no pool. A connection has no connect timeout option. A type test checks that the two option types differ in exactly `binding`, `url`, `pg` and `poolOptions`, so an option added to one factory's options and not the other's fails the build. Both compose the same execution stack of `postgresTarget`, `postgresAdapter` and `postgresDriver`.
 
 ## Consequences
 
@@ -247,7 +276,7 @@ A client and a connection differ only in what they pass as `getRuntime`. A clien
 ### Costs
 
 - **The `/serverless` entry point includes the ORM, about 32 kB gzipped.** It is in the bundle even for code that uses only the SQL builder, `db.sql`.
-- **The transaction rule and the `await` rule are documented, not enforced.** A break of either fails or hangs when the code runs, with no earlier warning.
+- **The three rules are documented, not enforced.** A break of any of them fails or hangs when the code runs, with no earlier warning.
 - **`connect` has two meanings**, as the table above shows.
 
 ## Related ADRs
