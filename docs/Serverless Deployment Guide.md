@@ -145,7 +145,7 @@ export default {
 
     // Answer requests that need no query before connect(): connect() opens a
     // database connection whether or not a query follows.
-    if (!['/sql/users', '/orm/posts', '/tx/example'].includes(url.pathname)) {
+    if (!['/sql/users', '/orm/posts', '/tx/example', '/cursor/large'].includes(url.pathname)) {
       return new Response('not found', { status: 404 });
     }
 

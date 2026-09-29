@@ -159,7 +159,7 @@ A custom ORM like this is built inside the request, so that it runs on that requ
 - When the option is unset, reads use no cursor. The driver fetches the whole result before it returns the first row.
 - When the option is set, reads stream through a server-side cursor in batches of `batchSize` rows, or 100 rows when `batchSize` is omitted. `{}` streams in batches of 100.
 
-There is no flag that turns cursors off; leaving the option out does that. Each factory maps the option to the driver's own setting. A `cursor` value with any other key, or a `batchSize` that is not a positive integer, fails the factory call with `RUNTIME.ARGUMENT_INVALID`, so JavaScript code or options loaded from JSON that still pass `{ disabled: true }` fail at once instead of turning cursors on.
+There is no flag that turns cursors off; leaving the option out does that. Each factory maps the option to the driver's own setting. Each factory checks the value at the call: a key other than `batchSize`, including the driver's own `disabled` setting, or a `batchSize` that is not a positive integer, fails the call with `RUNTIME.ARGUMENT_INVALID`. The check protects JavaScript code and options loaded from JSON, which the type does not.
 
 Streaming suits a request that reads a large result and stops early.
 
