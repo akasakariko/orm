@@ -1,5 +1,6 @@
 import type {
   ColumnDefault,
+  ColumnDefaultLiteralInputValue,
   ContractMarkerRecord,
   LedgerEntryRecord,
 } from '@internal/contract/types';
@@ -10,7 +11,7 @@ import {
 } from '@internal/errors/execution';
 import type { SqlControlAdapter } from '@internal/family-sql/control-adapter';
 import { parseContractMarkerRow } from '@internal/family-sql/verify';
-import type { CodecLookup } from '@internal/framework-components/codec';
+import type { Codec, CodecLookup } from '@internal/framework-components/codec';
 import { materializeCodec } from '@internal/framework-components/codec';
 import { APP_SPACE_ID, type SchemaNodeRef } from '@internal/framework-components/control';
 import { UNBOUND_NAMESPACE_ID } from '@internal/framework-components/ir';
@@ -1763,37 +1764,64 @@ async function pgRenderDdlColumnDefault(
     }
     return `DEFAULT (${def.expression})`;
   }
+  const codec = pgColumnCodec(codecLookup, codecRef);
   const dataTypeId =
     codecRef === undefined ? undefined : codecLookup.descriptorFor?.(codecRef.codecId)?.dataType;
   if (Array.isArray(def.value) && nativeType.endsWith('[]')) {
-    return `DEFAULT ${renderDefaultLiteral(def.value, { many: true, nativeType, dataTypeId })}`;
-  }
-  if (typeof def.value === 'string' && isPostgresDateTimeDataType(dataTypeId)) {
-    return `DEFAULT ${pgInlineLiteral(postgresDateTimeDdlText(def.value, dataTypeId), nativeType)}`;
-  }
-  if (codecRef !== undefined) {
-    // Built with the column's own `typeParams`: a parameterized codec answers for them when it
-    // reads a default back — `pg/vector@1` checks the length its column declares — and the lookup's
-    // representative instance carries none.
-    const descriptor = codecLookup.descriptorFor?.(codecRef.codecId);
-    const codec =
-      descriptor === undefined
-        ? codecLookup.get(codecRef.codecId)
-        : materializeCodec(descriptor, codecRef, { name: codecRef.codecId });
-    if (codec !== undefined) {
-      // A literal default reaches here either as the canonical JSON a
-      // contract stores or as the value an authoring surface built, and only
-      // the first needs reading back: `pg/int8@1` stores decimal text for a
-      // `bigint`, which `encode` does not take. A `Date` is the one authored
-      // value JSON has no notation for, so it is the one that arrives as
-      // itself.
-      const value = def.value instanceof Date ? def.value : codec.decodeJson(def.value);
-      const wire = await codec.encode(value, {});
-      return `DEFAULT ${pgInlineLiteral(wire, nativeType)}`;
+    const elementCodec = codecRef?.many === true ? codec : undefined;
+    if (elementCodec === undefined || def.value.length === 0) {
+      return `DEFAULT ${renderDefaultLiteral(def.value, { many: true, nativeType, dataTypeId })}`;
     }
+    const elementType = nativeType.slice(0, -2);
+    const elements = await Promise.all(
+      def.value.map((element: ColumnDefaultLiteralInputValue) =>
+        element === null
+          ? 'NULL'
+          : pgCodecLiteral(element, elementCodec, dataTypeId, elementType),
+      ),
+    );
+    return `DEFAULT ARRAY[${elements.join(', ')}]::${nativeType}`;
+  }
+  if (codec !== undefined) {
+    return `DEFAULT ${await pgCodecLiteral(def.value, codec, dataTypeId, nativeType)}`;
   }
   // Fallback: codec-less literal defaults follow RawSqlLiteral wire-scalar semantics.
   return `DEFAULT ${pgInlineLiteral(def.value, nativeType)}`;
+}
+
+/**
+ * Builds the column's codec with the column's own `typeParams`: a parameterized codec answers for
+ * them when it reads a default back — `pg/vector@1` checks the length its column declares — and the lookup's
+ * representative instance carries none.
+ */
+function pgColumnCodec(
+  codecLookup: CodecLookup,
+  codecRef: CodecRef | undefined,
+): Codec | undefined {
+  if (codecRef === undefined) return undefined;
+  const descriptor = codecLookup.descriptorFor?.(codecRef.codecId);
+  return descriptor === undefined
+    ? codecLookup.get(codecRef.codecId)
+    : materializeCodec(descriptor, codecRef, { name: codecRef.codecId });
+}
+
+/**
+ * A literal default reaches here either as the canonical JSON a contract stores or as the value an
+ * authoring surface built, and only the first needs reading back: `pg/int8@1` stores decimal text
+ * for a `bigint`, which `encode` does not take. A `Date` is the one authored value JSON has no
+ * notation for, so it is the one that arrives as itself.
+ */
+async function pgCodecLiteral(
+  value: ColumnDefaultLiteralInputValue,
+  codec: Codec,
+  dataTypeId: string | undefined,
+  nativeType: string,
+): Promise<string> {
+  if (typeof value === 'string' && isPostgresDateTimeDataType(dataTypeId)) {
+    return pgInlineLiteral(postgresDateTimeDdlText(value, dataTypeId), nativeType);
+  }
+  const decoded = value instanceof Date ? value : codec.decodeJson(value);
+  return pgInlineLiteral(await codec.encode(decoded, {}), nativeType);
 }
 
 async function pgRenderDdlColumn(column: DdlColumn, codecLookup: CodecLookup): Promise<string> {

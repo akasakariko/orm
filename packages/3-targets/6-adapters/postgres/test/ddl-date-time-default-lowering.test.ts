@@ -71,6 +71,8 @@ describe('a date or time default in CREATE TABLE', () => {
         ['2024-01-01T00:00:00Z', '-000043-03-15T00:00:00Z'],
         true,
       ),
-    ).toBe("DEFAULT ARRAY['2024-01-01T00:00:00Z', '0044-03-15T00:00:00Z BC']::timestamptz[]");
+    ).toBe(
+      "DEFAULT ARRAY['2024-01-01T00:00:00Z'::timestamptz, '0044-03-15T00:00:00Z BC'::timestamptz]::timestamptz[]",
+    );
   });
 });

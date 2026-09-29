@@ -1,3 +1,5 @@
+import type { ColumnDefaultLiteralInputValue } from '@internal/contract/types';
+import type { DdlColumn } from '@internal/sql-relational-core/ast';
 import { col, fn, lit } from '@internal/sql-relational-core/contract-free';
 import { createPostgresBuiltinCodecLookup } from '@internal/target-postgres/codecs';
 import { PostgresCreateTable } from '@internal/target-postgres/ddl';
@@ -247,13 +249,13 @@ describe('PostgresCreateTable DDL lowering', () => {
     const adapter = new PostgresControlAdapter(createPostgresBuiltinCodecLookup());
     const lowered = await adapter.lowerToExecuteRequest(ast, { contract: {} as PostgresContract });
     expect(lowered.sql).toContain(
-      `"ids" int8[] DEFAULT ARRAY['1', '-2', '9007199254740993']::int8[]`,
+      `"ids" int8[] DEFAULT ARRAY['1'::int8, '-2'::int8, '9007199254740993'::int8]::int8[]`,
     );
     expect(lowered.sql).toContain(
-      `"amounts" numeric(10,2)[] DEFAULT ARRAY['1.5', '-2.25']::numeric(10,2)[]`,
+      `"amounts" numeric(10,2)[] DEFAULT ARRAY['1.5'::numeric(10,2), '-2.25'::numeric(10,2)]::numeric(10,2)[]`,
     );
     expect(lowered.sql).toContain(
-      `"stamps" timestamp(3)[] DEFAULT ARRAY['2024-01-01T00:00:00']::timestamp(3)[]`,
+      `"stamps" timestamp(3)[] DEFAULT ARRAY['2024-01-01T00:00:00'::timestamp(3)]::timestamp(3)[]`,
     );
     expect(lowered.sql).toContain(`"tags" text[] DEFAULT '{}'`);
   });
@@ -270,5 +272,98 @@ describe('PostgresCreateTable DDL lowering', () => {
     const lowered = await adapter.lowerToExecuteRequest(ast, { contract: {} as PostgresContract });
     expect(lowered.sql).toContain('"active" bool DEFAULT true NOT NULL');
     expect(lowered.sql).toContain(`"status" text DEFAULT 'open' NOT NULL`);
+  });
+});
+
+describe('PostgresCreateTable list literal defaults', () => {
+  const adapter = new PostgresControlAdapter(createPostgresBuiltinCodecLookup());
+
+  async function renderColumn(column: DdlColumn): Promise<string> {
+    const lowered = await adapter.lowerToExecuteRequest(
+      new PostgresCreateTable({ table: 'lists', columns: [column] }),
+    );
+    return lowered.sql;
+  }
+
+  it('renders each bytea element as the bytes its base64 text encodes', async () => {
+    const sql = await renderColumn(
+      col('bytes', 'bytea[]', {
+        default: lit(['aGVsbG8=']),
+        codecRef: { codecId: 'pg/bytea@1', many: true },
+      }),
+    );
+    expect(sql).toContain(`"bytes" bytea[] DEFAULT ARRAY['\\x68656c6c6f'::bytea]::bytea[]`);
+  });
+
+  it('renders each jsonb element as a JSON document, a string element included', async () => {
+    const sql = await renderColumn(
+      col('documents', 'jsonb[]', {
+        default: lit([{ a: 1 }, 'x']),
+        codecRef: { codecId: 'pg/jsonb@1', many: true },
+      }),
+    );
+    expect(sql).toContain(
+      `"documents" jsonb[] DEFAULT ARRAY['{"a":1}'::jsonb, '"x"'::jsonb]::jsonb[]`,
+    );
+  });
+
+  it('writes each interval element as its date and time text, with the element cast', async () => {
+    const sql = await renderColumn(
+      col('spans', 'interval[]', {
+        default: lit(['P1DT2H', 'PT-0.5S']),
+        codecRef: { codecId: 'pg/interval@1', many: true },
+      }),
+    );
+    expect(sql).toContain(
+      `"spans" interval[] DEFAULT ARRAY['P1DT2H'::interval, 'PT-0.5S'::interval]::interval[]`,
+    );
+  });
+
+  it('renders a null element as NULL', async () => {
+    const sql = await renderColumn(
+      col('bytes', 'bytea[]', {
+        default: lit(['aGVsbG8=', null]),
+        codecRef: { codecId: 'pg/bytea@1', many: true },
+      }),
+    );
+    expect(sql).toContain(`"bytes" bytea[] DEFAULT ARRAY['\\x68656c6c6f'::bytea, NULL]::bytea[]`);
+  });
+
+  it('encodes a Date element without reading it as JSON', async () => {
+    const sql = await renderColumn(
+      col('stamps', 'timestamptz(3)[]', {
+        default: lit([
+          new Date('2025-06-01T00:00:00.000Z'),
+        ] as unknown as ColumnDefaultLiteralInputValue),
+        codecRef: { codecId: 'pg/timestamptz-date@1', typeParams: { precision: 3 }, many: true },
+      }),
+    );
+    expect(sql).toContain(
+      `"stamps" timestamptz(3)[] DEFAULT ARRAY['2025-06-01T00:00:00.000Z'::timestamptz(3)]::timestamptz(3)[]`,
+    );
+  });
+
+  it('renders the raw elements when the codec is not registered', async () => {
+    const sql = await renderColumn(
+      col('bytes', 'bytea[]', {
+        default: lit(['aGVsbG8=']),
+        codecRef: { codecId: 'unregistered@1', many: true },
+      }),
+    );
+    expect(sql).toContain(`"bytes" bytea[] DEFAULT ARRAY['aGVsbG8=']::bytea[]`);
+  });
+
+  it('refuses a malformed bytea element with the codec error', async () => {
+    await expect(
+      renderColumn(
+        col('bytes', 'bytea[]', {
+          default: lit(['aGVsbG8=', 'not base64!']),
+          codecRef: { codecId: 'pg/bytea@1', many: true },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      code: 'RUNTIME.DECODE_FAILED',
+      message: 'pg/bytea@1 database JSON value must be a base64 string',
+    });
   });
 });
