@@ -57,19 +57,21 @@ The samples contain three objects. This ADR uses one name for each, and the name
 | **serverless client** | `postgres` in the Worker | `PostgresServerlessClient` | `postgresServerless(...)` | the whole isolate or function instance |
 | **connection** | `db` in the Worker | `PostgresServerlessConnection` | `postgres.connect({ url })` | one request |
 
-A connection owns exactly one database connection, which is one `pg.Client`. Where this ADR means the `pg.Client` and not the object that owns it, it says "database connection". `db.runtime().connection()` returns a runtime connection (`RuntimeConnection`), which reserves the database connection for a sequence of queries. It is not a connection in the sense of this ADR.
+A connection owns exactly one database connection, which is one `pg.Client`. Where this ADR means the `pg.Client` and not the object that owns it, it says "database connection". `db.runtime().connection()` returns a runtime connection (`RuntimeConnection`), which reserves the database connection for a sequence of queries. It is not a connection in the sense of this ADR. ADR 159 calls the handle that a driver's `acquireConnection()` returns a connection; this ADR calls it a driver connection.
 
 `@prisma/orm-postgres` is the published package. Inside this repository it is `@internal/postgres`. `postgres()` comes from its `/runtime` entry point and `postgresServerless()` from its `/serverless` entry point.
 
 ## Decision
 
-A connection has every member that a client has, except `connect`. Code written against a client's `db` works unchanged against a connection's `db`.
+A connection has every member that a client has, except `connect`. Code written against a client's `db` works unchanged against a connection's `db`. A function meant for both types its parameter as `PostgresServerlessConnection<Contract>`, which a client also satisfies; a parameter typed `PostgresClient<Contract>` rejects a connection, because a connection has no `connect`.
 
 The serverless client holds no database connection and has no member that needs one. It offers the members that are built from the contract alone, and `connect`.
 
+`connect` on a serverless client opens the database connection before it returns. It rejects with `DRIVER.CONNECTION_FAILED` when the database refuses the connection, rejects the credentials, or does not answer within 20 seconds, so a handler deals with an unreachable database at `connect` and not at its first query.
+
 This gives users one rule: inside a request, `db` does everything the `db` from `postgres()` does. `db.orm...`, `db.sql...`, `db.raw...`, `db.transaction(...)`, `db.prepare(...)` and `db.runtime().query(...)` all work. Documentation and examples name the serverless client `postgres` and the connection `db`, so that code taken from a Node application reads the same inside a request.
 
-`postgres()` and `postgresServerless()` take the same options, apart from where the database is, with the same defaults. Both read without a cursor unless `cursor` is set.
+`postgres()` and `postgresServerless()` take the same options, apart from where the database is and the pool settings, with the same defaults. Both read without a cursor unless `cursor` is set.
 
 ## Why a Worker cannot share one client
 
@@ -258,7 +260,7 @@ Two functions build the members for both:
 - `buildPostgresStaticContext` builds `sql`, `raw`, `enums` and `nativeEnums` from the execution context.
 - `buildPostgresRuntimeBoundMembers` builds `orm`, `runtime()`, `transaction(fn)` and `prepare(...)`. One of its arguments is a function, `getRuntime`, that returns the runtime to run on.
 
-A client and a connection differ only in what they pass as `getRuntime`. A client passes a function that creates its pool-backed runtime on first use. A connection passes a function that returns the runtime of its one database connection, and throws `DRIVER.NOT_CONNECTED` once the connection is closed.
+A client and a connection differ only in what they pass as `getRuntime`. A client passes a function that creates its runtime on first use. A connection passes a function that returns the runtime of its one database connection, and throws `DRIVER.NOT_CONNECTED` once the connection is closed.
 
 `postgres()` and `postgresServerless()` share one declaration of the options that say how queries run: `extensions`, `middleware`, `verifyMarker` and `cursor`. Both also take `contractJson` or `contract`. `postgres()` alone takes `url`, `pg` or `binding`, because a connection gets its URL from each `connect` call, and `poolOptions`, because a connection has no pool. A connection's `pg.Client` gets the same 20 second connect timeout that a client's pool gets by default, and there is no option to change it. A type test checks that the two option types differ in exactly `binding`, `url`, `pg` and `poolOptions`, so an option added to one factory's options and not the other's fails the build. Both compose the same execution stack of `postgresTarget`, `postgresAdapter` and `postgresDriver`.
 
@@ -301,6 +303,14 @@ There would be no serverless client, only a function that opens a connection. Co
 ### A second serverless entry point without the ORM
 
 A second entry point would offer a connection without `orm`, to save the 32 kB in bundles that do not use it. There would then be two kinds of connection with different abilities, and code written against `db` would work on one and fail on the other.
+
+### `connect` stays lazy
+
+`connect` would create the `pg.Client` and bind the driver, and the first query would open the database connection, as ADR 159 does by default. A bad URL or an unreachable database would then fail at the first query, often as `CONTRACT.MARKER_READ_FAILED`, far from its cause, and a handler could not answer an unreachable database at `connect`. Connecting at `connect` costs nothing for a request that queries, and a request that does not query answers before `connect`.
+
+### The public `cursor` option keeps the driver's `disabled` flag
+
+The option would be the driver's `{ batchSize?, disabled? }`. With cursors off by default, `{}` would turn cursors on and `{ disabled: true }` would only repeat the default, so the flag would add a second way to write "off" and make `{}` read as "default settings" when it means "on".
 
 ### Cursors on by default for `postgresServerless()`
 
