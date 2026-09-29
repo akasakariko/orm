@@ -1,5 +1,6 @@
 import { env, SELF } from 'cloudflare:test';
-import { describe, expect, inject, it } from 'vitest';
+import { Client } from 'pg';
+import { describe, expect, inject, it, vi } from 'vitest';
 import { postgres } from '../src/prisma/db';
 import { countPostRowsSent } from './rows-sent';
 
@@ -132,5 +133,35 @@ describe('worker — postgresServerless against Hyperdrive (local)', () => {
   it('returns 404 for unknown routes', async () => {
     const res = await get('/no/such/route');
     expect(res.status).toBe(404);
+  });
+
+  it('a 404 and a 400 open no database connection', async () => {
+    const observer = new Client({ connectionString: env.HYPERDRIVE.connectionString });
+    observer.on('error', () => {});
+    await observer.connect();
+    const sessions = async () => {
+      const result = await observer.query<{ sessions: string }>(
+        'SELECT sessions::text AS sessions FROM pg_stat_database WHERE datname = current_database()',
+      );
+      return Number(result.rows[0]?.sessions ?? '0');
+    };
+    try {
+      // The observer's own session is counted once its backend has flushed
+      // its statistics, which happens after its first command completes.
+      await sessions();
+      const before = await sessions();
+
+      expect((await get('/no/such/route')).status).toBe(404);
+      expect((await get('/orm/posts?userId=')).status).toBe(400);
+      expect((await get('/tx/commit')).status).toBe(400);
+      expect((await get('/sql/users?limit=1')).status).toBe(200);
+
+      await vi.waitFor(async () => expect(await sessions()).toBeGreaterThanOrEqual(before + 1), {
+        timeout: 5_000,
+      });
+      expect(await sessions()).toBe(before + 1);
+    } finally {
+      await observer.end();
+    }
   });
 });

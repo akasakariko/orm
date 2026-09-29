@@ -30,7 +30,7 @@ export default {
     }
 
     const userId = url.searchParams.get('userId');
-    if ((url.pathname === '/orm/posts' || url.pathname === '/tx/commit') && userId === null) {
+    if ((url.pathname === '/orm/posts' || url.pathname === '/tx/commit') && !userId) {
       return Response.json({ ok: false, error: 'userId required' }, { status: 400 });
     }
 
@@ -57,7 +57,7 @@ export default {
       return Response.json({ ok: true, route: 'orm/users', count: rows.length, rows });
     }
 
-    if (url.pathname === '/orm/posts' && userId !== null) {
+    if (url.pathname === '/orm/posts' && userId) {
       const limit = parseLimit(url.searchParams.get('limit'), 10);
       const rows = await db.orm.public.Post.where({ userId })
         .orderBy((post) => post.createdAt.desc())
@@ -66,7 +66,7 @@ export default {
       return Response.json({ ok: true, route: 'orm/posts', count: rows.length, rows });
     }
 
-    if (url.pathname === '/tx/commit' && userId !== null) {
+    if (url.pathname === '/tx/commit' && userId) {
       const newDisplayName = url.searchParams.get('displayName') ?? 'Updated';
       const result = await db.transaction(async (tx) => {
         await tx.execute(
