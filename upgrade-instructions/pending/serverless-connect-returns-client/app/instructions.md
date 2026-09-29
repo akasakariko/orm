@@ -13,7 +13,7 @@ changes:
       matches:
         - '[''"]@prisma/orm-postgres/serverless[''"]'
   - id: serverless-cursor-default-off
-    summary: "Reads through the client from @prisma/orm-postgres/serverless no longer go through a server-side cursor by default. Pass cursor: { batchSize: 100 } to keep batched streaming, except behind Cloudflare Hyperdrive. PostgresServerlessCursorOptions is now PostgresCursorOptions."
+    summary: "Reads through the client from @prisma/orm-postgres/serverless no longer go through a server-side cursor by default. A path that must keep batched streaming connects through a second client with cursor: { batchSize: 100 }; that path hangs behind Cloudflare Hyperdrive. PostgresServerlessCursorOptions is now PostgresCursorOptions."
     detection:
       glob: "**/*.{ts,mts,cts,tsx}"
       matches:
@@ -126,12 +126,44 @@ await db.transaction(async (tx) => {
 
 `postgresServerless()` used to read through `pg-cursor` in batches of 100 rows unless you passed `cursor: { disabled: true }`. Reads are now buffered by default, the same as on `postgres()`: the whole result arrives before the first row is yielded.
 
-1. If code relies on batched streaming, for example `for await` over a large result with an early `break`, pass `cursor: { batchSize: 100 }` to `postgresServerless(...)`. Reads with cursors on hang behind Cloudflare Hyperdrive, so do not add the option there. To stream on some paths only, create a second module-scope client with the `cursor` option and connect through it only on those paths; the other paths keep the client without it.
+1. Find the paths that rely on batched streaming, for example `for await` over a large result with an early `break`. Leave the client every other path uses without a `cursor` option; those paths now buffer. To keep a streaming path streaming, give it its own module-scope client with `cursor: { batchSize: 100 }`, for example `streamingPostgres`, and connect through that client only on that path, so each request still opens one connection. Document on that client that it is used only by that path and that reads through it hang behind Cloudflare Hyperdrive. Behind real Cloudflare Hyperdrive that path hangs, because reads with cursors on hang there; the other paths do not. If the path must work behind real Hyperdrive, do not create the second client and accept buffered reads on it instead. Never put the `cursor` option on the client every path uses.
 2. Remove `cursor: { disabled: true }` from `postgresServerless(...)` options. It is now the default.
 3. Replace the type `PostgresServerlessCursorOptions` with `PostgresCursorOptions`, exported from `@prisma/orm-postgres/serverless` and `@prisma/orm-postgres/runtime`.
-4. Update comments and README text that say the serverless client streams through a cursor by default.
+4. Update comments and README text that say the serverless client streams through a cursor by default. Say which paths use the streaming client, and that those paths hang behind real Cloudflare Hyperdrive while the other paths do not.
 
-Before:
+A streaming path, before:
+
+```ts
+// src/prisma/db.ts
+export const postgres = postgresServerless<Contract>({ contractJson });
+
+// src/worker.ts, in fetch; the /cursor/large path streams with `for await` and breaks early
+await using db = await postgres.connect({ url: env.HYPERDRIVE.connectionString });
+```
+
+After:
+
+```ts
+// src/prisma/db.ts
+export const postgres = postgresServerless<Contract>({ contractJson });
+
+/**
+ * Module-scope client with cursors on, used only by the `/cursor/large` route to stream a large result. Reads through it hang behind Cloudflare Hyperdrive.
+ */
+export const streamingPostgres = postgresServerless<Contract>({
+  contractJson,
+  cursor: { batchSize: 100 },
+});
+
+// src/worker.ts
+import { postgres, streamingPostgres } from './prisma/db';
+
+// in fetch
+const routeClient = url.pathname === '/cursor/large' ? streamingPostgres : postgres;
+await using db = await routeClient.connect({ url: env.HYPERDRIVE.connectionString });
+```
+
+`cursor: { disabled: true }` and the old type, before:
 
 ```ts
 import postgresServerless, {
@@ -140,11 +172,7 @@ import postgresServerless, {
 
 const cursor: PostgresServerlessCursorOptions = { disabled: true };
 
-// behind Cloudflare Hyperdrive
 export const postgres = postgresServerless<Contract>({ contractJson, cursor });
-
-// elsewhere, a client for paths that stream, relying on the old default
-export const streamingPostgres = postgresServerless<Contract>({ contractJson });
 ```
 
 After:
@@ -152,12 +180,5 @@ After:
 ```ts
 import postgresServerless from '@prisma/orm-postgres/serverless';
 
-// behind Cloudflare Hyperdrive
 export const postgres = postgresServerless<Contract>({ contractJson });
-
-// elsewhere, a client for paths that stream, not behind Cloudflare Hyperdrive
-export const streamingPostgres = postgresServerless<Contract>({
-  contractJson,
-  cursor: { batchSize: 100 },
-});
 ```
