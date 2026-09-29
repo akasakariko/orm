@@ -17,7 +17,7 @@ This guide covers the per-request facade `@internal/postgres/serverless`. If you
 | Cursor default                                    | off; `cursor: { batchSize }` streams  | off; `cursor: { batchSize }` streams                                |
 | Disposal                                          | `db.close()` at process shutdown      | `await using db = await postgres.connect(...)` closes per request   |
 
-The static members are the same on both sides. They are a pure function of the contract, so they are safe to build once per isolate. Everything bound to a connection differs in where it lives: `postgres()` keeps it on the long-lived client, and `postgresServerless()` puts it on a per-request client returned by `connect({ url })`. That per-request client has the members of a `postgres()` client except `connect`. See [ADR 207 — Per-environment facade asymmetry](./architecture%20docs/adrs/ADR%20207%20-%20Per-environment%20facade%20asymmetry.md) for the architectural rationale and the rejected alternatives.
+The static members are the same on both sides. They are a pure function of the contract, so they are safe to build once per isolate. Everything bound to a connection differs in where it lives: `postgres()` keeps it on the long-lived client, and `postgresServerless()` puts it on a per-request client returned by `connect({ url })`. That per-request client has the members of a `postgres()` client except `connect`. See [ADR 207 — Long-lived and per-request Postgres clients share one query interface](./architecture%20docs/adrs/ADR%20207%20-%20Long-lived%20and%20per-request%20Postgres%20clients%20share%20one%20query%20interface.md) for the architectural rationale and the rejected alternatives.
 
 The practical version: caching a connection (the `pg.Client` inside a runtime) at module scope across `fetch` invocations is two flavors of unsafe in per-request runtimes — stale-connection failures after isolate idle, and concurrent-`fetch` races on a single shared `pg.Client`. The serverless facade makes the lifetime explicit at every call site:
 
@@ -291,7 +291,7 @@ The example is intentionally minimal — minimum schema, minimum routes — so y
 
 ## See also
 
-- [ADR 207 — Per-environment facade asymmetry](./architecture%20docs/adrs/ADR%20207%20-%20Per-environment%20facade%20asymmetry.md) — the architectural rationale for the two-facade design.
+- [ADR 207 — Long-lived and per-request Postgres clients share one query interface](./architecture%20docs/adrs/ADR%20207%20-%20Long-lived%20and%20per-request%20Postgres%20clients%20share%20one%20query%20interface.md) — the architectural rationale for the two-facade design.
 - [ADR 159 — Runtime Driver Lifecycle](./architecture%20docs/adrs/ADR%20159%20-%20Driver%20Terminology%20and%20Lifecycle.md) — how the underlying driver lifecycle works (both facades inherit it unchanged).
 - [Architecture Overview](./Architecture%20Overview.md) — Prisma 8's broader plane / target / adapter / driver model.
 - [Cloudflare Hyperdrive docs](https://developers.cloudflare.com/hyperdrive/) — Hyperdrive setup, configuration, and observability.
