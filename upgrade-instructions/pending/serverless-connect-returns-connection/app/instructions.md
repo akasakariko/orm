@@ -3,19 +3,19 @@ changes:
   - id: serverless-connect-returns-connection
     summary: "connect({ url }) on the serverless client from @prisma/orm-postgres/serverless returns a connection, not a Runtime. Call db.runtime().query(plan) and db.runtime().execute(plan), and pass db.runtime() wherever the connect() result was used as a runtime. connect() now connects before it returns and rejects with DRIVER.CONNECTION_FAILED when the database cannot be reached."
     detection:
-      glob: "**/*.{ts,mts,cts,tsx}"
+      glob: "**/*.{ts,mts,cts,tsx,js,mjs,cjs,jsx}"
       matches:
         - '[''"]@prisma/orm-postgres/serverless[''"]'
   - id: serverless-connection-orm-and-transaction
     summary: "Optional: the connection has orm and transaction(fn), so db.orm replaces a hand-built orm({ runtime, context }) in queries that call no custom collection method, and db.transaction(fn) replaces withTransaction(runtime, fn)."
     detection:
-      glob: "**/*.{ts,mts,cts,tsx}"
+      glob: "**/*.{ts,mts,cts,tsx,js,mjs,cjs,jsx}"
       matches:
         - '[''"]@prisma/orm-postgres/serverless[''"]'
   - id: serverless-cursor-default-off
     summary: "Reads through connections from @prisma/orm-postgres/serverless no longer go through a server-side cursor by default. A path that must keep batched streaming opens its connection from a second serverless client with cursor: { batchSize: 100 }; that path hangs behind Cloudflare Hyperdrive. PostgresServerlessCursorOptions is now PostgresCursorOptions, which is { batchSize?: number } with no disabled flag, so cursor: { disabled: true } no longer compiles and must be deleted."
     detection:
-      glob: "**/*.{ts,mts,cts,tsx}"
+      glob: "**/*.{ts,mts,cts,tsx,js,mjs,cjs,jsx}"
       matches:
         - '[''"]@prisma/orm-postgres/serverless[''"]'
 ---
