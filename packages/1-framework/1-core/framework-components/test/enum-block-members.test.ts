@@ -87,6 +87,22 @@ describe('readEnumBlockMembers', () => {
     });
   });
 
+  it('lets an error from storing a member it has read propagate, because that is a codec bug', () => {
+    const failure = new TypeError('codec bug');
+    const codec: Codec = {
+      ...lowerCasingCodec,
+      encodeJson: () => {
+        throw failure;
+      },
+    };
+    expect(() =>
+      readEnumBlockMembers(enumBlock({ A: 'a' }), 'test/lower-casing@1', codec, {
+        family: 'test',
+        target: 'test',
+      }),
+    ).toThrow(failure);
+  });
+
   it('reports an enum with no members', () => {
     expect(read({})).toEqual({
       members: undefined,

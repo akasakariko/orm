@@ -30,11 +30,9 @@ export function readEnumBlockMembers(
 
   for (const [memberName, memberValue] of Object.entries(block.values)) {
     const span = block.parameterSpans[memberName] ?? block.span;
-    let stored: JsonValue;
+    let read: unknown;
     try {
-      stored = codec.encodeJson(
-        codec.decodeJson(memberValue === undefined ? memberName : memberValue),
-      );
+      read = codec.decodeJson(memberValue === undefined ? memberName : memberValue);
     } catch (err) {
       diagnostics?.push(
         memberValue === undefined
@@ -55,6 +53,7 @@ export function readEnumBlockMembers(
       continue;
     }
 
+    const stored = codec.encodeJson(read);
     const storedKey = canonicalStringify(stored);
     const earlier = memberByStoredValue.get(storedKey);
     if (earlier !== undefined) {
