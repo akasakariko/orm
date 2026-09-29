@@ -9,12 +9,15 @@ import fixtureContractJson from './fixtures/generated/contract.json' with { type
 type QueryMock = ReturnType<typeof vi.fn>;
 interface RecordedClient {
   readonly connectionString: string | undefined;
+  readonly connect: QueryMock;
   readonly query: QueryMock;
+  readonly end: QueryMock;
 }
 
 const recorded = vi.hoisted(() => ({
   clients: [] as RecordedClient[],
   poolCount: 0,
+  connectImpl: (): Promise<void> => Promise.resolve(),
 }));
 
 // Only mock the third-party pg boundary. Real drivers, adapters, and runtimes
@@ -34,7 +37,7 @@ vi.mock('pg', () => {
 
   class Client {
     on = vi.fn().mockReturnThis();
-    connect = vi.fn().mockResolvedValue(undefined);
+    connect = vi.fn(() => recorded.connectImpl());
     query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 });
     end = vi.fn().mockResolvedValue(undefined);
     readonly connectionString: string | undefined;
@@ -54,7 +57,7 @@ const contract = createContract<SqlStorage>();
 const fixtureContract = validateSqlContractFully<Contract>(fixtureContractJson);
 const url = 'postgres://localhost:5432/db';
 
-function fixtureClient() {
+function fixtureServerless() {
   return postgresServerless<Contract>({
     contractJson: fixtureContract,
     verifyMarker: false,
@@ -85,13 +88,14 @@ beforeEach(() => {
   vi.clearAllMocks();
   recorded.clients.length = 0;
   recorded.poolCount = 0;
+  recorded.connectImpl = () => Promise.resolve();
 });
 
 describe('the serverless client', () => {
   it('has exactly the static members and connect', () => {
-    const db = postgresServerless({ contract });
+    const serverless = postgresServerless({ contract });
 
-    expect(Object.keys(db).sort()).toEqual(
+    expect(Object.keys(serverless).sort()).toEqual(
       ['connect', 'context', 'contract', 'enums', 'nativeEnums', 'raw', 'sql', 'stack'].sort(),
     );
   });
@@ -183,9 +187,56 @@ describe('postgresServerless connect()', () => {
   });
 });
 
+describe('postgresServerless connect() opens the database connection', () => {
+  it('waits for the pg.Client to connect before it resolves', async () => {
+    let finishConnecting: () => void = () => undefined;
+    recorded.connectImpl = () =>
+      new Promise<void>((resolve) => {
+        finishConnecting = resolve;
+      });
+    const serverless = postgresServerless({ contract });
+    let settled = false;
+
+    const pending = serverless.connect({ url }).finally(() => {
+      settled = true;
+    });
+    await vi.waitFor(() => expect(lastClient().connect).toHaveBeenCalledTimes(1));
+
+    expect(settled).toBe(false);
+    finishConnecting();
+    const db = await pending;
+    expect(settled).toBe(true);
+
+    await db.close();
+  });
+
+  it('rejects with DRIVER.CONNECTION_FAILED and ends the pg.Client when the database cannot be reached', async () => {
+    const refused = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:5432'), {
+      code: 'ECONNREFUSED',
+    });
+    recorded.connectImpl = () => Promise.reject(refused);
+    const serverless = postgresServerless({ contract });
+
+    const error = await serverless.connect({ url }).then(
+      () => undefined,
+      (reason: unknown) => reason,
+    );
+
+    expect(error).toMatchObject({
+      code: 'DRIVER.CONNECTION_FAILED',
+      message: 'Database connection failed',
+      why: 'connect ECONNREFUSED 127.0.0.1:5432',
+      fix: 'Verify the database URL, ensure the database is reachable, and confirm credentials/permissions',
+      meta: { extension: 'postgres', host: 'localhost', port: '5432', database: 'db' },
+    });
+    expect((error as { cause?: unknown }).cause).toBe(refused);
+    expect(lastClient().end).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('queries on a connection use its own pg.Client', () => {
   async function openTwo() {
-    const serverless = fixtureClient();
+    const serverless = fixtureServerless();
     const idle = await serverless.connect({ url });
     const idleClient = lastClient();
     const used = await serverless.connect({ url });
@@ -243,7 +294,7 @@ describe('queries on a connection use its own pg.Client', () => {
 
 describe('a closed connection', () => {
   async function closedConnection() {
-    const db = await fixtureClient().connect({ url });
+    const db = await fixtureServerless().connect({ url });
     await db.close();
     return db;
   }
@@ -335,7 +386,7 @@ describe('postgresServerless options', () => {
   });
 
   it('verifyMarker: false skips the marker read before the first query', async () => {
-    const db = await fixtureClient().connect({ url });
+    const db = await fixtureServerless().connect({ url });
     const client = lastClient();
 
     await db.orm.public.User.first();

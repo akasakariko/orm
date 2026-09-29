@@ -1,4 +1,4 @@
-export type { PostgresCursorOptions } from '../runtime/postgres-cursor-options';
+export type { PostgresCursorOptions } from '../runtime/postgres-options';
 export type {
   PostgresServerlessClient,
   PostgresServerlessConnection,

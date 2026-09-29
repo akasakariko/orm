@@ -63,7 +63,7 @@ describe('postgres() idle connection errors', () => {
 });
 
 describe('postgresServerless() idle connection errors', () => {
-  it('the client created by connect({ url }) survives an emitted connection error', async () => {
+  it('the pg.Client that connect({ url }) creates survives an emitted connection error', async () => {
     const db = await postgresServerless({ contract }).connect({
       url: 'postgres://localhost:5432/db',
     });

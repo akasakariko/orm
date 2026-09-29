@@ -67,7 +67,7 @@ vi.mock('pg', () => {
 });
 
 import postgres from '../src/runtime/postgres';
-import type { PostgresCursorOptions } from '../src/runtime/postgres-cursor-options';
+import type { PostgresCursorOptions } from '../src/runtime/postgres-options';
 import postgresServerless from '../src/runtime/postgres-serverless';
 
 const fixtureContract = validateSqlContractFully<Contract>(fixtureContractJson);
@@ -116,6 +116,13 @@ describe('postgres() cursor option', () => {
     expect(cursorQueryCount()).toBe(0);
   });
 
+  it('reads through a cursor in batches of 100 when cursor is {}', async () => {
+    await readUsersThroughPostgres({});
+
+    expect(cursorQueryCount()).toBeGreaterThan(0);
+    expect(recorded.cursorReadSizes).toEqual([100]);
+  });
+
   it('reads through a cursor when cursor.batchSize is set', async () => {
     await readUsersThroughPostgres({ batchSize: 50 });
 
@@ -130,6 +137,13 @@ describe('postgresServerless() cursor option', () => {
 
     expect(recorded.queryArguments.length).toBeGreaterThan(0);
     expect(cursorQueryCount()).toBe(0);
+  });
+
+  it('reads through a cursor in batches of 100 when cursor is {}', async () => {
+    await readUsersThroughServerless({});
+
+    expect(cursorQueryCount()).toBeGreaterThan(0);
+    expect(recorded.cursorReadSizes).toEqual([100]);
   });
 
   it('reads through a cursor when cursor.batchSize is set', async () => {

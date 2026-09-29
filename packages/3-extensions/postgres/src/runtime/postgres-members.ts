@@ -1,7 +1,7 @@
 import type { NamespacedEnums } from '@internal/contract/enum-accessor';
 import type { Contract } from '@internal/contract/types';
 import { sql as sqlBuilder } from '@internal/sql-builder/runtime';
-import type { Db, RawLane } from '@internal/sql-builder/types';
+import type { Db } from '@internal/sql-builder/types';
 import type { ExtractCodecTypes, SqlStorage } from '@internal/sql-contract/types';
 import { orm as ormBuilder, type PreparedFrom, prepareQuery } from '@internal/sql-orm-client';
 import type { CodecTypesBase, RawCodecInferer } from '@internal/sql-relational-core/expression';
@@ -17,18 +17,22 @@ import type {
 } from '@internal/sql-runtime';
 import { withTransaction } from '@internal/sql-runtime';
 import { castAs } from '@internal/utils/casts';
+import type { PostgresStaticContext } from '../static/postgres-static';
 import type { NamespacedNativeEnums } from './native-enums';
-import type { PostgresTargetId, PostgresTransactionContext } from './postgres';
+import type { PostgresTargetId } from './postgres-target-id';
 
 type OrmClient<TContract extends Contract<SqlStorage>> = ReturnType<typeof ormBuilder<TContract>>;
 
-export interface PostgresStaticMembers<TContract extends Contract<SqlStorage>> {
+export interface PostgresTransactionContext<TContract extends Contract<SqlStorage>>
+  extends TransactionContext {
   readonly sql: Db<TContract>;
-  readonly raw: RawLane<TContract>;
+  readonly orm: OrmClient<TContract>;
   readonly enums: NamespacedEnums<TContract>;
   readonly nativeEnums: NamespacedNativeEnums<TContract>;
-  readonly context: ExecutionContext<TContract>;
-  readonly contract: TContract;
+}
+
+export interface PostgresStaticMembers<TContract extends Contract<SqlStorage>>
+  extends PostgresStaticContext<TContract> {
   readonly stack: SqlExecutionStackWithDriver<PostgresTargetId>;
 }
 
@@ -46,7 +50,7 @@ export interface PostgresRuntimeBoundMembers<TContract extends Contract<SqlStora
   ): Promise<PreparedFrom<ParamsFromDeclaration<D, CT>, Q>>;
 }
 
-export interface PostgresClientLifecycle {
+export interface PostgresLifecycleMembers {
   close(): Promise<void>;
   [Symbol.asyncDispose](): Promise<void>;
 }

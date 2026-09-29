@@ -8,6 +8,6 @@ export type {
   PostgresOptionsWithContractJson,
 } from '../runtime/postgres';
 export { default } from '../runtime/postgres';
-export type { PostgresCursorOptions } from '../runtime/postgres-cursor-options';
+export type { PostgresCursorOptions } from '../runtime/postgres-options';
 export type { PostgresRuntime } from '../runtime/postgres-runtime';
 export { PostgresRuntimeImpl } from '../runtime/postgres-runtime';

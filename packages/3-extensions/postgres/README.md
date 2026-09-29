@@ -7,7 +7,7 @@ Two runtime entry points create three kinds of object:
 - `@internal/postgres/runtime` — `postgres()` returns a **client** for a long-lived Node process, with closure-cached `runtime()`, `orm`, and `transaction()`.
 - `@internal/postgres/serverless` — for serverless / edge runtimes (Cloudflare Workers + Hyperdrive, AWS Lambda, Vercel, Deno Deploy, Bun edge). `postgresServerless()` returns a **serverless client**, which holds no database connection. Each `connect({ url })` on it opens a fresh database connection and returns a **connection** with the members of a `postgres()` client except `connect`.
 
-Pick the entry point that matches your deployment lifecycle. Caching a database connection at module scope is unsafe across `fetch` invocations (stale connections after isolate idle, concurrent-query races, no clean shutdown), so on the serverless side everything bound to a database connection lives on the connection. Inside a request, `db` does everything the `db` from `postgres()` does. See [ADR 207](../../../docs/architecture%20docs/adrs/ADR%20207%20-%20A%20serverless%20Postgres%20connection%20has%20the%20same%20query%20interface%20as%20a%20postgres%20client.md) and the [Serverless Deployment Guide](../../../docs/Serverless%20Deployment%20Guide.md) for the rationale.
+Pick the entry point that matches your deployment lifecycle. A database connection kept at module scope fails across `fetch` invocations in the four ways ADR 207 lists, so on the serverless side everything bound to a database connection lives on the connection. Inside a request, `db` does everything the `db` from `postgres()` does. See [ADR 207](../../../docs/architecture%20docs/adrs/ADR%20207%20-%20A%20serverless%20Postgres%20connection%20has%20the%20same%20query%20interface%20as%20a%20postgres%20client.md) and the [Serverless Deployment Guide](../../../docs/Serverless%20Deployment%20Guide.md) for the rationale.
 
 ## Package Classification
 
@@ -63,7 +63,7 @@ export default {
 };
 ```
 
-Inside a request, `db` does everything the `db` from `postgres()` does: `db.orm`, `db.sql`, `db.raw`, `db.transaction(...)`, `db.prepare(...)` and `db.runtime().query(...)` work unchanged. Await every query before the `await using` scope ends: the connection closes when the scope ends, so a query returned from the scope without `await` (`return db.orm...` instead of `return await db.orm...`) fails with a "not connected" error. `db` is not a `Runtime`; anything that takes a runtime gets `db.runtime()`. Never call `connect` at module scope.
+Inside a request, `db` does everything the `db` from `postgres()` does: `db.orm`, `db.sql`, `db.raw`, `db.transaction(...)`, `db.prepare(...)` and `db.runtime().query(...)` work unchanged. Await every query before the `await using` scope ends: the connection closes when the scope ends, so a query returned from the scope without `await` (`return db.orm...` instead of `return await db.orm...`) fails when its rows are read, with `CONTRACT.MARKER_READ_FAILED` (whose cause is `DRIVER.NOT_CONNECTED`) under the default options, or `DRIVER.NOT_CONNECTED` after an earlier awaited query or with `verifyMarker: false`. `connect` connects to the database before it returns and rejects with `DRIVER.CONNECTION_FAILED` when the database cannot be reached. `db` is not a `Runtime`; anything that takes a runtime gets `db.runtime()`. Never call `connect` at module scope.
 
 ## Exports
 
@@ -186,7 +186,7 @@ When URL binding is used, pool timeouts are configurable via `poolOptions`:
 - `poolOptions.connectionTimeoutMillis` (default `20_000`)
 - `poolOptions.idleTimeoutMillis` (default `30_000`)
 
-Reads are buffered by default. Pass `cursor: { batchSize }` to read through a server-side cursor (`pg-cursor`) in batches of that size. `postgresServerless()` accepts the same option, typed `PostgresCursorOptions`.
+Reads are buffered by default. Pass `cursor` (typed `PostgresCursorOptions`, `{ batchSize?: number }`) to read through a server-side cursor (`pg-cursor`): `{ batchSize: 50 }` streams in batches of 50, `{}` in batches of 100. There is no flag that turns cursors off; leaving the option out does that. `postgresServerless()` accepts the same option.
 
 ### Prepared SQL and ORM rows
 
@@ -257,25 +257,27 @@ Re-exports the Postgres target pack (the value passed as `target:` to `defineCon
 
 `PostgresServerlessConnection<Contract>` is `PostgresClient<Contract>` without `connect`: `sql`, `raw`, `enums`, `nativeEnums`, `context`, `contract` and `stack` (the same objects as on the serverless client), plus `orm`, `runtime()`, `transaction(fn)`, `prepare(...)`, `close()` and `[Symbol.asyncDispose]`.
 
-Each `connect()` call constructs a fresh `pg.Client` and a fresh runtime. No `pg.Pool` is allocated. `close()` and `[Symbol.asyncDispose]` close the runtime once, which closes the underlying client. After that, `db.runtime()`, ORM queries, `db.transaction(...)` and `db.prepare(...)` fail with `DRIVER.NOT_CONNECTED`. A connection has one database connection, a `pg.Client`, so inside `db.transaction(async (tx) => ...)` run every query through `tx`. Reads are buffered by default. To stream on some paths only, create a second serverless client with `cursor: { batchSize }` and open connections from it only on those paths; they read through `pg-cursor` in batches. Behind Cloudflare Hyperdrive, reads with cursors on hang, so those paths hang there and the paths whose connections come from the serverless client without the option do not.
+Each `connect()` call creates a fresh `pg.Client`, connects it to the database, and wraps it in a fresh runtime. When the database cannot be reached, `connect()` rejects with `DRIVER.CONNECTION_FAILED` and ends the `pg.Client`. No `pg.Pool` is allocated. `close()` and `[Symbol.asyncDispose]` close the runtime once, which ends its `pg.Client`. After that, `db.runtime()`, ORM queries, `db.transaction(...)` and `db.prepare(...)` fail with `DRIVER.NOT_CONNECTED`. A connection has one database connection, a `pg.Client`, so inside `db.transaction(async (tx) => ...)` run every query through `tx`. Reads are buffered by default. To stream on some paths only, create a second serverless client with `cursor: { batchSize }` and open connections from it only on those paths; they read through `pg-cursor` in batches. On such a connection, finish or `break` a `for await` over a read before sending another query through `db`: the cursor holds the only database connection until the loop ends, so a query inside the loop waits forever. Behind Cloudflare Hyperdrive, reads with cursors on hang, so those paths hang there and the paths whose connections come from the serverless client without the option do not.
 
 ## Responsibilities
 
 - Build a static Postgres execution stack from target, adapter, and driver descriptors
-- Build a typed SQL authoring surface from the execution context
-- Build a static ORM root from the execution context
-- Normalize runtime binding input (`binding`, `url`, `pg`)
-- Lazily instantiate runtime resources on first `db.runtime()` or `db.connect(...)` call
-- Connect the internal Postgres driver through `db.connect(...)` or from initial binding options
-- Memoize runtime so repeated `db.runtime()` calls return one instance
+- Build the static members (`sql`, `raw`, `enums`, `nativeEnums`, `context`, `contract`, `stack`) from the execution context, once per client or serverless client
+- Build the runtime-bound members (`orm`, `runtime()`, `transaction()`, `prepare()`) over a runtime, for a client and for each connection
+- Normalize runtime binding input (`binding`, `url`, `pg`) for `postgres()`
+- Lazily instantiate a client's runtime resources on the first `db.runtime()` or `db.connect(...)` call, and memoize the runtime so repeated `db.runtime()` calls return one instance
+- Open one `pg.Client` per `connect({ url })` on a serverless client, and close it with the connection
 
 ## Architecture
+
+The diagram shows `postgres()`. A connection from `postgresServerless()` has the same static and runtime-bound members over one `pg.Client` instead of a lazy pool.
 
 ```mermaid
 flowchart TD
     App[App Code] --> Client[postgres(...)]
-    Client --> Static[Roots: sql orm context stack]
-    Client --> Lazy[runtime()]
+    Client --> Static[Static members: sql raw enums nativeEnums context contract stack]
+    Client --> Bound[Runtime-bound members: orm runtime() transaction prepare]
+    Bound --> Lazy[runtime() on first use]
 
     Lazy --> Instantiate[instantiateExecutionStack]
     Lazy --> Bind[Resolve binding: url or pg]

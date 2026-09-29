@@ -1,18 +1,9 @@
 import postgresAdapter from '@internal/adapter-postgres/runtime';
-import type { NamespacedEnums } from '@internal/contract/enum-accessor';
 import type { Contract } from '@internal/contract/types';
 import postgresDriver, { suppressIdleConnectionErrors } from '@internal/driver-postgres/runtime';
 import { instantiateExecutionStack } from '@internal/framework-components/execution';
-import type { Db } from '@internal/sql-builder/types';
 import type { SqlStorage } from '@internal/sql-contract/types';
-import type { orm as ormBuilder } from '@internal/sql-orm-client';
-import type {
-  Runtime,
-  SqlMiddleware,
-  SqlRuntimeExtensionDescriptor,
-  TransactionContext,
-  VerifyMarkerOption,
-} from '@internal/sql-runtime';
+import type { Runtime } from '@internal/sql-runtime';
 import { createExecutionContext, createSqlExecutionStack } from '@internal/sql-runtime';
 import postgresTarget, { PostgresContractSerializer } from '@internal/target-postgres/runtime';
 import { blindCast } from '@internal/utils/casts';
@@ -27,39 +18,24 @@ import {
   resolveOptionalPostgresBinding,
   resolvePostgresBinding,
 } from './binding';
-import type { NamespacedNativeEnums } from './native-enums';
-import type { PostgresCursorOptions } from './postgres-cursor-options';
-import { PostgresRuntimeImpl } from './postgres-runtime';
 import {
   buildPostgresRuntimeBoundMembers,
-  type PostgresClientLifecycle,
+  type PostgresLifecycleMembers,
   type PostgresRuntimeBoundMembers,
   type PostgresStaticMembers,
-} from './postgres-runtime-bound-members';
-
-export type PostgresTargetId = 'postgres';
-type OrmClient<TContract extends Contract<SqlStorage>> = ReturnType<typeof ormBuilder<TContract>>;
-
-export interface PostgresTransactionContext<TContract extends Contract<SqlStorage>>
-  extends TransactionContext {
-  readonly sql: Db<TContract>;
-  readonly orm: OrmClient<TContract>;
-  readonly enums: NamespacedEnums<TContract>;
-  readonly nativeEnums: NamespacedNativeEnums<TContract>;
-}
+} from './postgres-members';
+import { type PostgresExecutionOptions, toDriverCursorOptions } from './postgres-options';
+import { PostgresRuntimeImpl } from './postgres-runtime';
+import type { PostgresTargetId } from './postgres-target-id';
 
 export interface PostgresClient<TContract extends Contract<SqlStorage>>
   extends PostgresStaticMembers<TContract>,
     PostgresRuntimeBoundMembers<TContract>,
-    PostgresClientLifecycle {
+    PostgresLifecycleMembers {
   connect(bindingInput?: PostgresBindingInput): Promise<Runtime>;
 }
 
-export interface PostgresOptionsBase {
-  readonly extensions?: readonly SqlRuntimeExtensionDescriptor<PostgresTargetId>[];
-  readonly middleware?: readonly SqlMiddleware[];
-  readonly verifyMarker?: VerifyMarkerOption;
-  readonly cursor?: PostgresCursorOptions;
+export interface PostgresOptionsBase extends PostgresExecutionOptions {
   readonly poolOptions?: {
     readonly connectionTimeoutMillis?: number;
     readonly idleTimeoutMillis?: number;
@@ -229,7 +205,7 @@ export default function postgres<TContract extends Contract<SqlStorage>>(
     }
 
     const driver = driverDescriptor.create({
-      cursor: options.cursor ?? { disabled: true },
+      cursor: toDriverCursorOptions(options.cursor),
     });
     runtimeDriver = driver;
     if (binding !== undefined) {
