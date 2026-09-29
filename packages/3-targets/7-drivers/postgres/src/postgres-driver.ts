@@ -757,7 +757,13 @@ class PostgresDirectDriverImpl
       return;
     }
     this.#closed = true;
-    await this.directClient.end();
+    if (this.#connected) {
+      await this.directClient.end();
+    } else {
+      // A client whose connect failed has no socket to close, and under
+      // pg-cloudflare its end() never settles, so it is not awaited.
+      void this.directClient.end().catch(() => undefined);
+    }
     this.#connected = false;
   }
 

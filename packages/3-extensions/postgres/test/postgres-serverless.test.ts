@@ -19,6 +19,7 @@ const recorded = vi.hoisted(() => ({
   clients: [] as RecordedClient[],
   poolCount: 0,
   connectImpl: (): Promise<void> => Promise.resolve(),
+  endImpl: (): Promise<void> => Promise.resolve(),
 }));
 
 // Only mock the third-party pg boundary. Real drivers, adapters, and runtimes
@@ -40,7 +41,7 @@ vi.mock('pg', () => {
     on = vi.fn().mockReturnThis();
     connect = vi.fn(() => recorded.connectImpl());
     query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 });
-    end = vi.fn().mockResolvedValue(undefined);
+    end = vi.fn(() => recorded.endImpl());
     readonly connectionString: string | undefined;
     readonly connectionTimeoutMillis: number | undefined;
     constructor(config?: { connectionString?: string; connectionTimeoutMillis?: number }) {
@@ -92,6 +93,7 @@ beforeEach(() => {
   recorded.clients.length = 0;
   recorded.poolCount = 0;
   recorded.connectImpl = () => Promise.resolve();
+  recorded.endImpl = () => Promise.resolve();
 });
 
 describe('the serverless client', () => {
@@ -233,6 +235,18 @@ describe('postgresServerless connect() opens the database connection', () => {
       meta: { extension: 'postgres', host: 'localhost', port: '5432', database: 'db' },
     });
     expect((error as { cause?: unknown }).cause).toBe(refused);
+    expect(lastClient().end).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects with DRIVER.CONNECTION_FAILED even when end() of the unconnected pg.Client never settles', async () => {
+    recorded.connectImpl = () => Promise.reject(new Error('connection attempt failed'));
+    recorded.endImpl = () => new Promise<void>(() => undefined);
+    const serverless = postgresServerless({ contract });
+
+    await expect(serverless.connect({ url })).rejects.toMatchObject({
+      code: 'DRIVER.CONNECTION_FAILED',
+      why: 'connection attempt failed',
+    });
     expect(lastClient().end).toHaveBeenCalledTimes(1);
   });
 
