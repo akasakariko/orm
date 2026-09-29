@@ -1,5 +1,6 @@
 import type { Contract } from '@internal/contract/types';
 import type { SqlStorage } from '@internal/sql-contract/types';
+import { enumType as untypedEnumType } from '@internal/sql-contract-ts/contract-builder';
 import { describe, expect, it } from 'vitest';
 import { defineContract, enumType, member } from '../../src/exports/contract-builder';
 
@@ -63,6 +64,30 @@ describe('uuid-backed enum authoring against the real Postgres pack', () => {
       expect.objectContaining({
         code: 'CONTRACT.ENUM_INVALID',
         message: `enumType("Key"): member "A" is written "${written}", but the column stores "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11". Write the member as "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11".`,
+      }),
+    );
+  });
+
+  it('refuses a number member on pg/numeric from the untyped builder as an enum error', () => {
+    const Ratio = untypedEnumType(
+      'Ratio',
+      { codecId: 'pg/numeric@1', nativeType: 'numeric' },
+      member('Half', 1.5),
+    );
+    expect(() =>
+      defineContract({ enums: { Ratio } }, ({ field, model }) => ({
+        models: {
+          Item: model('Item', {
+            fields: { id: field.id.uuidv4String(), ratio: field.namedType(Ratio) },
+          }),
+        },
+      })),
+    ).toThrow(
+      expect.objectContaining({
+        code: 'CONTRACT.ENUM_INVALID',
+        message: expect.stringMatching(
+          /^enumType\("Ratio"\): member "Half" is written 1\.5, but the column stores 1\.5, which codec "pg\/numeric@1" cannot read back: /,
+        ),
       }),
     );
   });

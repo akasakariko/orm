@@ -151,6 +151,39 @@ describe('enum lowering encodes member values through the codec', () => {
     },
   );
 
+  it('refuses a member whose stored value the codec cannot read back, naming the member', () => {
+    const decodeFailure = new Error('database JSON value must be a decimal string');
+    const Ratio = enumType(
+      'Ratio',
+      { codecId: 'test/decimal@1', nativeType: 'numeric' },
+      member('Half', 1.5),
+    );
+    const codecLookup = codecLookupOf({
+      'test/decimal@1': stubCodec(
+        'test/decimal@1',
+        (v) => v as JsonValue,
+        (json) => {
+          if (typeof json !== 'string') throw decodeFailure;
+          return json;
+        },
+      ),
+    });
+
+    expect(() => buildSqlContractFromDefinition(definitionWith(Ratio), codecLookup)).toThrow(
+      expect.objectContaining({
+        code: 'CONTRACT.ENUM_INVALID',
+        message:
+          'enumType("Ratio"): member "Half" is written 1.5, but the column stores 1.5, which codec "test/decimal@1" cannot read back: database JSON value must be a decimal string. Write the member as a value of the codec\'s input type.',
+        meta: expect.objectContaining({
+          enumName: 'Ratio',
+          member: 'Half',
+          reason: 'member-not-stored-as-written',
+        }),
+        cause: decodeFailure,
+      }),
+    );
+  });
+
   it('refuses two members the codec stores as the same value, naming both', () => {
     const Moment = enumType(
       'Moment',
