@@ -110,7 +110,7 @@ This goes in `.env`, not `.dev.vars`. `.dev.vars` is for runtime worker secrets;
 
 A serverless client at module scope; a connection from `connect` in each request; SQL, ORM and transactions on that connection; cursor streaming. The full file is `examples/prisma-8-cloudflare-worker/src/worker.ts`.
 
-The samples use extensionless relative imports and `./contract.d`, which need `moduleResolution: "bundler"` in `tsconfig.json`; Worker projects built with wrangler use that setting, and so does the example. On Node.js 24 and older, reading a `DateTime` column needs a Temporal polyfill: add `temporal-polyfill` and import `temporal-polyfill/full/global` before the first query, as the example does at the top of `worker.ts` and `seed.ts`.
+The samples use extensionless relative imports and `./contract.d`, which need `moduleResolution: "bundler"` in `tsconfig.json`; Worker projects built with wrangler use that setting, and so does the example. On a runtime without a built-in `Temporal`, which today includes Cloudflare Workers at the example's compatibility date and Node.js 24, reading a `DateTime` column needs a Temporal polyfill: add `temporal-polyfill` and import `temporal-polyfill/full/global` before the first query, as the example does at the top of `worker.ts` and `seed.ts`.
 
 #### Module scope
 
@@ -176,8 +176,19 @@ export default {
     // pg.Client. Run every query inside the callback through tx.
     if (url.pathname === '/tx/example') {
       const result = await db.transaction(async (tx) => {
-        await tx.execute(db.sql.public.user.update({ /* ... */ }).where(/* ... */).build());
-        await tx.execute(db.sql.public.post.insert([{ /* ... */ }]).build());
+        const author = await tx.orm.public.User.where({ email: 'alice@example.com' }).first();
+        if (author === null) throw new Error('No user with email alice@example.com');
+        await tx.execute(
+          db.sql.public.user
+            .update({ displayName: 'Alice, renamed in a transaction' })
+            .where((f, fns) => fns.eq(f.id, author.id))
+            .build(),
+        );
+        await tx.execute(
+          db.sql.public.post
+            .insert([{ title: 'Written in a transaction', userId: author.id, createdAt: Temporal.Now.instant() }])
+            .build(),
+        );
         return { ok: true };
       });
       return Response.json(result);
