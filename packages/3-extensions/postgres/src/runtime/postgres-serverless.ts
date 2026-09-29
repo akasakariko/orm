@@ -1,9 +1,6 @@
 import postgresAdapter from '@internal/adapter-postgres/runtime';
 import type { Contract } from '@internal/contract/types';
-import postgresDriver, {
-  type PostgresDriverCreateOptions,
-  suppressIdleConnectionErrors,
-} from '@internal/driver-postgres/runtime';
+import postgresDriver, { suppressIdleConnectionErrors } from '@internal/driver-postgres/runtime';
 import { instantiateExecutionStack } from '@internal/framework-components/execution';
 import type { SqlStorage } from '@internal/sql-contract/types';
 import type {
@@ -21,6 +18,7 @@ import { Client } from 'pg';
 import { postgresError } from '../errors';
 import { buildPostgresStaticContext } from '../static/postgres-static';
 import type { PostgresTargetId } from './postgres';
+import type { PostgresCursorOptions } from './postgres-cursor-options';
 import { PostgresRuntimeImpl } from './postgres-runtime';
 import {
   buildPostgresRuntimeBoundMembers,
@@ -28,8 +26,6 @@ import {
   type PostgresRuntimeBoundMembers,
   type PostgresStaticMembers,
 } from './postgres-runtime-bound-members';
-
-export type PostgresServerlessCursorOptions = NonNullable<PostgresDriverCreateOptions['cursor']>;
 
 export interface PostgresServerlessConnection<TContract extends Contract<SqlStorage>>
   extends PostgresStaticMembers<TContract>,
@@ -45,7 +41,7 @@ export interface PostgresServerlessOptionsBase {
   readonly extensions?: readonly SqlRuntimeExtensionDescriptor<PostgresTargetId>[];
   readonly middleware?: readonly SqlMiddleware[];
   readonly verifyMarker?: VerifyMarkerOption;
-  readonly cursor?: PostgresServerlessCursorOptions;
+  readonly cursor?: PostgresCursorOptions;
 }
 
 export type PostgresServerlessOptionsWithContract<TContract extends Contract<SqlStorage>> =
@@ -201,7 +197,7 @@ export default function postgresServerless<TContract extends Contract<SqlStorage
 
       const stackInstance = instantiateExecutionStack(stack);
       const driver = driverDescriptor.create({
-        ...ifDefined('cursor', options.cursor),
+        cursor: options.cursor ?? { disabled: true },
       });
 
       const client = suppressIdleConnectionErrors(new Client({ connectionString: url }));

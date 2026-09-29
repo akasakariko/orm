@@ -69,21 +69,25 @@ test('factory accepts the same option keys as the Node postgres() factory', asyn
   const { default: postgres } = await import('../src/runtime/postgres');
   type NodeOptionKeys = keyof Pick<
     PostgresOptionsWithContract<TestContract>,
-    'contract' | 'extensions' | 'middleware' | 'verifyMarker'
+    'contract' | 'extensions' | 'middleware' | 'verifyMarker' | 'cursor'
   >;
   type ServerlessOptionKeys = Parameters<typeof postgresServerless<TestContract>>[0] extends infer O
-    ? Extract<keyof O, 'contract' | 'extensions' | 'middleware' | 'verifyMarker'>
+    ? Extract<keyof O, 'contract' | 'extensions' | 'middleware' | 'verifyMarker' | 'cursor'>
     : never;
   expectTypeOf<ServerlessOptionKeys>().toEqualTypeOf<NodeOptionKeys>();
 
   type NodeJsonKeys = keyof Pick<
     PostgresOptionsWithContractJson<TestContract>,
-    'contractJson' | 'extensions' | 'middleware' | 'verifyMarker'
+    'contractJson' | 'extensions' | 'middleware' | 'verifyMarker' | 'cursor'
   >;
   type ServerlessJsonKeys = Parameters<typeof postgresServerless<TestContract>>[0] extends infer O
-    ? Extract<keyof O, 'contractJson' | 'extensions' | 'middleware' | 'verifyMarker'>
+    ? Extract<keyof O, 'contractJson' | 'extensions' | 'middleware' | 'verifyMarker' | 'cursor'>
     : never;
   expectTypeOf<ServerlessJsonKeys>().toEqualTypeOf<NodeJsonKeys>();
+
+  expectTypeOf<Parameters<typeof postgresServerless<TestContract>>[0]['cursor']>().toEqualTypeOf<
+    PostgresOptionsWithContract<TestContract>['cursor']
+  >();
 
   // postgres() also accepts these but the unrelated `postgres()` ensures the symbol is referenced
   void postgres;

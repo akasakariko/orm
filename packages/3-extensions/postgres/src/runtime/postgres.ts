@@ -28,6 +28,7 @@ import {
   resolvePostgresBinding,
 } from './binding';
 import type { NamespacedNativeEnums } from './native-enums';
+import type { PostgresCursorOptions } from './postgres-cursor-options';
 import { PostgresRuntimeImpl } from './postgres-runtime';
 import {
   buildPostgresRuntimeBoundMembers,
@@ -58,6 +59,7 @@ export interface PostgresOptionsBase {
   readonly extensions?: readonly SqlRuntimeExtensionDescriptor<PostgresTargetId>[];
   readonly middleware?: readonly SqlMiddleware[];
   readonly verifyMarker?: VerifyMarkerOption;
+  readonly cursor?: PostgresCursorOptions;
   readonly poolOptions?: {
     readonly connectionTimeoutMillis?: number;
     readonly idleTimeoutMillis?: number;
@@ -227,7 +229,7 @@ export default function postgres<TContract extends Contract<SqlStorage>>(
     }
 
     const driver = driverDescriptor.create({
-      cursor: { disabled: true },
+      cursor: options.cursor ?? { disabled: true },
     });
     runtimeDriver = driver;
     if (binding !== undefined) {

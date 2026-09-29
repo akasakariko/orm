@@ -2,7 +2,7 @@ import type { SqlStorage } from '@internal/sql-contract/types';
 import { validateSqlContractFully } from '@internal/sql-contract/validators';
 import type { SqlMiddleware } from '@internal/sql-runtime';
 import { createContract } from '@repo/test-utils';
-import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Contract } from './fixtures/generated/contract';
 import fixtureContractJson from './fixtures/generated/contract.json' with { type: 'json' };
 
@@ -58,7 +58,6 @@ function fixtureClient() {
   return postgresServerless<Contract>({
     contractJson: fixtureContract,
     verifyMarker: false,
-    cursor: { disabled: true },
   });
 }
 
@@ -324,7 +323,6 @@ describe('postgresServerless options', () => {
     const serverless = postgresServerless<Contract>({
       contractJson: fixtureContract,
       verifyMarker: false,
-      cursor: { disabled: true },
       middleware: [spyMiddleware],
     });
 
@@ -344,20 +342,6 @@ describe('postgresServerless options', () => {
 
     const statements = statementsOf(client);
     expect(statements.some((sql) => sql.includes('prisma_contract'))).toBe(false);
-    await db.close();
-  });
-
-  it('forwards the cursor option to the driver', async () => {
-    const cursor = { disabled: false, batchSize: 25 };
-    const serverless = postgresServerless({ contract, cursor });
-    const driverDescriptor = serverless.stack.driver;
-    if (!driverDescriptor) throw new Error('the serverless stack has no driver');
-    const createDriver = vi.spyOn(driverDescriptor, 'create');
-    onTestFinished(() => createDriver.mockRestore());
-
-    const db = await serverless.connect({ url });
-
-    expect(createDriver).toHaveBeenCalledWith({ cursor });
     await db.close();
   });
 });
