@@ -180,7 +180,7 @@ export default {
 
 #### Cursor streaming
 
-Reads are buffered by default. To stream on one route, create a second module-scope client with `cursor: { batchSize: 100 }` and connect through it only on that route. The driver then reads through `pg-cursor` in batches of that size on that route, and every other route keeps the client without the option. Each request still opens one connection:
+Reads are buffered by default. To stream on one route, create a second module-scope client with the same options as the client the other routes use (such as `middleware` and `extensions`) plus `cursor: { batchSize: 100 }`, and connect through it only on that route. The driver then reads through `pg-cursor` in batches of that size on that route, and every other route keeps the client without the option. Each request still opens one connection:
 
 ```ts
 // src/prisma/db.ts
