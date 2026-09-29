@@ -9,6 +9,7 @@ import fixtureContractJson from './fixtures/generated/contract.json' with { type
 type QueryMock = ReturnType<typeof vi.fn>;
 interface RecordedClient {
   readonly connectionString: string | undefined;
+  readonly connectionTimeoutMillis: number | undefined;
   readonly connect: QueryMock;
   readonly query: QueryMock;
   readonly end: QueryMock;
@@ -41,8 +42,10 @@ vi.mock('pg', () => {
     query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 });
     end = vi.fn().mockResolvedValue(undefined);
     readonly connectionString: string | undefined;
-    constructor(config?: { connectionString?: string }) {
+    readonly connectionTimeoutMillis: number | undefined;
+    constructor(config?: { connectionString?: string; connectionTimeoutMillis?: number }) {
       this.connectionString = config?.connectionString;
+      this.connectionTimeoutMillis = config?.connectionTimeoutMillis;
       recorded.clients.push(this);
     }
   }
@@ -231,6 +234,47 @@ describe('postgresServerless connect() opens the database connection', () => {
     });
     expect((error as { cause?: unknown }).cause).toBe(refused);
     expect(lastClient().end).toHaveBeenCalledTimes(1);
+  });
+
+  it('calls the pg.Client connect once across connect() and two queries', async () => {
+    const db = await fixtureServerless().connect({ url });
+
+    await db.orm.public.User.first();
+    await db.orm.public.User.first();
+
+    expect(lastClient().connect).toHaveBeenCalledTimes(1);
+    await db.close();
+  });
+
+  it('gives the pg.Client a 20 second connect timeout', async () => {
+    const db = await postgresServerless({ contract }).connect({ url });
+
+    expect(lastClient().connectionTimeoutMillis).toBe(20_000);
+    await db.close();
+  });
+
+  it('keeps the password out of the connection error', async () => {
+    recorded.connectImpl = () => Promise.reject(new Error('connect ECONNREFUSED 127.0.0.1:5432'));
+    const serverless = postgresServerless({ contract });
+
+    const error = await serverless
+      .connect({ url: 'postgres://alice:s3cret@localhost:5432/db' })
+      .then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+
+    const failure = error as { message: string; why?: string; meta?: unknown };
+    expect(failure.meta).toEqual({
+      extension: 'postgres',
+      host: 'localhost',
+      port: '5432',
+      database: 'db',
+      username: 'alice',
+    });
+    for (const text of [failure.message, failure.why, String(error), JSON.stringify(error)]) {
+      expect(text).not.toContain('s3cret');
+    }
   });
 });
 

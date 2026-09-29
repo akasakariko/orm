@@ -19,7 +19,11 @@ import {
   type PostgresRuntimeBoundMembers,
   type PostgresStaticMembers,
 } from './postgres-members';
-import { type PostgresExecutionOptions, toDriverCursorOptions } from './postgres-options';
+import {
+  type PostgresExecutionOptions,
+  toDriverCursorOptions,
+  validateCursorOptions,
+} from './postgres-options';
 import { PostgresRuntimeImpl } from './postgres-runtime';
 import type { PostgresTargetId } from './postgres-target-id';
 
@@ -72,6 +76,8 @@ function resolveContract<TContract extends Contract<SqlStorage>>(
   >(contractSerializer.deserializeContract(contractJson));
 }
 
+const CONNECT_TIMEOUT_MILLIS = 20_000;
+
 function validateConnectionString(url: string): string {
   const trimmed = url.trim();
   if (trimmed.length === 0) {
@@ -102,7 +108,7 @@ function connectionFailedError(url: string, cause: unknown) {
 /**
  * Creates a serverless client for serverless and edge runtimes (Cloudflare Workers + Hyperdrive, AWS Lambda, Vercel, Deno Deploy).
  *
- * The serverless client holds no database connection and exposes the static query surfaces. Each `connect({ url })` opens one database connection, a fresh `pg.Client`, and returns a connection with the members of a `postgres()` client except `connect`. It rejects with `DRIVER.CONNECTION_FAILED` when the database cannot be reached. Close the connection with `await using` or `close()`.
+ * The serverless client holds no database connection and exposes the static query surfaces. Each `connect({ url })` opens one database connection, a fresh `pg.Client`, and returns a connection with the members of a `postgres()` client except `connect`. It rejects with `DRIVER.CONNECTION_FAILED` when the database refuses the connection, rejects the credentials, or does not answer within 20 seconds. Close the connection with `await using` or `close()`.
  *
  * @example
  * ```ts
@@ -126,6 +132,7 @@ export default function postgresServerless<TContract extends Contract<SqlStorage
 export default function postgresServerless<TContract extends Contract<SqlStorage>>(
   options: PostgresServerlessOptions<TContract>,
 ): PostgresServerlessClient<TContract> {
+  const cursor = validateCursorOptions(options.cursor, 'postgresServerless');
   const contract = resolveContract(options);
   const stack = createSqlExecutionStack({
     target: postgresTarget,
@@ -197,14 +204,17 @@ export default function postgresServerless<TContract extends Contract<SqlStorage
 
       const stackInstance = instantiateExecutionStack(stack);
       const driver = driverDescriptor.create({
-        cursor: toDriverCursorOptions(options.cursor),
+        cursor: toDriverCursorOptions(cursor),
       });
 
-      const client = suppressIdleConnectionErrors(new Client({ connectionString: url }));
+      const client = suppressIdleConnectionErrors(
+        new Client({ connectionString: url, connectionTimeoutMillis: CONNECT_TIMEOUT_MILLIS }),
+      );
       await driver.connect({ kind: 'pgClient', client });
 
       try {
-        await client.connect();
+        const connection = await driver.acquireConnection();
+        await connection.release();
       } catch (err) {
         await driver.close().catch(() => undefined);
         throw connectionFailedError(url, err);

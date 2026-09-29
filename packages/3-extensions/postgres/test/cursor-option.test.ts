@@ -131,6 +131,41 @@ describe('postgres() cursor option', () => {
   });
 });
 
+describe('the cursor option is checked when the factory is called', () => {
+  const disabledFlag = { disabled: true } as unknown as PostgresCursorOptions;
+  const invalidCursor = (received: unknown, helper: 'postgres' | 'postgresServerless') =>
+    expect.objectContaining({
+      code: 'RUNTIME.ARGUMENT_INVALID',
+      message: 'Invalid cursor option',
+      fix: expect.stringContaining('leave cursor unset'),
+      meta: { extension: 'postgres', helper, argument: 'cursor', received },
+    });
+
+  it('postgres() rejects { disabled: true } passed through a cast', () => {
+    expect(() =>
+      postgres<Contract>({ contractJson: fixtureContract, url, cursor: disabledFlag }),
+    ).toThrow(invalidCursor({ disabled: true }, 'postgres'));
+  });
+
+  it('postgresServerless() rejects { disabled: true } passed through a cast', () => {
+    expect(() =>
+      postgresServerless<Contract>({ contractJson: fixtureContract, cursor: disabledFlag }),
+    ).toThrow(invalidCursor({ disabled: true }, 'postgresServerless'));
+  });
+
+  it('postgres() rejects a batchSize that is not a positive integer', () => {
+    expect(() =>
+      postgres<Contract>({ contractJson: fixtureContract, url, cursor: { batchSize: 0 } }),
+    ).toThrow(invalidCursor({ batchSize: 0 }, 'postgres'));
+  });
+
+  it('postgresServerless() rejects a batchSize that is not a positive integer', () => {
+    expect(() =>
+      postgresServerless<Contract>({ contractJson: fixtureContract, cursor: { batchSize: 0 } }),
+    ).toThrow(invalidCursor({ batchSize: 0 }, 'postgresServerless'));
+  });
+});
+
 describe('postgresServerless() cursor option', () => {
   it('reads without a cursor by default', async () => {
     await readUsersThroughServerless();

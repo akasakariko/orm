@@ -24,7 +24,11 @@ import {
   type PostgresRuntimeBoundMembers,
   type PostgresStaticMembers,
 } from './postgres-members';
-import { type PostgresExecutionOptions, toDriverCursorOptions } from './postgres-options';
+import {
+  type PostgresExecutionOptions,
+  toDriverCursorOptions,
+  validateCursorOptions,
+} from './postgres-options';
 import { PostgresRuntimeImpl } from './postgres-runtime';
 import type { PostgresTargetId } from './postgres-target-id';
 
@@ -123,6 +127,7 @@ export default function postgres<TContract extends Contract<SqlStorage>>(
 export default function postgres<TContract extends Contract<SqlStorage>>(
   options: PostgresOptions<TContract>,
 ): PostgresClient<TContract> {
+  const cursor = validateCursorOptions(options.cursor, 'postgres');
   const contract = resolveContract(options);
   let binding = resolveOptionalPostgresBinding(options);
 
@@ -205,7 +210,7 @@ export default function postgres<TContract extends Contract<SqlStorage>>(
     }
 
     const driver = driverDescriptor.create({
-      cursor: toDriverCursorOptions(options.cursor),
+      cursor: toDriverCursorOptions(cursor),
     });
     runtimeDriver = driver;
     if (binding !== undefined) {
