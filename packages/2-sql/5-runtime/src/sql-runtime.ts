@@ -39,6 +39,7 @@ import type { CodecDescriptorRegistry } from '@internal/sql-relational-core/quer
 import type { RuntimeScope } from '@internal/sql-relational-core/types';
 import { blindCast } from '@internal/utils/casts';
 import { ifDefined } from '@internal/utils/defined';
+import { type StructuredError, structuredError } from '@internal/utils/structured-error';
 import {
   buildDecodeContext,
   type DecodeContext,
@@ -107,6 +108,8 @@ export interface Runtime extends RuntimeQueryable {
   connection(): Promise<RuntimeConnection>;
   telemetry(): RuntimeTelemetryEvent | null;
   close(): Promise<void>;
+  /** The promise `close()` returned, once it has been called; `null` before. */
+  readonly closing: Promise<void> | null;
 
   /**
    * Build a reusable {@link PreparedStatement}. Throws
@@ -156,6 +159,13 @@ function isExecutionPlan(plan: SqlExecutionPlan | SqlQueryPlan): plan is SqlExec
 const noopLogSink = (): void => {};
 const noopLog: Log = { info: noopLogSink, warn: noopLogSink, error: noopLogSink };
 
+function runtimeClosedError(): StructuredError {
+  return structuredError('DRIVER.NOT_CONNECTED', 'Runtime is closed', {
+    why: 'close() was called on this runtime, or the await using scope that held it has ended.',
+    fix: 'Await every query, transaction and prepared statement before the runtime closes. A query returned without await from an await using scope, or started after close(), runs after the connection has closed.',
+  });
+}
+
 /**
  * Abstract family-layer base for SQL runtimes. Subclass to build a target runtime
  * (e.g. `PostgresRuntimeImpl`); app code should consume the `Runtime` interface returned
@@ -173,8 +183,9 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
   private readonly codecDescriptors: CodecDescriptorRegistry;
   private readonly sqlCtx: SqlMiddlewareContext;
   private readonly verifyMarkerOption: VerifyMarkerOption;
-  // Single-flight gate. Memoises the first verifyMarker() call so concurrent first-queries share one read + one log line. `null` until the first gate hit; pre-resolved when `verifyMarkerOption === false` so the gate becomes a no-op await.
+  // Memoises the first verifyMarker() call so concurrent first queries share one read and one log line, and is cleared when that read fails so the next query retries it. `null` until the first query; pre-resolved when `verifyMarkerOption === false`.
   private verifyMarkerPromise: Promise<void> | null;
+  private closePromise: Promise<void> | null;
   readonly #preparedStatementHandles = new WeakMap<object, unknown>();
   private codecRegistryValidated: boolean;
   private _telemetry: RuntimeTelemetryEvent | null;
@@ -220,6 +231,7 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
     this.verifyMarkerOption = verifyMarker ?? 'onFirstUse';
     this.codecRegistryValidated = false;
     this.verifyMarkerPromise = this.verifyMarkerOption === false ? Promise.resolve() : null;
+    this.closePromise = null;
     this._telemetry = null;
   }
 
@@ -368,13 +380,39 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
     return this.driver.acquireConnection();
   }
 
-  private async setupDriverExecution(exec: SqlExecutionPlan): Promise<void> {
+  private async setupDriverExecution(
+    exec: SqlExecutionPlan,
+    scope: RuntimeMiddlewareContext['scope'],
+  ): Promise<void> {
+    const closing = this.closePromise;
+    if (closing !== null) {
+      await this.rejectAfterClose(closing, scope);
+    }
     this.familyAdapter.validatePlan(exec, this.contract);
     this._telemetry = null;
     if (this.verifyMarkerPromise === null) {
-      this.verifyMarkerPromise = this.verifyMarker();
+      this.verifyMarkerPromise = this.verifyMarker().catch((error: unknown) => {
+        this.verifyMarkerPromise = null;
+        throw error;
+      });
     }
     await this.verifyMarkerPromise;
+  }
+
+  /**
+   * Rejects an operation that reaches the driver after `close()` has started. An operation
+   * that holds no connection rejects only once the close has settled, so the rejection cannot
+   * precede the caller's handler. An operation on a held connection rejects at once, because
+   * the driver's close waits for that connection to be released.
+   */
+  private async rejectAfterClose(
+    closing: Promise<void>,
+    scope: RuntimeMiddlewareContext['scope'],
+  ): Promise<never> {
+    if (scope === 'runtime') {
+      await closing.catch(() => undefined);
+    }
+    throw runtimeClosedError();
   }
 
   protected getListDecoder(): ListDecoder {
@@ -388,7 +426,7 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
     codecCtx: SqlCodecCallContext,
     execMiddlewareCtx: RuntimeMiddlewareContext,
   ): AsyncGenerator<Row, void, unknown> {
-    await this.setupDriverExecution(exec);
+    await this.setupDriverExecution(exec, execMiddlewareCtx.scope);
 
     const startedAt = Date.now();
     let outcome: TelemetryOutcome | null = null;
@@ -544,7 +582,7 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
 
     const { codecCtx, middlewareCtx } = this.createQueryContexts(options);
     const exec = await this.prepareExecuteExecution(plan, codecCtx, middlewareCtx);
-    await this.setupDriverExecution(exec);
+    await this.setupDriverExecution(exec, middlewareCtx.scope);
     checkAborted(codecCtx, 'stream');
 
     const startedAt = Date.now();
@@ -733,7 +771,7 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
       ast: ps.ast,
       meta: ps.meta,
     };
-    await this.setupDriverExecution(exec);
+    await this.setupDriverExecution(exec, middlewareCtx.scope);
     checkAborted(codecCtx, 'stream');
 
     const handles = this.#preparedStatementHandles;
@@ -763,6 +801,10 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
   }
 
   async connection(): Promise<RuntimeConnection> {
+    const closing = this.closePromise;
+    if (closing !== null) {
+      await this.rejectAfterClose(closing, 'runtime');
+    }
     const driverConn = await this.driver.acquireConnection();
     const self = this;
 
@@ -899,8 +941,13 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
     return this._telemetry;
   }
 
-  async close(): Promise<void> {
-    await this.driver.close();
+  get closing(): Promise<void> | null {
+    return this.closePromise;
+  }
+
+  close(): Promise<void> {
+    this.closePromise ??= this.driver.close();
+    return this.closePromise;
   }
 
   private ensureCodecRegistryValidated(): void {
@@ -971,9 +1018,28 @@ function transactionClosedError(): Error {
 /** Minimal structural type `withTransaction` depends on — anything that can open a connection. */
 export interface ConnectionProvider {
   connection(): Promise<RuntimeConnection>;
+  /** The promise `close()` returned, once it has been called; `null` or absent before. */
+  readonly closing?: Promise<void> | null;
 }
 
+/**
+ * Runs `fn` inside a transaction on a connection from `runtime`. When the transaction fails
+ * after `runtime.close()` has started, the rejection is delivered once the close has settled,
+ * after the connection has been released, so it cannot precede the caller's handler.
+ */
 export async function withTransaction<R>(
+  runtime: ConnectionProvider,
+  fn: (tx: TransactionContext) => PromiseLike<R>,
+): Promise<R> {
+  try {
+    return await runTransaction(runtime, fn);
+  } catch (error) {
+    await runtime.closing?.catch(() => undefined);
+    throw error;
+  }
+}
+
+async function runTransaction<R>(
   runtime: ConnectionProvider,
   fn: (tx: TransactionContext) => PromiseLike<R>,
 ): Promise<R> {
