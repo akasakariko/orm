@@ -87,7 +87,7 @@ beforeEach(() => {
   recorded.poolCount = 0;
 });
 
-describe('postgresServerless module-scope client', () => {
+describe('the serverless client', () => {
   it('has exactly the static members and connect', () => {
     const db = postgresServerless({ contract });
 
@@ -130,7 +130,7 @@ describe('postgresServerless connect()', () => {
     await nodeClient.close();
   });
 
-  it('shares the static members of the module-scope client', async () => {
+  it('shares the static members of the serverless client', async () => {
     const serverless = postgresServerless({ contract });
     const db = await serverless.connect({ url });
 

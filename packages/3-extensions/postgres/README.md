@@ -2,12 +2,12 @@
 
 One-package Postgres setup for Prisma 8. Install this single package to get config, runtime, and all transitive type dependencies.
 
-Two runtime facades ship under different entrypoints:
+Two runtime entry points create three kinds of object:
 
-- `@internal/postgres/runtime` — long-lived Node process facade with closure-cached `runtime()`, `orm`, and `transaction()`.
-- `@internal/postgres/serverless` — facade for serverless / edge runtimes (Cloudflare Workers + Hyperdrive, AWS Lambda, Vercel, Deno Deploy, Bun edge). The module-scope client holds no connection. Each `connect({ url })` opens a fresh connection and returns a per-request client with the members of a `postgres()` client except `connect`.
+- `@internal/postgres/runtime` — `postgres()` returns a **client** for a long-lived Node process, with closure-cached `runtime()`, `orm`, and `transaction()`.
+- `@internal/postgres/serverless` — for serverless / edge runtimes (Cloudflare Workers + Hyperdrive, AWS Lambda, Vercel, Deno Deploy, Bun edge). `postgresServerless()` returns a **serverless client**, which holds no database connection. Each `connect({ url })` on it opens a fresh database connection and returns a **connection** with the members of a `postgres()` client except `connect`.
 
-Pick the facade that matches your deployment lifecycle. Caching a connection at module scope is unsafe across `fetch` invocations (stale connections after isolate idle, concurrent-query races, no clean shutdown), so on the serverless facade everything bound to a connection lives on the per-request client. Inside a request, `db` does everything the `db` from `postgres()` does. See [ADR 207](../../../docs/architecture%20docs/adrs/ADR%20207%20-%20A%20serverless%20Postgres%20connection%20has%20the%20same%20query%20interface%20as%20a%20postgres%20client.md) and the [Serverless Deployment Guide](../../../docs/Serverless%20Deployment%20Guide.md) for the rationale.
+Pick the entry point that matches your deployment lifecycle. Caching a database connection at module scope is unsafe across `fetch` invocations (stale connections after isolate idle, concurrent-query races, no clean shutdown), so on the serverless side everything bound to a database connection lives on the connection. Inside a request, `db` does everything the `db` from `postgres()` does. See [ADR 207](../../../docs/architecture%20docs/adrs/ADR%20207%20-%20A%20serverless%20Postgres%20connection%20has%20the%20same%20query%20interface%20as%20a%20postgres%20client.md) and the [Serverless Deployment Guide](../../../docs/Serverless%20Deployment%20Guide.md) for the rationale.
 
 ## Package Classification
 
@@ -46,7 +46,7 @@ export const db = postgres<Contract>({ contractJson });
 ### Serverless / per-request runtimes
 
 ```typescript
-// db.ts — module scope: holds no connection.
+// db.ts — module scope: the serverless client holds no database connection.
 import postgresServerless from '@internal/postgres/serverless';
 import type { Contract } from './contract.d';
 import contractJson from './contract.json' with { type: 'json' };
@@ -249,15 +249,15 @@ Re-exports the Postgres target pack (the value passed as `target:` to `defineCon
 
 ### `@internal/postgres/serverless`
 
-`@internal/postgres/serverless` exposes `postgresServerless(...)` for per-request runtimes. The module-scope client holds no connection and exposes:
+`@internal/postgres/serverless` exposes `postgresServerless(...)` for per-request runtimes. It returns the serverless client, which holds no database connection and exposes:
 
 - `postgres.sql`, `postgres.raw`, `postgres.enums`, `postgres.nativeEnums`
 - `postgres.context`, `postgres.contract`, `postgres.stack`
 - `postgres.connect({ url })` — returns `Promise<PostgresServerlessConnection<Contract>>`
 
-`PostgresServerlessConnection<Contract>` is `PostgresClient<Contract>` without `connect`: `sql`, `raw`, `enums`, `nativeEnums`, `context`, `contract` and `stack` (the same objects as on the module-scope client), plus `orm`, `runtime()`, `transaction(fn)`, `prepare(...)`, `close()` and `[Symbol.asyncDispose]`.
+`PostgresServerlessConnection<Contract>` is `PostgresClient<Contract>` without `connect`: `sql`, `raw`, `enums`, `nativeEnums`, `context`, `contract` and `stack` (the same objects as on the serverless client), plus `orm`, `runtime()`, `transaction(fn)`, `prepare(...)`, `close()` and `[Symbol.asyncDispose]`.
 
-Each `connect()` call constructs a fresh `pg.Client` and a fresh runtime. No `pg.Pool` is allocated. `close()` and `[Symbol.asyncDispose]` close the runtime once, which closes the underlying client. After that, `db.runtime()`, ORM queries, `db.transaction(...)` and `db.prepare(...)` fail with `DRIVER.NOT_CONNECTED`. The connection has one `pg.Client`, so inside `db.transaction(async (tx) => ...)` run every query through `tx`. Reads are buffered by default. To stream on some paths only, create a second module-scope client with `cursor: { batchSize }` and connect through it only on those paths; it reads through `pg-cursor` in batches. Behind Cloudflare Hyperdrive, reads with cursors on hang, so those paths hang there and the paths that use the client without the option do not.
+Each `connect()` call constructs a fresh `pg.Client` and a fresh runtime. No `pg.Pool` is allocated. `close()` and `[Symbol.asyncDispose]` close the runtime once, which closes the underlying client. After that, `db.runtime()`, ORM queries, `db.transaction(...)` and `db.prepare(...)` fail with `DRIVER.NOT_CONNECTED`. A connection has one database connection, a `pg.Client`, so inside `db.transaction(async (tx) => ...)` run every query through `tx`. Reads are buffered by default. To stream on some paths only, create a second serverless client with `cursor: { batchSize }` and open connections from it only on those paths; they read through `pg-cursor` in batches. Behind Cloudflare Hyperdrive, reads with cursors on hang, so those paths hang there and the paths whose connections come from the serverless client without the option do not.
 
 ## Responsibilities
 

@@ -129,7 +129,7 @@ Servers (HTTP handlers, workers in a request loop) **do not call `db.close()`** 
 **Semantics:**
 
 - **`close()` is idempotent.** Calling it twice is a no-op.
-- **`close()` is terminal.** There is no reconnect on a closed `db` — construct a new client if you need another connection. After close, `db.runtime()`, `db.connect(...)`, `db.transaction(...)`, and `db.prepare(...)` reject with `Error('<target> client is closed')` (e.g. `'Postgres client is closed'`, `'SQLite client is closed'`, `'Mongo client is closed'`).
+- **`close()` is terminal.** There is no reconnect on a closed `db` — construct a new client if you need to reach the database again. After close, `db.runtime()`, `db.connect(...)`, `db.transaction(...)`, and `db.prepare(...)` reject with `Error('<target> client is closed')` (e.g. `'Postgres client is closed'`, `'SQLite client is closed'`, `'Mongo client is closed'`).
 - **`close()` does not abort in-flight queries.** `await` outstanding work before calling `close()`. Async iterators from `db.runtime().query(plan)` and `PreparedStatement` handles held after `close()` fail on their next call.
 - **Ownership.** `close()` releases only what the façade constructed (`pg.Pool` from `{ url }`, `MongoClient` from `{ url }` / `{ uri, dbName }`, SQLite handle from `{ path }`). If you supplied your own `pg.Pool` / `pg.Client` (Postgres `pg:` option), `mongodb.MongoClient` (Mongo `mongoClient:` option), or a pre-built `binding`, `db.close()` does **not** touch those — you own their lifecycle.
 
@@ -137,10 +137,10 @@ Servers (HTTP handlers, workers in a request loop) **do not call `db.close()`** 
 
 ## Workflow — Serverless and per-request runtimes
 
-The concept: a per-request runtime (Cloudflare Workers + Hyperdrive, AWS Lambda, Vercel Edge, Deno Deploy, Bun edge) must not keep a connection at module scope. Use `postgresServerless()` from `@internal/postgres/serverless`. Name the module-scope client `postgres`; it holds no connection. In each request, open a per-request client named `db` with `await using db = await postgres.connect({ url })`. It opens one `pg.Client`, and `await using` closes it when the handler returns.
+The concept: a per-request runtime (Cloudflare Workers + Hyperdrive, AWS Lambda, Vercel Edge, Deno Deploy, Bun edge) must not keep a database connection at module scope. Use `postgresServerless()` from `@internal/postgres/serverless`. It returns a **serverless client**; name it `postgres`. It holds no database connection. In each request, open a **connection** named `db` with `await using db = await postgres.connect({ url })`. A connection owns one database connection, a `pg.Client`, and `await using` closes it when the handler returns. `db` has the members of a `postgres()` client except `connect`.
 
 ```typescript
-// src/prisma/db.ts — module scope, built once per isolate, holds no connection
+// src/prisma/db.ts — the serverless client: module scope, built once per isolate, holds no database connection
 import postgresServerless from '@internal/postgres/serverless';
 import type { Contract } from './contract.d';
 import contractJson from './contract.json' with { type: 'json' };
@@ -161,10 +161,10 @@ export default {
 
 The rule to remember: inside a request, `db` does everything the `db` from `postgres()` does, so any documented `db.orm...`, `db.sql...`, `db.raw...`, `db.transaction(...)`, `db.prepare(...)` or `db.runtime().query(...)` snippet works unchanged. Await every query before the `await using` scope ends: the connection closes when the scope ends, so a query returned from the scope without `await` (`return db.orm...` instead of `return await db.orm...`) fails with a "not connected" error.
 
-- **Never call `connect` at module scope.** A connection opened there is shared by every request in the isolate: it goes stale after the isolate idles, and concurrent requests queue behind each other on one `pg.Client`.
+- **Never call `connect` at module scope.** A connection opened there is shared by every request in the isolate: its database connection goes stale after the isolate idles, and concurrent requests queue behind each other on one `pg.Client`.
 - **`db.orm` is the default way to use the ORM.** Build `orm({ runtime: db.runtime(), context: db.context, collections })` only for custom collection classes, and build it inside the request.
 - **Anything that takes a runtime gets `db.runtime()`.** That includes `orm({ runtime, ... })`, `withTransaction(runtime, fn)` and a prepared statement's `query(runtime, params)`. Do not pass `db` itself to `orm()`.
-- **Inside `db.transaction(async (tx) => ...)`, run every query through `tx`.** A per-request client has one connection, so inside `db.transaction(async (tx) => ...)` a query through `db` is not independent of the transaction; run every query through `tx`. A query that uses the client's connection directly, such as a `db.orm` read, a single-statement `db.orm` write or `db.runtime().query(...)`, runs inside the open transaction without saying so. An operation that asks for a connection of its own, such as `db.runtime().connection()`, a `db.orm` create that also writes related rows, or a nested `db.transaction(...)`, waits for the connection the transaction holds, and the request hangs.
+- **Inside `db.transaction(async (tx) => ...)`, run every query through `tx`.** A connection has one database connection, so inside `db.transaction(async (tx) => ...)` a query through `db` is not independent of the transaction; run every query through `tx`. A query that uses the connection's database connection directly, such as a `db.orm` read, a single-statement `db.orm` write or `db.runtime().query(...)`, runs inside the open transaction without saying so. An operation that asks for a database connection of its own, such as `db.runtime().connection()`, a `db.orm` create that also writes related rows, or a nested `db.transaction(...)`, waits for the database connection the transaction holds, and the request hangs.
 - **After `db.close()`** (or the end of the `await using` scope), `db.runtime()`, ORM queries, `db.transaction(...)` and `db.prepare(...)` fail with `DRIVER.NOT_CONNECTED`. Call `postgres.connect({ url })` again for a new connection.
 
 How the serverless client reads rows (cursors, and the Hyperdrive caveat) is in `references/queries.md` § *Streaming*.

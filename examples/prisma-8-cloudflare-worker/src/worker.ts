@@ -109,14 +109,14 @@ export default {
 
       // Open a side-channel pg.Client to instrument the cursor query via
       // pg_stat_statements (loaded via shared_preload_libraries in
-      // docker-compose / CI). Two-client pattern: `db` owns the
-      // primary connection that runs the SELECT; this observer connection
-      // resets stats before and reads them after, so the test can prove
+      // docker-compose / CI). Two database connections: `db` owns the one
+      // that runs the SELECT; this observer pg.Client resets stats before
+      // and reads them after, so the test can prove
       // that with cursor enabled the server transmitted only ~one batch
       // worth of rows (not the full LIMIT). With cursor disabled the
       // observer would see the full ~10_000 rows row count.
       const observer = new Client({ connectionString: env.HYPERDRIVE.connectionString });
-      // A dropped connection emits 'error' on the client; without a listener
+      // A dropped database connection emits 'error' on the pg.Client; without a listener
       // that is an uncaught exception and kills the isolate mid-response.
       observer.on('error', () => {});
       await observer.connect();
@@ -125,7 +125,7 @@ export default {
 
         const t0 = Date.now();
         // SELECT bounded to the post-table budget cap (10_000 — see
-        // `src/prisma/db.ts`). `db` comes from `streamingPostgres`, so the
+        // `src/prisma/db.ts`). `db` was opened from `streamingPostgres`, so the
         // cursor is enabled: the driver opens a
         // server-side cursor and streams in ~100-row batches; an early
         // `break` only fetches one batch and closes. With cursor disabled

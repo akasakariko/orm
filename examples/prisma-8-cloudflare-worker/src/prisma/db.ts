@@ -16,7 +16,7 @@ function createMiddleware() {
 }
 
 /**
- * Module-scope client, built once per isolate. It holds no connection. Each request gets its own client from `postgres.connect({ url })`.
+ * Serverless client, built once per isolate. It holds no database connection. Each request opens its own connection with `postgres.connect({ url })`.
  */
 export const postgres = postgresServerless<Contract>({
   contractJson,
@@ -24,7 +24,7 @@ export const postgres = postgresServerless<Contract>({
 });
 
 /**
- * Module-scope client with cursors on, used only by the `/cursor/large` route to stream a large result. Reads through it hang behind Cloudflare Hyperdrive.
+ * Serverless client with cursors on, used only by the `/cursor/large` route to stream a large result. Reads through its connections hang behind Cloudflare Hyperdrive.
  */
 export const streamingPostgres = postgresServerless<Contract>({
   contractJson,

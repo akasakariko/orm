@@ -14,7 +14,7 @@ type TestContract = Contract<SqlStorage>;
 type Db = PostgresServerlessClient<TestContract>;
 type Connection = Awaited<ReturnType<Db['connect']>>;
 
-test('the module-scope client has the static members and connect', () => {
+test('the serverless client has the static members and connect', () => {
   expectTypeOf<keyof Db>().toEqualTypeOf<
     'sql' | 'raw' | 'enums' | 'nativeEnums' | 'context' | 'contract' | 'stack' | 'connect'
   >();

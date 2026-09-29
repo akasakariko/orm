@@ -1,19 +1,19 @@
 # prisma-8-cloudflare-worker
 
-End-to-end example for the `@prisma/orm-postgres/serverless` facade, running on a Cloudflare Worker against a Hyperdrive-fronted Postgres origin.
+End-to-end example for the serverless client from `@prisma/orm-postgres/serverless`, running on a Cloudflare Worker against a Hyperdrive-fronted Postgres origin.
 
 This example mirrors `examples/prisma-8-demo` (the Node demo), minus pgvector — the Worker example exists to exercise the per-request `postgresServerless` lifecycle, not vector search.
 
 ## What this example demonstrates
 
-- **Module-scope `postgres`** built once per isolate via `postgresServerless<Contract>({ contractJson, middleware })`. It holds no connection.
-- **Per-request `db`** via `await using db = await postgres.connect({ url: env.HYPERDRIVE.connectionString })`. `db` has the members of a `postgres()` client except `connect`. The `[Symbol.asyncDispose]` ensures the underlying `pg.Client` is `end()`-ed when the `fetch` handler returns.
-- **All query surfaces** through the per-request `db`:
+- **Serverless client `postgres`** at module scope, built once per isolate via `postgresServerless<Contract>({ contractJson, middleware })`. It holds no database connection.
+- **Connection `db`**, opened in each request via `await using db = await postgres.connect({ url: env.HYPERDRIVE.connectionString })`. `db` has the members of a `postgres()` client except `connect`. The `[Symbol.asyncDispose]` ensures the underlying `pg.Client` is `end()`-ed when the `fetch` handler returns.
+- **All query surfaces** through the connection `db`:
   - SQL DSL: `db.runtime().query(db.sql.public.user.select(...).build())`
   - Default ORM client: `db.orm.public.Post.where({ userId }).limit(10).all()`
   - Custom ORM client with collection classes: `createOrmClient(db).User.newestFirst().limit(10).all()`, built from `db.runtime()` and `db.context`
   - Transactions: `db.transaction(async (tx) => …)`
-- **Cursor early-break** over a streamed result set (`for await … break`). Cursors are off by default; only the `/cursor/large` route uses a separate client, `streamingPostgres`, with `cursor: { batchSize: 100 }`.
+- **Cursor early-break** over a streamed result set (`for await … break`). Cursors are off by default; only the `/cursor/large` route opens its connection from a separate serverless client, `streamingPostgres`, with `cursor: { batchSize: 100 }`.
 
 Routes implemented in [`src/worker.ts`](src/worker.ts):
 
@@ -34,7 +34,7 @@ examples/prisma-8-cloudflare-worker/
 ├── src/prisma/contract.prisma                # Demo schema minus pgvector
 ├── src/
 │   ├── worker.ts                       # `fetch` handler — all routes
-│   ├── prisma/db.ts                    # Module-scope postgresServerless clients
+│   ├── prisma/db.ts                    # Serverless clients (postgresServerless)
 │   ├── prisma/contract.{json,d.ts}     # Emitted by `pnpm emit`
 │   └── orm-client/                     # ORM extensions (collections + factory)
 ├── scripts/
@@ -99,7 +99,7 @@ pnpm run deploy
 
 > Use `pnpm run deploy` (not `pnpm deploy`). The latter collides with pnpm's built-in `deploy` command and fails with `ERR_PNPM_INVALID_DEPLOY_TARGET`.
 
-> Cursors are off by default. The example's `/cursor/large` route uses a separate client, `streamingPostgres` in `src/prisma/db.ts`, with `cursor: { batchSize: 100 }` to show an early `break` over a streamed result. That route hangs behind real Cloudflare Hyperdrive, and the other routes do not; see the deployment guide's "Known limitations" for details.
+> Cursors are off by default. The example's `/cursor/large` route opens its connection from a separate serverless client, `streamingPostgres` in `src/prisma/db.ts`, with `cursor: { batchSize: 100 }` to show an early `break` over a streamed result. That route hangs behind real Cloudflare Hyperdrive, and the other routes do not; see the deployment guide's "Known limitations" for details.
 
 ## Bundle size
 
@@ -111,7 +111,7 @@ Total Upload: 1289.96 KiB / gzip: 254.14 KiB
 
 (254 KiB compressed, well under the 1 MB AC-19 budget.)
 
-The bundle includes `pg`, `pg-protocol`, `pg-types`, `pg-cursor`, `pg-pool` (statically imported by the Postgres driver the facade wires in even though `postgresServerless` does not construct a `Pool` at runtime), `pg-cloudflare` (auto-pulled by `pg` when `navigator.userAgent === 'Cloudflare-Workers'`), and `@cloudflare/unenv-preset` polyfills.
+The bundle includes `pg`, `pg-protocol`, `pg-types`, `pg-cursor`, `pg-pool` (statically imported by the Postgres driver the serverless client wires in even though `postgresServerless` does not construct a `Pool` at runtime), `pg-cloudflare` (auto-pulled by `pg` when `navigator.userAgent === 'Cloudflare-Workers'`), and `@cloudflare/unenv-preset` polyfills.
 
 ## Cold-start benchmark (AC-20 / TC-23)
 
@@ -156,8 +156,8 @@ The M1 audit's "this works in `wrangler dev`" claim was empirically validated ag
 
 ## Known limitations
 
-- **Transaction affinity** — every `db.transaction` body must run its queries through `tx`, on the same per-request `db`. Crossing connection boundaries inside a transaction body is undefined.
+- **Transaction affinity** — every `db.transaction` body must run its queries through `tx`, on the same connection `db`. Crossing database connection boundaries inside a transaction body is undefined.
 - **Isolate memory** — on the `/cursor/large` route, which uses `cursor: { batchSize: 100 }`, `for await` reads large result sets in batches. The other routes buffer their results. For ORM `findMany`-style operations the result set is materialised; size your `limit(...)` accordingly.
-- **`pg.Pool` not used** — the serverless facade routes through `PostgresDirectDriverImpl` (`pgClient` binding kind). No connection pooling within the isolate; that's Hyperdrive's job in production.
+- **`pg.Pool` not used** — the serverless client routes through `PostgresDirectDriverImpl` (`pgClient` binding kind). No connection pooling within the isolate; that's Hyperdrive's job in production.
 - **Production `id`** — the committed `wrangler.jsonc` has a zero-stuffed Hyperdrive `id`. Deploy will fail until a real id is wired in (M4).
 - **Class-table-inheritance ORM queries** — the schema declares `Bug` and `Feature` as `@@base(Task)` discriminator variants for parity with `examples/prisma-8-demo`. The earlier `column "bug.id" does not exist` failure is now resolved: the emitted contract materialises the base-PK link column (`bug.id` / `feature.id`) on each variant table, so the variant join the ORM emits resolves. These queries are not yet exercised by this worker's routes or integration test; `examples/prisma-8-demo` covers the polymorphic-include path end-to-end.

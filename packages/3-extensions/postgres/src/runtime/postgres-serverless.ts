@@ -100,9 +100,9 @@ function closedConnectionError() {
 }
 
 /**
- * Postgres client for serverless and edge runtimes (Cloudflare Workers + Hyperdrive, AWS Lambda, Vercel, Deno Deploy).
+ * Creates a serverless client for serverless and edge runtimes (Cloudflare Workers + Hyperdrive, AWS Lambda, Vercel, Deno Deploy).
  *
- * The returned client holds no connection and exposes the static query surfaces. Each `connect({ url })` opens one fresh `pg.Client` and returns a per-request client with the members of a `postgres()` client except `connect`. Close it with `await using` or `close()`.
+ * The serverless client holds no database connection and exposes the static query surfaces. Each `connect({ url })` opens one fresh `pg.Client` and returns a connection with the members of a `postgres()` client except `connect`. Close the connection with `await using` or `close()`.
  *
  * @example
  * ```ts

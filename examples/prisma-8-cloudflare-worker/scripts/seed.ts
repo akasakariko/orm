@@ -2,7 +2,7 @@
  * Seeds the demo schema with users, posts, and tasks.
  *
  * Mirrors examples/prisma-8-demo/scripts/seed.ts minus the pgvector
- * embeddings (this example exercises the per-request facade, not vectors).
+ * embeddings (this example exercises the serverless client and its connections, not vectors).
  */
 
 import 'temporal-polyfill/full/global';
