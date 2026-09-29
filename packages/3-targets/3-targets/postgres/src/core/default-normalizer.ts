@@ -1,5 +1,6 @@
 import type { ColumnDefault, JsonValue } from '@internal/contract/types';
 import { blindCast } from '@internal/utils/casts';
+import { canonicalUuidText } from './uuid-text';
 
 /**
  * Pre-compiled regex patterns for performance.
@@ -220,11 +221,11 @@ function unquotedElementValue(token: string, elementType: string): JsonValue | u
   if (NUMBER_TYPE_PATTERN.test(elementType)) {
     return NUMERIC_PATTERN.test(token) ? numberValue(token, elementType) : undefined;
   }
-  if (isJsonElementType(elementType)) {
+  if (isJsonType(elementType)) {
     const document = readJsonDocument(token);
     return document.kind === 'json' ? document.value : undefined;
   }
-  return token;
+  return textValue(token, elementType);
 }
 
 /**
@@ -250,7 +251,7 @@ function parseArrayLiteralBody(
     if (token.quoted) {
       // A quoted token is always a string — `"NULL"`, `"true"`, `"1"` are the
       // literal text, never the keyword/number.
-      const value = textElementValue(token.value, elementType);
+      const value = textValue(token.value, elementType);
       if (value === undefined) return undefined;
       result.push(value);
       continue;
@@ -260,7 +261,7 @@ function parseArrayLiteralBody(
       // A `json`/`jsonb` element's quoted `'null'` is the JSON value null, and an unquoted SQL NULL
       // is the absence of a value. Both would read back as JSON null, so the whole default is left
       // as its raw expression rather than printed as one the other reads back as.
-      if (isJsonElementType(elementType)) return undefined;
+      if (isJsonType(elementType)) return undefined;
       result.push(null);
       continue;
     }
@@ -308,26 +309,29 @@ function splitConstructorElements(body: string): readonly string[] {
  */
 function parseConstructorElement(element: string, elementType: string): JsonValue | undefined {
   // See `parseArrayLiteralBody`: an unquoted SQL NULL in a json list is not the JSON value null.
-  if (NULL_PATTERN.test(element)) return isJsonElementType(elementType) ? undefined : null;
+  if (NULL_PATTERN.test(element)) return isJsonType(elementType) ? undefined : null;
   if (TRUE_PATTERN.test(element)) return true;
   if (FALSE_PATTERN.test(element)) return false;
   const token = readLiteralToken(element);
   if (token === undefined) return undefined;
   return token.kind === 'number'
     ? numberValue(token.numeral, elementType)
-    : textElementValue(token.text, elementType);
+    : textValue(token.text, elementType);
 }
 
-function isJsonElementType(elementType: string): boolean {
-  return elementType === 'json' || elementType === 'jsonb';
+function isJsonType(type: string): boolean {
+  return type === 'json' || type === 'jsonb';
 }
 
 /**
- * A `json`/`jsonb` element's text is a JSON document, as it is on a scalar column of the same type.
- * Undefined keeps the raw expression: the document holds a number a JavaScript number would change.
+ * The value a string literal stands for in a column or element of `type`: a `json`/`jsonb` text is
+ * the JSON document it holds, and a `uuid` text is the uuid in the form Postgres prints it. Text that
+ * is not JSON stays text. Undefined keeps the raw expression: the document holds a number a
+ * JavaScript number would change.
  */
-function textElementValue(text: string, elementType: string): JsonValue | undefined {
-  if (!isJsonElementType(elementType)) return text;
+function textValue(text: string, type: string | undefined): JsonValue | undefined {
+  if (type === 'uuid') return canonicalUuidText(text);
+  if (type === undefined || !isJsonType(type)) return text;
   const document = readJsonDocument(text);
   if (document.kind === 'inexact') return undefined;
   return document.kind === 'json' ? document.value : text;
@@ -407,7 +411,7 @@ function unwrapOuterArrayCasts(expression: string): string {
  * keeping the introspection layer focused on faithful data capture.
  *
  * @param rawDefault - Raw default expression from information_schema.columns.column_default
- * @param nativeType - Native column type, used for type-aware parsing (array, int8, numeric, JSON)
+ * @param nativeType - Native column type, used for type-aware parsing (array, int8, numeric, JSON, uuid)
  * @returns Normalized ColumnDefault or undefined if the expression cannot be parsed
  */
 export function parsePostgresDefault(
@@ -478,12 +482,10 @@ export function parsePostgresDefault(
     return value === undefined ? undefined : { kind: 'literal', value };
   }
 
-  if (normalizedType !== undefined && isJsonElementType(normalizedType)) {
-    const document = readJsonDocument(token.text);
-    if (document.kind === 'inexact') return { kind: 'function', expression: trimmed };
-    if (document.kind === 'json') return { kind: 'literal', value: document.value };
-  }
-  return { kind: 'literal', value: token.text };
+  const value = textValue(token.text, normalizedType);
+  return value === undefined
+    ? { kind: 'function', expression: trimmed }
+    : { kind: 'literal', value };
 }
 
 /**

@@ -255,3 +255,31 @@ describe('parsePostgresDefault float defaults Postgres prints in exponent notati
     expect(parsePostgresDefault(raw, nativeType)).toEqual({ kind: 'literal', value });
   });
 });
+
+describe('parsePostgresDefault uuid literals', () => {
+  it.each([
+    { raw: "'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'::uuid" },
+    { raw: "'{A0EEBC99-9C0B4EF8-BB6D6BB9-BD380A11}'::uuid" },
+    { raw: "'a0eebc999c0b4ef8bb6d6bb9bd380a11'" },
+    { raw: "'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'::uuid" },
+  ])('reads $raw on a uuid column as the text Postgres prints', ({ raw }) => {
+    expect(parsePostgresDefault(raw, 'uuid')).toEqual({
+      kind: 'literal',
+      value: 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11',
+    });
+  });
+
+  it('keeps text that is not a uuid as written on a uuid column', () => {
+    expect(parsePostgresDefault("'Not-A-Uuid'::uuid", 'uuid')).toEqual({
+      kind: 'literal',
+      value: 'Not-A-Uuid',
+    });
+  });
+
+  it('keeps the case of uuid-shaped text on a text column', () => {
+    expect(parsePostgresDefault("'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'::text", 'text')).toEqual({
+      kind: 'literal',
+      value: 'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11',
+    });
+  });
+});
