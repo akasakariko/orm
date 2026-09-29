@@ -6,12 +6,12 @@ import { defineContract, enumType, member } from '../../src/exports/contract-bui
 const pgUuid = { codecId: 'pg/uuid@1' as const, nativeType: 'uuid' };
 
 describe('uuid-backed enum authoring against the real Postgres pack', () => {
-  it('stores upper-case and braced members as the lower-case uuid text Postgres returns', () => {
+  it('stores lower-case members as written, in the enum, the value set and the CHECK', () => {
     const Key = enumType(
       'Key',
       pgUuid,
-      member('A', 'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'),
-      member('B', '{B0EEBC99-9C0B4EF8-BB6D6BB9-BD380A11}'),
+      member('A', 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'),
+      member('B', 'b0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'),
     );
     const built = defineContract({ enums: { Key } }, ({ field, model }) => ({
       models: {
@@ -46,13 +46,11 @@ describe('uuid-backed enum authoring against the real Postgres pack', () => {
     });
   });
 
-  it('refuses two members that store the same uuid, naming both', () => {
-    const Key = enumType(
-      'Key',
-      pgUuid,
-      member('Upper', 'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'),
-      member('Lower', 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'),
-    );
+  it.each([
+    ['upper case', 'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'],
+    ['braces', '{a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11}'],
+  ])('refuses a member written in %s, saying the text Postgres stores', (_spelling, written) => {
+    const Key = enumType('Key', pgUuid, member('A', written));
     expect(() =>
       defineContract({ enums: { Key } }, ({ field, model }) => ({
         models: {
@@ -64,8 +62,7 @@ describe('uuid-backed enum authoring against the real Postgres pack', () => {
     ).toThrow(
       expect.objectContaining({
         code: 'CONTRACT.ENUM_INVALID',
-        message:
-          'enumType("Key"): members "Upper" and "Lower" both store "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11". Member values must be unique as the column stores them.',
+        message: `enumType("Key"): member "A" is written "${written}", but the column stores "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11". Write the member as "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11".`,
       }),
     );
   });

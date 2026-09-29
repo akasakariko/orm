@@ -185,6 +185,54 @@ function emitPsl(testDir: string, source: string) {
   });
 }
 
+const STORED_KEYS = [
+  'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11',
+  'b0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11',
+] as const;
+
+const storedKeyEnum = {
+  domainEnum: {
+    codecId: 'pg/uuid@1',
+    members: [
+      { name: 'A', value: STORED_KEYS[0] },
+      { name: 'B', value: STORED_KEYS[1] },
+    ],
+  },
+  valueSet: { kind: 'valueSet', values: [...STORED_KEYS] },
+  checks: [`"key" IN ('${STORED_KEYS[0]}', '${STORED_KEYS[1]}')`],
+};
+
+const insertBothSpellings = `INSERT INTO "T" (id, key) VALUES (1, 'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'), (2, '{B0EEBC99-9C0B4EF8-BB6D6BB9-BD380A11}')`;
+
+const storedKeyRows = STORED_KEYS.map((key) => ({ key }));
+
+function emittedKeyEnum(contractJson: Record<string, unknown>) {
+  const emitted = contractJson as unknown as EmittedEnum;
+  return {
+    domainEnum: emitted.domain.namespaces.public.enum.Key,
+    valueSet: emitted.storage.namespaces.public.entries.valueSet.Key,
+    checks: emitted.storage.namespaces.public.entries.table.T.checks.map(
+      (check) => check.expression,
+    ),
+  };
+}
+
+/** What the runtime enum accessor says about the values read back from the database. */
+function accessorAgainst(
+  accessor: RuntimeEnumAccessor | undefined,
+  rows: readonly { readonly key: string }[],
+) {
+  return {
+    members: accessor?.members,
+    has: rows.map((row) => accessor?.has(row.key)),
+  };
+}
+
+const accessorAgreeing = {
+  members: { A: STORED_KEYS[0], B: STORED_KEYS[1] },
+  has: [true, true],
+};
+
 const initializedAndVerified = {
   init: 'applied',
   verify: { markerDrift: null, unclaimed: [], issues: [] },
@@ -292,13 +340,13 @@ describe(
     );
 
     it(
-      'in a TypeScript enumType, store the lower-case text Postgres returns, and the runtime enum accessor agrees with a value read back',
+      'in a TypeScript enumType written as Postgres stores it, the runtime enum accessor agrees with values read back',
       async () => {
         const Key = enumType(
           'Key',
           uuidColumn,
-          member('A', 'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'),
-          member('B', '{B0EEBC99-9C0B4EF8-BB6D6BB9-BD380A11}'),
+          member('A', 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'),
+          member('B', 'b0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'),
         );
         const contract = defineContract({
           enums: { Key },
@@ -309,59 +357,66 @@ describe(
           },
         });
         const contractJson = await emitTypeScriptContract(contract);
-        const emitted = contractJson as unknown as EmittedEnum;
-
-        expect({
-          domainEnum: emitted.domain.namespaces.public.enum.Key,
-          valueSet: emitted.storage.namespaces.public.entries.valueSet.Key,
-          checks: emitted.storage.namespaces.public.entries.table.T.checks.map(
-            (check) => check.expression,
-          ),
-        }).toEqual({
-          domainEnum: {
-            codecId: 'pg/uuid@1',
-            members: [
-              { name: 'A', value: 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11' },
-              { name: 'B', value: 'b0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11' },
-            ],
-          },
-          valueSet: {
-            kind: 'valueSet',
-            values: [
-              'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11',
-              'b0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11',
-            ],
-          },
-          checks: [
-            `"key" IN ('a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', 'b0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11')`,
-          ],
-        });
+        expect(emittedKeyEnum(contractJson)).toEqual(storedKeyEnum);
 
         const result = await initVerifyAndRead(
           contractJson,
           join(testDir, 'migrations'),
-          `INSERT INTO "T" (id, key) VALUES (1, 'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'), (2, '{B0EEBC99-9C0B4EF8-BB6D6BB9-BD380A11}')`,
+          insertBothSpellings,
         );
-        expect(result).toEqual({
-          ...initializedAndVerified,
-          stored: [
-            { key: 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11' },
-            { key: 'b0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11' },
-          ],
-        });
+        expect(result).toEqual({ ...initializedAndVerified, stored: storedKeyRows });
 
-        const readBack = ('stored' in result ? result.stored : []).map((row) => row['key']);
         const db = postgresClient({ contract });
         try {
-          const accessor: RuntimeEnumAccessor | undefined = db.enums['public']?.['Key'];
-          if (accessor === undefined) throw new Error('db.enums.public.Key is missing');
-          expect({
-            members: accessor.members,
-            has: readBack.map((value) => accessor.has(value)),
-          }).toEqual({
-            members: { A: readBack[0], B: readBack[1] },
-            has: [true, true],
-          });
+          expect(accessorAgainst(db.enums['public']?.['Key'], storedKeyRows)).toEqual(
+            accessorAgreeing,
+          );
+        } finally {
+          await db.close();
+        }
+      },
+      timeouts.spinUpPpgDev,
+    );
+
+    it(
+      'in a PSL enum written in upper case and braces, emit and type the text Postgres stores, and the runtime enum accessor agrees with values read back',
+      async () => {
+        const emitted = await emitPsl(
+          testDir,
+          `// use prisma-8
+
+enum Key {
+  @@type("pg/uuid@1")
+  A = "A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11"
+  B = "{B0EEBC99-9C0B4EF8-BB6D6BB9-BD380A11}"
+}
+
+model T {
+  id  Int @id
+  key Key
+}
+`,
+        );
+        if (!emitted.ok) throw new Error(JSON.stringify(emitted.failure, null, 2));
+        const contractJson = JSON.parse(emitted.value.contractJson) as Record<string, unknown>;
+        expect(emittedKeyEnum(contractJson)).toEqual(storedKeyEnum);
+        expect({
+          typesStoredValues: STORED_KEYS.map((key) => emitted.value.contractDts.includes(key)),
+          typesWrittenSpelling: /A0EEBC99|B0EEBC99/.test(emitted.value.contractDts),
+        }).toEqual({ typesStoredValues: [true, true], typesWrittenSpelling: false });
+
+        const result = await initVerifyAndRead(
+          contractJson,
+          join(testDir, 'migrations'),
+          insertBothSpellings,
+        );
+        expect(result).toEqual({ ...initializedAndVerified, stored: storedKeyRows });
+
+        const db = postgresClient({ contractJson });
+        try {
+          expect(accessorAgainst(db.enums['public']?.['Key'], storedKeyRows)).toEqual(
+            accessorAgreeing,
+          );
         } finally {
           await db.close();
         }

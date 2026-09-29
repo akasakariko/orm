@@ -492,9 +492,50 @@ function resolveCheckExpressionRenderer(
   return hasCheckExpressionRenderer(authoring) ? authoring.renderCheckExpressions : undefined;
 }
 
+/** Whether TypeScript gives the value a literal type: a primitive, or an array or plain object of them. */
+function hasLiteralType(value: unknown): boolean {
+  if (['string', 'number', 'boolean', 'bigint'].includes(typeof value)) return true;
+  if (Array.isArray(value)) return value.every(hasLiteralType);
+  if (typeof value !== 'object' || value === null) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return (
+    (prototype === Object.prototype || prototype === null) &&
+    Object.values(value).every(hasLiteralType)
+  );
+}
+
 /**
- * Each member of an `enumType()` with its value encoded as the column stores it. Two members the
- * codec writes as the same value are one value in the database, so they are refused.
+ * Refuses a member whose written value the codec does not read back from what it stores. The
+ * contract's types name the member as written, while the runtime reads the stored value, so the
+ * two must be the same value. A member with no literal type has nothing to contradict.
+ */
+function assertStoredAsWritten(
+  enumName: string,
+  member: { readonly name: string; readonly value: unknown },
+  stored: JsonValue,
+  codec: Codec,
+): void {
+  if (!hasLiteralType(member.value)) return;
+  const readBack = codec.decodeJson(stored);
+  if (
+    hasLiteralType(readBack) &&
+    canonicalStringify(readBack) === canonicalStringify(member.value)
+  ) {
+    return;
+  }
+  const storedText = JSON.stringify(stored);
+  const writeAs = hasLiteralType(readBack) ? canonicalStringify(readBack) : storedText;
+  throw contractError(
+    'CONTRACT.ENUM_INVALID',
+    `enumType("${enumName}"): member "${member.name}" is written ${canonicalStringify(member.value)}, but the column stores ${storedText}. Write the member as ${writeAs}.`,
+    { meta: { enumName, member: member.name, reason: 'member-not-stored-as-written' } },
+  );
+}
+
+/**
+ * Each member of an `enumType()` with its value encoded as the column stores it. Every member must
+ * be written as the value the column stores, and two members that store the same value are
+ * refused, naming both.
  */
 function encodedEnumMembers(
   handle: EnumTypeHandle,
@@ -504,6 +545,7 @@ function encodedEnumMembers(
   const memberByStoredValue = new Map<string, string>();
   return handle.enumMembers.map((m) => {
     const value = encodeViaCodec(m.value, codec);
+    if (codec !== undefined) assertStoredAsWritten(handle.enumName, m, value, codec);
     const key = canonicalStringify(value);
     const earlier = memberByStoredValue.get(key);
     if (earlier !== undefined) {

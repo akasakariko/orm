@@ -505,15 +505,13 @@ describe('check emission — guards', () => {
   );
 
   it.each([false, true])(
-    'accepts mixed authored types normalized by a codec with many=%s',
+    'refuses a number member that a text codec stores as text, with many=%s',
     (many) => {
       const Normalized = enumType('Normalized', pgText, member('One', 1), member('Two', 'two'));
       const codec: Codec = {
         id: 'pg/text@1',
         encodeJson: ((value: unknown) => String(value)) as Codec['encodeJson'],
-        decodeJson: (() => {
-          throw new Error('unused');
-        }) as Codec['decodeJson'],
+        decodeJson: ((json: unknown) => String(json)) as Codec['decodeJson'],
         encode: (() => {
           throw new Error('unused');
         }) as Codec['encode'],
@@ -521,39 +519,35 @@ describe('check emission — guards', () => {
           throw new Error('unused');
         }) as Codec['decode'],
       };
-      hookCalls.length = 0;
-      const contract = defineContract(
-        {
-          family: sqlFamilyPack,
-          target: postgresTargetPack,
-          createNamespace: createTestSqlNamespace,
-          enums: { Normalized },
-          codecLookup: { ...emptyCodecLookup, get: (id) => (id === codec.id ? codec : undefined) },
-        },
-        ({ field: f, model: m }) => ({
-          models: {
-            User: m('User', {
-              fields: {
-                id: f.text().id(),
-                normalized: many ? f.namedType(Normalized).many() : f.namedType(Normalized),
-              },
-            }),
+      expect(() =>
+        defineContract(
+          {
+            family: sqlFamilyPack,
+            target: postgresTargetPack,
+            createNamespace: createTestSqlNamespace,
+            enums: { Normalized },
+            codecLookup: {
+              ...emptyCodecLookup,
+              get: (id) => (id === codec.id ? codec : undefined),
+            },
           },
+          ({ field: f, model: m }) => ({
+            models: {
+              User: m('User', {
+                fields: {
+                  id: f.text().id(),
+                  normalized: many ? f.namedType(Normalized).many() : f.namedType(Normalized),
+                },
+              }),
+            },
+          }),
+        ),
+      ).toThrow(
+        expect.objectContaining({
+          code: 'CONTRACT.ENUM_INVALID',
+          message:
+            'enumType("Normalized"): member "One" is written 1, but the column stores "1". Write the member as "1".',
         }),
-      ) as Contract<SqlStorage>;
-      expect(hookCalls.at(-1)).toEqual({
-        tableName: 'User',
-        columnName: 'normalized',
-        many,
-        memberValues: ['1', 'two'],
-      });
-      expect(flatten(checksOf(contract))).toEqual(
-        many
-          ? [
-              wire('User_normalized_check', `"normalized"::text[] <@ ARRAY['1', 'two']::text[]`),
-              wire('User_normalized_elem_not_null', `array_position("normalized", NULL) IS NULL`),
-            ]
-          : [wire('User_normalized_check', `"normalized" IN ('1', 'two')`)],
       );
     },
   );

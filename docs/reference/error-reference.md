@@ -409,7 +409,7 @@ An enum declares a `codecId` that no family, target, or extension pack in the co
 
 ### CONTRACT.ENUM_INVALID
 
-An enum declaration is malformed: it has no members, a duplicate member name or value, or the declaration key in `defineContract({ enums })` does not match the `enumType` name. Raised while authoring a contract (framework `enumType`, SQL and Mongo builders). Payload: `enumName`, `member`, `reason`.
+An enum declaration is malformed: it has no members, a duplicate member name or value, or the declaration key in `defineContract({ enums })` does not match the `enumType` name. The SQL builder also refuses a member written in a form its codec does not store, such as an upper-case uuid, which Postgres stores in lower case, because the contract's types would name a value the database never returns; and two members whose codec stores the same value. Raised while authoring a contract (framework `enumType`, SQL and Mongo builders). Payload: `enumName`, `member` or `members`, `reason`.
 
 ### CONTRACT.ENUM_UNKNOWN
 
