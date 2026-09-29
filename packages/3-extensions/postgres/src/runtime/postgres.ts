@@ -158,31 +158,34 @@ export default function postgres<TContract extends Contract<SqlStorage>>(
   let connectPromise: Promise<void> | undefined;
   let backgroundConnectError: unknown;
   let closed = false;
-  let ownedDispose: (() => Promise<void>) | undefined;
+  // Set once the driver holds a pool this client created. Closing the runtime ends that pool; a
+  // pool or client the caller passed in stays open.
+  let closeOwnedRuntime: (() => Promise<void>) | undefined;
 
-  const connectDriver = async (resolvedBinding: PostgresBinding): Promise<void> => {
+  const connectDriver = async (
+    resolvedBinding: PostgresBinding,
+    runtime: Runtime,
+  ): Promise<void> => {
     if (driverConnected) return;
     if (!runtimeDriver) throw new InternalError('Postgres runtime driver missing');
     if (connectPromise) return connectPromise;
     const runtimeBinding = toRuntimeBinding(resolvedBinding, options);
-    if (resolvedBinding.kind === 'url' && runtimeBinding.kind === 'pgPool') {
-      const pool = runtimeBinding.pool;
-      let disposed = false;
-      ownedDispose = async () => {
-        if (disposed) return;
-        disposed = true;
-        await pool.end().then(() => undefined);
-      };
-    }
+    const ownedPool =
+      resolvedBinding.kind === 'url' && runtimeBinding.kind === 'pgPool'
+        ? runtimeBinding.pool
+        : undefined;
     connectPromise = runtimeDriver
       .connect(runtimeBinding)
       .then(() => {
         driverConnected = true;
+        if (ownedPool !== undefined) {
+          closeOwnedRuntime = () => runtime.close();
+        }
       })
       .catch(async (err) => {
         backgroundConnectError = err;
         connectPromise = undefined;
-        await ownedDispose?.().catch(() => undefined);
+        await ownedPool?.end().catch(() => undefined);
         throw err;
       });
     return connectPromise;
@@ -215,18 +218,18 @@ export default function postgres<TContract extends Contract<SqlStorage>>(
       cursor: toDriverCursorOptions(cursor),
     });
     runtimeDriver = driver;
-    if (binding !== undefined) {
-      void connectDriver(binding).catch(() => undefined);
-    }
-
-    runtimeInstance = new PostgresRuntimeImpl({
+    const runtime = new PostgresRuntimeImpl({
       context,
       adapter: stackInstance.adapter,
       driver,
       ...toRuntimeOptions(options),
     });
+    runtimeInstance = runtime;
+    if (binding !== undefined) {
+      void connectDriver(binding, runtime).catch(() => undefined);
+    }
 
-    return runtimeInstance;
+    return runtime;
   };
 
   const runtimeBoundMembers = buildPostgresRuntimeBoundMembers<TContract>({
@@ -280,7 +283,7 @@ export default function postgres<TContract extends Contract<SqlStorage>>(
         return runtime;
       }
 
-      await connectDriver(binding);
+      await connectDriver(binding, runtime);
       return runtime;
     },
 
@@ -288,7 +291,7 @@ export default function postgres<TContract extends Contract<SqlStorage>>(
       if (closed) return;
       closed = true;
       await connectPromise?.catch(() => undefined);
-      await ownedDispose?.();
+      await closeOwnedRuntime?.();
     },
 
     [Symbol.asyncDispose](): Promise<void> {

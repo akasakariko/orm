@@ -1,6 +1,9 @@
 import type { SqlStorage } from '@internal/sql-contract/types';
+import { validateSqlContractFully } from '@internal/sql-contract/validators';
 import { createContract } from '@repo/test-utils';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Contract } from './fixtures/generated/contract';
+import fixtureContractJson from './fixtures/generated/contract.json' with { type: 'json' };
 
 // Only mock the third-party pg boundary. Real drivers, adapters, and runtimes
 // run over this fake pool/client.
@@ -48,6 +51,12 @@ import { Client, Pool } from 'pg';
 import postgres from '../src/runtime/postgres';
 
 const contract = createContract<SqlStorage>();
+const fixtureContract = validateSqlContractFully<Contract>(fixtureContractJson);
+
+const runtimeClosedError = {
+  code: 'DRIVER.NOT_CONNECTED',
+  message: 'Runtime is closed',
+};
 
 function poolEndSpy() {
   return (Pool as unknown as { _endSpy: ReturnType<typeof vi.fn> })._endSpy;
@@ -152,5 +161,81 @@ describe('postgres close()', () => {
 
     await run();
     expect(poolEndSpy()).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('a promise pending when close() is called on a client that owns its pool', () => {
+  const unhandledRejections: unknown[] = [];
+  const recordUnhandledRejection = (reason: unknown): void => {
+    unhandledRejections.push(reason);
+  };
+
+  beforeEach(() => {
+    unhandledRejections.length = 0;
+    process.on('unhandledRejection', recordUnhandledRejection);
+    // The real pool.end() settles on an I/O turn; a macrotask keeps close() pending while an
+    // unawaited promise would reject.
+    poolEndSpy().mockImplementation(() => new Promise((resolve) => setTimeout(resolve, 0)));
+    (Pool as unknown as { _connectSpy: ReturnType<typeof vi.fn> })._connectSpy.mockResolvedValue({
+      query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
+      release: vi.fn(),
+      on: vi.fn(),
+    });
+  });
+
+  afterEach(() => {
+    process.off('unhandledRejection', recordUnhandledRejection);
+  });
+
+  async function connectedClient() {
+    const db = postgres<Contract>({
+      contractJson: fixtureContract,
+      url: 'postgres://localhost:5432/db',
+    });
+    await db.connect();
+    return db;
+  }
+
+  async function closeWhilePending(
+    db: Awaited<ReturnType<typeof connectedClient>>,
+    pending: PromiseLike<unknown>,
+  ) {
+    await db.close();
+    const outcome = await pending.then(
+      (value) => ({ resolved: value }),
+      (reason: unknown) => ({ rejected: reason }),
+    );
+    expect.soft(unhandledRejections).toEqual([]);
+    expect.soft(outcome).toEqual({ rejected: expect.objectContaining(runtimeClosedError) });
+    expect(poolEndSpy()).toHaveBeenCalledTimes(1);
+  }
+
+  it('an ORM read rejects with the runtime closed error and the pool ends once', async () => {
+    const db = await connectedClient();
+
+    await closeWhilePending(db, db.orm.public.User.all());
+  });
+
+  it('a transaction rejects with the runtime closed error and the pool ends once', async () => {
+    const db = await connectedClient();
+
+    await closeWhilePending(
+      db,
+      db.transaction(async (tx) => (await tx.orm.public.User.all()).length),
+    );
+  });
+
+  it('an execute rejects with the runtime closed error and the pool ends once', async () => {
+    const db = await connectedClient();
+
+    await closeWhilePending(
+      db,
+      db.runtime().execute(
+        db.sql.public.users
+          .update({ name: 'probe' })
+          .where((f, fns) => fns.eq(f.id, 1))
+          .build(),
+      ),
+    );
   });
 });
