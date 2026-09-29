@@ -147,6 +147,7 @@ import {
   pgTimestampStringDescriptor,
   pgTimestamptzStringDescriptor,
 } from './temporal-string-codecs';
+import { canonicalUuidText } from './uuid-text';
 
 type LengthParams = { readonly length?: number };
 type NumericParams = { readonly precision?: number; readonly scale?: number };
@@ -1298,7 +1299,7 @@ export class PgUuidCodec extends CodecImpl<
     return wire;
   }
   encodeJson(value: string): JsonValue {
-    return value;
+    return canonicalUuidText(value);
   }
   decodeJson(json: JsonValue): string {
     return blindCast<string, 'uuid columns serialize to JSON as their wire string form'>(json);
