@@ -91,7 +91,7 @@ Wrangler prints a binding ID. Wire it into `wrangler.jsonc`:
 }
 ```
 
-`nodejs_compat` is required: the Postgres driver (`pg`) uses several Node built-ins that workerd polyfills under that flag. The M1 audit confirmed `pg` + `pg-cursor` work under `nodejs_compat` end-to-end (open / read / cursor early-break / close) when validated against a localhost Postgres origin and against `vitest-pool-workers`'s miniflare emulator — i.e., paths that do not put real Hyperdrive in front of the origin.
+`nodejs_compat` is required: the Postgres driver (`pg`) uses several Node built-ins that workerd polyfills under that flag. An audit confirmed `pg` + `pg-cursor` work under `nodejs_compat` end-to-end (open / read / cursor early-break / close) when validated against a localhost Postgres origin and against `vitest-pool-workers`'s miniflare emulator — i.e., paths that do not put real Hyperdrive in front of the origin.
 
 > **Production caveat — read this before deploying.** Against real Hyperdrive, reads with cursors on hang (`pg-cursor`'s extended-query named portal trips a Hyperdrive parser bug — full diagnostic in the [Reads with cursors on hang on Cloudflare Hyperdrive](#known-limitations) entry below). Cursors are off by default; until the upstream fix lands, do not turn them on behind Hyperdrive. The miniflare emulator and localhost Postgres paths above don't reproduce the hang, so the example's local tests pass with cursors on — the bug only surfaces against a real deployed Hyperdrive config.
 
