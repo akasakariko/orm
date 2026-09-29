@@ -979,7 +979,7 @@ A lane terminal (SQL DSL `.build()`, ORM collection terminal) received an annota
 
 ### RUNTIME.ARGUMENT_INVALID
 
-A built-in Postgres query operation or full-text helper received an argument it cannot use. One case is the `language` of `fullTextMatches`, `fullTextRank` and `fullTextHeadline`, of the `tsquery` parsers (`websearchToTsquery`, `toTsquery`, `plaintoTsquery`, `phrasetoTsquery`) and of the `tsquery` template tag: the language is written into the SQL as an inline literal rather than a bound parameter, so it is checked against the text-search configurations a stock PostgreSQL server ships with and anything else is refused. The other case is a literal part of a `tsquery` template with an invalid JavaScript escape, such as `\u`: JavaScript gives the tag no text for that part, so the tag refuses it rather than drop it. Raised while the query is being built, before any SQL reaches the database. Payload: `helper`, `argument`, `received`.
+A built-in Postgres query operation or full-text helper received an argument it cannot use. One case is the `language` of `fullTextMatches`, `fullTextRank` and `fullTextHeadline`, of the `tsquery` parsers (`websearchToTsquery`, `toTsquery`, `plaintoTsquery`, `phrasetoTsquery`) and of the `tsquery` template tag: the language is written into the SQL as an inline literal rather than a bound parameter, so it is checked against the text-search configurations a stock PostgreSQL server ships with and anything else is refused. The other case is a literal part of a `tsquery` template with an invalid JavaScript escape, such as `\u`: JavaScript gives the tag no text for that part, so the tag refuses it rather than drop it. Raised while the query is being built, before any SQL reaches the database. The `cursor` option of `postgres()` and `postgresServerless()` raises it too, at the factory call, when the value has a key other than `batchSize` (such as a leftover `disabled`) or a `batchSize` that is not a positive integer; leave `cursor` unset to read without a cursor. Payload: `helper` (the operation, or `postgres` / `postgresServerless` for the factory option), `argument`, `received`.
 
 ### RUNTIME.AST_INVALID
 
@@ -1188,7 +1188,7 @@ Calling `connect(binding)` on a driver, or `connect()` on a target facade client
 
 ### DRIVER.CONNECTION_FAILED
 
-A control-plane driver could not establish a database connection (`driver.create(url)` in the SQLite, Postgres, and Mongo control drivers). The `why` carries the underlying driver message and the original error is attached as `cause`; connection URLs in meta are redacted. Payload: `path` (SQLite); `sqlState` plus redacted URL fields (Postgres); redacted URL fields (Mongo).
+A control-plane driver could not establish a database connection (`driver.create(url)` in the SQLite, Postgres, and Mongo control drivers), or `connect({ url })` on a serverless Postgres client (`@prisma/orm-postgres/serverless`) could not open its `pg.Client`'s database connection: the database refused the connection, rejected the credentials, or did not answer within the 20 second connect timeout. The `why` carries the underlying driver message and the original error is attached as `cause`; connection URLs in meta are redacted. Payload: `path` (SQLite); `sqlState` plus redacted URL fields (Postgres control driver); redacted URL fields (Mongo); `extension: 'postgres'` plus redacted URL fields (serverless `connect`).
 
 ### DRIVER.NOT_CONNECTED
 

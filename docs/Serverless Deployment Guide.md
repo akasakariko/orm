@@ -33,7 +33,7 @@ export default {
 };
 ```
 
-Inside a request, `db` does everything the `db` from `postgres()` does, so any documented `db.orm...`, `db.sql...`, `db.raw...`, `db.transaction(...)`, `db.prepare(...)` or `db.runtime().query(...)` snippet works unchanged. Await every query before the `await using` scope ends: the connection closes when the scope ends, so a query returned from the scope without `await` (`return db.orm...` instead of `return await db.orm...`) fails when its rows are read. With the default options that error is `CONTRACT.MARKER_READ_FAILED` ("Database error while reading contract marker"), whose cause is `DRIVER.NOT_CONNECTED`; after an earlier awaited query on the connection, or with `verifyMarker: false`, it is `DRIVER.NOT_CONNECTED` itself. `connect` connects to the database before it returns; when the database cannot be reached, it rejects with `DRIVER.CONNECTION_FAILED`, so a handler that answers with a 503 catches it there. Never call `connect` at module scope.
+Inside a request, `db` does everything the `db` from `postgres()` does, so any documented `db.orm...`, `db.sql...`, `db.raw...`, `db.transaction(...)`, `db.prepare(...)` or `db.runtime().query(...)` snippet works unchanged. Await every query before the `await using` scope ends: the connection closes when the scope ends, so a query returned from the scope without `await` (`return db.orm...` instead of `return await db.orm...`) fails when its rows are read. With the default options that error is `CONTRACT.MARKER_READ_FAILED` ("Database error while reading contract marker"), whose cause is `DRIVER.NOT_CONNECTED`; after an earlier awaited query on the connection, or with `verifyMarker: false`, it is `DRIVER.NOT_CONNECTED` itself. `connect` connects to the database before it returns; when the database refuses the connection, rejects the credentials, or does not answer within 20 seconds, it rejects with `DRIVER.CONNECTION_FAILED`, so a handler that answers with a 503 catches it there. Answer a request that needs no query, such as an unknown route or a missing parameter, before `connect`: `connect` opens a database connection whether or not a query follows. Never call `connect` at module scope.
 
 ## Cloudflare Workers + Hyperdrive (worked example)
 
@@ -141,14 +141,20 @@ interface Env {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
+
+    // Answer requests that need no query before connect(): connect() opens a
+    // database connection whether or not a query follows.
+    if (!['/sql/users', '/orm/posts', '/tx/example'].includes(url.pathname)) {
+      return new Response('not found', { status: 404 });
+    }
+
     // Fresh connection per fetch, with its own pg.Client, connected before
     // connect() resolves (an unreachable database rejects here with
     // DRIVER.CONNECTION_FAILED). When the fetch body returns (or throws),
     // db.close() runs and ends the pg.Client. No shared database connection
     // across concurrent fetches in this isolate.
     await using db = await postgres.connect({ url: env.HYPERDRIVE.connectionString });
-
-    const url = new URL(request.url);
 
     // SQL DSL plan — db.runtime().query returns the rows.
     if (url.pathname === '/sql/users') {
@@ -223,7 +229,7 @@ if (url.pathname === '/cursor/large') {
 }
 ```
 
-`postgres()` and `postgresServerless()` both default to cursors off and accept the same `cursor` option, `{ batchSize?: number }`. Setting the option turns cursors on: `{}` streams in batches of 100, `{ batchSize: 50 }` in batches of 50; there is no flag that turns them off. Turn cursors on, through a separate serverless client, only for a route that streams a large result and returns early, because isolate memory pressure makes buffering a 10k-row result before yielding the first row a foot-gun. Behind real Cloudflare Hyperdrive, that route hangs; the routes whose connections come from the serverless client without the option do not.
+`postgres()` and `postgresServerless()` both default to cursors off and accept the same `cursor` option, `{ batchSize?: number }`. Setting the option turns cursors on: `{}` streams in batches of 100, `{ batchSize: 50 }` in batches of 50; there is no flag that turns them off. Any other key in `cursor`, or a `batchSize` that is not a positive integer, fails the factory call with `RUNTIME.ARGUMENT_INVALID`, so JavaScript code that still passes `{ disabled: true }` does not silently turn cursors on. Turn cursors on, through a separate serverless client, only for a route that streams a large result and returns early, because isolate memory pressure makes buffering a 10k-row result before yielding the first row a foot-gun. Behind real Cloudflare Hyperdrive, that route hangs; the routes whose connections come from the serverless client without the option do not.
 
 ### Wiring the ORM client
 

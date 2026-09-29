@@ -112,7 +112,7 @@ The serverless client has only what is safe at module scope. A connection has ev
 
 ## The lifetime of a connection
 
-`postgres.connect({ url })` creates one `pg.Client`, connects it to the database, and returns a new connection on every call. There is no pool, and the serverless client is not changed. When the database cannot be reached, or the URL is wrong, `connect` rejects with `DRIVER.CONNECTION_FAILED`, ends the `pg.Client`, and leaves nothing open. A handler that answers an unreachable database with an error response catches it at `connect`.
+`postgres.connect({ url })` creates one `pg.Client`, connects it to the database, and returns a new connection on every call. There is no pool, and the serverless client is not changed. When the database refuses the connection, rejects the credentials, or does not answer within 20 seconds, `connect` rejects with `DRIVER.CONNECTION_FAILED`, ends the `pg.Client`, and leaves nothing open. An empty URL rejects with `RUNTIME.BINDING_INVALID` before any `pg.Client` exists. A handler that answers an unreachable database with an error response catches the error at `connect`.
 
 `await using db = await postgres.connect(...)` closes the connection when the enclosing scope ends, whether the scope returns or throws. Closing ends the `pg.Client`. Calling `close()` or `[Symbol.asyncDispose]` more than once closes it once.
 
@@ -151,6 +151,26 @@ export async function listAdmins(url: string) {
 ```
 
 A custom ORM like this is built inside the request, so that it runs on that request's connection.
+
+## Cursors are off by default
+
+`postgres()` and `postgresServerless()` both accept `cursor?: PostgresCursorOptions`, where `PostgresCursorOptions` is `{ readonly batchSize?: number }`, with the same meaning:
+
+- When the option is unset, reads use no cursor. The driver fetches the whole result before it returns the first row.
+- When the option is set, reads stream through a server-side cursor in batches of `batchSize` rows, or 100 rows when `batchSize` is omitted. `{}` streams in batches of 100.
+
+There is no flag that turns cursors off; leaving the option out does that. Each factory maps the option to the driver's own setting. A `cursor` value with any other key, or a `batchSize` that is not a positive integer, fails the factory call with `RUNTIME.ARGUMENT_INVALID`, so JavaScript code or options loaded from JSON that still pass `{ disabled: true }` fail at once instead of turning cursors on.
+
+Streaming suits a request that reads a large result and stops early.
+
+The default is off because, with cursors on, every read hangs behind Cloudflare Hyperdrive. Hyperdrive is the usual way for a Worker to reach a Postgres database other than Prisma Postgres. The hang raises no error: the database connection stops responding, and Cloudflare ends the request after 30 seconds. The [Serverless Deployment Guide](../../Serverless%20Deployment%20Guide.md#known-limitations) records the cause. A read without a cursor works in every deployment.
+
+A Worker that needs streaming on one route creates a second serverless client with the option and opens that route's connection from it. Every other route keeps the serverless client without the option:
+
+```ts
+const postgres = postgresServerless<Contract>({ contractJson });
+const streamingPostgres = postgresServerless<Contract>({ contractJson, cursor: { batchSize: 100 } });
+```
 
 ## Three rules that follow from one database connection
 
@@ -201,7 +221,7 @@ Writing `return db.orm.public.User.all()` in this function fails. With the defau
 
 ### On a connection with cursors on, a `for await` over a read ends before the next query through `db`
 
-With `cursor` set, a read holds the connection's only database connection until the `for await` loop over it ends or breaks. A query sent through `db` inside the loop waits for that database connection, and the loop waits for the query, so the request hangs. In this sample, `streamingPostgres` is a serverless client created with the `cursor` option, as in the section on cursors below:
+With `cursor` set, a read holds the connection's only database connection until the `for await` loop over it ends or breaks. A query sent through `db` inside the loop waits for that database connection, and the loop waits for the query, so the request hangs. In this sample, `streamingPostgres` is the serverless client with the `cursor` option from the section above:
 
 ```ts
 export async function firstTitles(url: string) {
@@ -223,33 +243,11 @@ Both have a method named `connect`, and the two methods do different things.
 
 | | `connect` on a client | `connect` on a serverless client |
 | --- | --- | --- |
-| Effect | connects that client to its database | opens a new connection and leaves the serverless client unchanged |
-| Reaches the database | on the first query; the pool connects in the background | before `connect` resolves; an unreachable database rejects `connect` with `DRIVER.CONNECTION_FAILED` |
+| Effect | binds that client's driver to its URL, pool or `pg.Client` | opens a new connection and leaves the serverless client unchanged |
+| Reaches the database | on the first query | before `connect` resolves; a database that refuses the connection, rejects the credentials or does not answer within 20 seconds rejects `connect` with `DRIVER.CONNECTION_FAILED` |
 | Returns | the client's runtime | the new connection |
-| How often | at most once; it fails with `DRIVER.ALREADY_CONNECTED` if the client is already connected or connecting | once per request |
-| Required | no; a client created with a `url`, `pg` or `binding` option connects on first use | yes; it is the only way to get a connection |
-
-## Cursors are off by default
-
-`postgres()` and `postgresServerless()` both accept `cursor?: PostgresCursorOptions`, where `PostgresCursorOptions` is `{ readonly batchSize?: number }`, with the same meaning:
-
-- When the option is unset, reads use no cursor. The driver fetches the whole result before it returns the first row.
-- When the option is set, reads stream through a server-side cursor in batches of `batchSize` rows, or 100 rows when `batchSize` is omitted. `{}` streams in batches of 100.
-
-There is no flag that turns cursors off; leaving the option out does that. Each factory maps the option to the driver's own setting.
-
-Streaming suits a request that reads a large result and stops early.
-
-The default is off because, with cursors on, every read hangs behind Cloudflare Hyperdrive. Hyperdrive is the usual way for a Worker to reach a Postgres database other than Prisma Postgres. The hang raises no error: the database connection stops responding, and Cloudflare ends the request after 30 seconds. The [Serverless Deployment Guide](../../Serverless%20Deployment%20Guide.md#known-limitations) records the cause. A read without a cursor works in every deployment.
-
-A Worker that needs streaming on one route creates a second serverless client with the option and opens that route's connection from it. Every other route keeps the serverless client without the option:
-
-```ts
-const postgres = postgresServerless<Contract>({ contractJson });
-const streamingPostgres = postgresServerless<Contract>({ contractJson, cursor: { batchSize: 100 } });
-```
-
-On a connection from `streamingPostgres`, a `for await` over a read must end before the next query through `db`, as the third rule above says. A query inside the loop waits forever.
+| How often | at most once; it fails with `DRIVER.ALREADY_CONNECTED` if the client is already bound or binding | once per request |
+| Required | no; a client created with a `url`, `pg` or `binding` option binds on first use | yes; it is the only way to get a connection |
 
 ## How the two are kept the same
 
@@ -262,7 +260,7 @@ Two functions build the members for both:
 
 A client and a connection differ only in what they pass as `getRuntime`. A client passes a function that creates its pool-backed runtime on first use. A connection passes a function that returns the runtime of its one database connection, and throws `DRIVER.NOT_CONNECTED` once the connection is closed.
 
-`postgres()` and `postgresServerless()` share one declaration of the options that say how queries run: `extensions`, `middleware`, `verifyMarker` and `cursor`. Both also take `contractJson` or `contract`. `postgres()` alone takes `url`, `pg` or `binding`, because a connection gets its URL from each `connect` call, and `poolOptions`, because a connection has no pool. A connection has no connect timeout option. A type test checks that the two option types differ in exactly `binding`, `url`, `pg` and `poolOptions`, so an option added to one factory's options and not the other's fails the build. Both compose the same execution stack of `postgresTarget`, `postgresAdapter` and `postgresDriver`.
+`postgres()` and `postgresServerless()` share one declaration of the options that say how queries run: `extensions`, `middleware`, `verifyMarker` and `cursor`. Both also take `contractJson` or `contract`. `postgres()` alone takes `url`, `pg` or `binding`, because a connection gets its URL from each `connect` call, and `poolOptions`, because a connection has no pool. A connection's `pg.Client` gets the same 20 second connect timeout that a client's pool gets by default, and there is no option to change it. A type test checks that the two option types differ in exactly `binding`, `url`, `pg` and `poolOptions`, so an option added to one factory's options and not the other's fails the build. Both compose the same execution stack of `postgresTarget`, `postgresAdapter` and `postgresDriver`.
 
 ## Consequences
 
@@ -278,10 +276,11 @@ A client and a connection differ only in what they pass as `getRuntime`. A clien
 - **The `/serverless` entry point includes the ORM, about 32 kB gzipped.** It is in the bundle even for code that uses only the SQL builder, `db.sql`.
 - **The three rules are documented, not enforced.** A break of any of them fails or hangs when the code runs, with no earlier warning.
 - **`connect` has two meanings**, as the table above shows.
+- **A connection costs a database connection even when no query follows.** `connect` opens the database connection before it returns, so a request that opens a connection and then answers without a query still pays for the handshake. A handler answers such requests, for example an unknown route or a missing parameter, before `connect`.
 
 ## Related ADRs
 
-- [ADR 159 — Runtime Driver Lifecycle](ADR%20159%20-%20Driver%20Terminology%20and%20Lifecycle.md) defines how a driver is created, bound and connected. Each call to `connect` on a serverless client creates a driver and binds it to its own `pg.Client`.
+- [ADR 159 — Runtime Driver Lifecycle](ADR%20159%20-%20Driver%20Terminology%20and%20Lifecycle.md) defines how a driver is created, bound and connected. Each call to `connect` on a serverless client creates a driver, binds it to its own `pg.Client`, and then acquires and releases one driver connection, so the driver opens its database connection before `connect` returns instead of on the first query, which is where ADR 159 otherwise leaves it.
 - [ADR 152 — Execution Plane Descriptors and Instances](ADR%20152%20-%20Execution%20Plane%20Descriptors%20and%20Instances.md) defines the descriptor and instance pattern used to compose the execution stack.
 - [ADR 242 — Public npm surface](ADR%20242%20-%20Public%20npm%20surface%20-%20single%20@prisma%20scope%20with%20consolidated%20publish%20packages.md) names `@prisma/orm-postgres` and its entry points.
 
