@@ -1,6 +1,8 @@
 import type { SqlStorage } from '@internal/sql-contract/types';
 import { validateSqlContractFully } from '@internal/sql-contract/validators';
-import type { SqlMiddleware } from '@internal/sql-runtime';
+import type { SqlAggregateDescriptor } from '@internal/sql-relational-core/aggregate-descriptor-registry';
+import { FunctionCallExpr } from '@internal/sql-relational-core/ast';
+import type { SqlMiddleware, SqlRuntimeExtensionDescriptor } from '@internal/sql-runtime';
 import { createContract } from '@repo/test-utils';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Contract } from './fixtures/generated/contract';
@@ -122,6 +124,39 @@ describe('the serverless client', () => {
   it('validates direct contract input', () => {
     expect(postgresServerless({ contract }).contract.target).toBe('postgres');
   });
+
+  it('fails at the factory call when an extension contributes a reserved aggregate operation', () => {
+    const packId = 'reserved-aggregate';
+    const reservedOperation: SqlAggregateDescriptor = {
+      operation: 'where',
+      input: { kind: 'any' },
+      output: { kind: 'codec', codecId: 'pg/int8@1' },
+      nullable: false,
+      emptyResultJson: '0',
+      lower: ({ expr }) => FunctionCallExpr.of('shadow', expr === undefined ? [] : [expr]),
+    };
+    const pack: SqlRuntimeExtensionDescriptor<'postgres'> = {
+      kind: 'extension',
+      id: packId,
+      version: '0.0.1',
+      familyId: 'sql',
+      targetId: 'postgres',
+      capabilities: { postgres: { [packId]: true } },
+      codecs: () => [],
+      types: { aggregateDescriptors: [reservedOperation] },
+      create() {
+        return { familyId: 'sql', targetId: 'postgres' };
+      },
+    };
+    const contractWithPack = createContract<SqlStorage>({
+      extensions: { [packId]: { id: packId, version: '0.0.1' } },
+    });
+
+    expect(() => postgresServerless({ contract: contractWithPack, extensions: [pack] })).toThrow(
+      expect.objectContaining({ code: 'ORM.AGGREGATE_OPERATION_RESERVED' }),
+    );
+    expect(recorded.clients).toHaveLength(0);
+  });
 });
 
 describe('postgresServerless connect()', () => {
@@ -189,6 +224,36 @@ describe('postgresServerless connect()', () => {
       code: 'RUNTIME.BINDING_INVALID',
     });
     expect(recorded.clients).toHaveLength(0);
+  });
+
+  it('rejects a URL that is not a URL without opening a pg.Client', async () => {
+    const serverless = postgresServerless({ contract });
+
+    await expect(
+      serverless.connect({ url: 'postgres://user:pw@127.0.0.1:badport/db' }),
+    ).rejects.toMatchObject({ code: 'RUNTIME.BINDING_INVALID' });
+    expect(recorded.clients).toHaveLength(0);
+  });
+
+  it('rejects a URL with another scheme without opening a pg.Client', async () => {
+    const serverless = postgresServerless({ contract });
+
+    await expect(serverless.connect({ url: 'http://localhost:5432/db' })).rejects.toMatchObject({
+      code: 'RUNTIME.BINDING_INVALID',
+    });
+    expect(recorded.clients).toHaveLength(0);
+  });
+
+  it('fails before the pg.Client connects when the runtime rejects a middleware', async () => {
+    const serverless = postgresServerless({
+      contract,
+      middleware: [{ name: 'wrong-family', familyId: 'mongo' } as unknown as SqlMiddleware],
+    });
+
+    await expect(serverless.connect({ url })).rejects.toMatchObject({
+      code: 'RUNTIME.MIDDLEWARE_FAMILY_MISMATCH',
+    });
+    expect(lastClient().connect).not.toHaveBeenCalled();
   });
 });
 

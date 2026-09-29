@@ -2,7 +2,7 @@ import type { Contract } from '@internal/contract/types';
 import type { SqlStorage } from '@internal/sql-contract/types';
 import type { Runtime } from '@internal/sql-runtime';
 import { expectTypeOf, test } from 'vitest';
-import postgres, { type PostgresOptions } from '../src/runtime/postgres';
+import postgres, { type PostgresClient, type PostgresOptions } from '../src/runtime/postgres';
 import postgresServerless, {
   type PostgresServerlessClient,
   type PostgresServerlessOptions,
@@ -19,22 +19,8 @@ test('the serverless client has the static members and connect', () => {
   >();
 });
 
-test('the connection has the static members, the runtime-bound members, close and dispose', () => {
-  expectTypeOf<keyof Connection>().toEqualTypeOf<
-    | 'sql'
-    | 'raw'
-    | 'enums'
-    | 'nativeEnums'
-    | 'context'
-    | 'contract'
-    | 'stack'
-    | 'orm'
-    | 'runtime'
-    | 'transaction'
-    | 'prepare'
-    | 'close'
-    | typeof Symbol.asyncDispose
-  >();
+test('the connection is a client without connect', () => {
+  expectTypeOf<Connection>().toEqualTypeOf<Omit<PostgresClient<TestContract>, 'connect'>>();
 });
 
 test('the connection is not a Runtime', () => {

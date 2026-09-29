@@ -9,12 +9,23 @@ import { type } from 'arktype';
 import { postgresError } from '../errors';
 import type { PostgresTargetId } from './postgres-target-id';
 
-/** Server-side cursor for reads. Unset reads the whole result before the first row; set streams rows in batches of `batchSize`, 100 when omitted. */
+type PostgresDriverCursorOptions = NonNullable<PostgresDriverCreateOptions['cursor']>;
+
+/** Default time to wait for the database to accept a connection: a client's pool and a connection's `pg.Client`. */
+export const DEFAULT_CONNECT_TIMEOUT_MILLIS = 20_000;
+
+/**
+ * Server-side cursor for reads. Unset reads the whole result before the first row; set streams
+ * rows in batches of `batchSize`, 100 when omitted.
+ */
 export interface PostgresCursorOptions {
-  readonly batchSize?: number;
+  readonly batchSize?: number | undefined;
 }
 
-/** The options `postgres()` and `postgresServerless()` share: how queries run, not where the database is. */
+/**
+ * The options `postgres()` and `postgresServerless()` share: how queries run, not where the
+ * database is.
+ */
 export interface PostgresExecutionOptions {
   readonly extensions?: readonly SqlRuntimeExtensionDescriptor<PostgresTargetId>[];
   readonly middleware?: readonly SqlMiddleware[];
@@ -22,7 +33,9 @@ export interface PostgresExecutionOptions {
   readonly cursor?: PostgresCursorOptions;
 }
 
-const cursorOptionsSchema = type({ 'batchSize?': 'number.integer > 0' }).onUndeclaredKey('reject');
+const cursorOptionsSchema = type({
+  'batchSize?': 'number.integer > 0 | undefined',
+}).onUndeclaredKey('reject');
 
 export function validateCursorOptions(
   cursor: PostgresCursorOptions | undefined,
@@ -44,6 +57,13 @@ export function validateCursorOptions(
 
 export function toDriverCursorOptions(
   cursor: PostgresCursorOptions | undefined,
-): NonNullable<PostgresDriverCreateOptions['cursor']> {
+): PostgresDriverCursorOptions {
   return cursor === undefined ? { disabled: true } : ifDefined('batchSize', cursor.batchSize);
+}
+
+export function toRuntimeOptions(options: PostgresExecutionOptions) {
+  return {
+    ...ifDefined('verifyMarker', options.verifyMarker),
+    ...ifDefined('middleware', options.middleware),
+  };
 }

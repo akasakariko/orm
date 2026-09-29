@@ -69,8 +69,6 @@ export type PostgresDriverCreateOptions = Omit<PostgresDriverOptions, 'connect'>
 
 const DEFAULT_BATCH_SIZE = 100;
 const DEFAULT_PREPARED_STATEMENTS = true;
-/** How long a `url` binding's pool, and a serverless connection's `pg.Client`, wait for the database to answer a connection attempt. */
-export const DEFAULT_CONNECT_TIMEOUT_MILLIS = 20_000;
 
 type CursorOptions =
   | { readonly cursorDisabled: true }
@@ -757,13 +755,7 @@ class PostgresDirectDriverImpl
       return;
     }
     this.#closed = true;
-    if (this.#connected) {
-      await this.directClient.end();
-    } else {
-      // end() is not awaited for a client this driver never connected: after a
-      // failed connect it never settles under pg-cloudflare.
-      void this.directClient.end().catch(() => undefined);
-    }
+    await this.directClient.end();
     this.#connected = false;
   }
 
@@ -813,7 +805,7 @@ export function createBoundDriverFromBinding(
       const pool = suppressIdleConnectionErrors(
         new Pool({
           connectionString: binding.url,
-          connectionTimeoutMillis: DEFAULT_CONNECT_TIMEOUT_MILLIS,
+          connectionTimeoutMillis: 20_000,
           idleTimeoutMillis: 30_000,
         }),
       );

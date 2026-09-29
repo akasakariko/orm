@@ -1,16 +1,12 @@
 import postgresAdapter from '@internal/adapter-postgres/runtime';
 import type { Contract } from '@internal/contract/types';
-import postgresDriver, {
-  DEFAULT_CONNECT_TIMEOUT_MILLIS,
-  suppressIdleConnectionErrors,
-} from '@internal/driver-postgres/runtime';
+import postgresDriver, { suppressIdleConnectionErrors } from '@internal/driver-postgres/runtime';
 import { instantiateExecutionStack } from '@internal/framework-components/execution';
 import type { SqlStorage } from '@internal/sql-contract/types';
 import type { Runtime } from '@internal/sql-runtime';
 import { createExecutionContext, createSqlExecutionStack } from '@internal/sql-runtime';
 import postgresTarget, { PostgresContractSerializer } from '@internal/target-postgres/runtime';
 import { blindCast } from '@internal/utils/casts';
-import { ifDefined } from '@internal/utils/defined';
 import { InternalError } from '@internal/utils/internal-error';
 import { type Client, Pool } from 'pg';
 import { postgresError } from '../errors';
@@ -28,8 +24,10 @@ import {
   type PostgresStaticMembers,
 } from './postgres-members';
 import {
+  DEFAULT_CONNECT_TIMEOUT_MILLIS,
   type PostgresExecutionOptions,
   toDriverCursorOptions,
+  toRuntimeOptions,
   validateCursorOptions,
 } from './postgres-options';
 import { PostgresRuntimeImpl } from './postgres-runtime';
@@ -225,8 +223,7 @@ export default function postgres<TContract extends Contract<SqlStorage>>(
       context,
       adapter: stackInstance.adapter,
       driver,
-      ...ifDefined('verifyMarker', options.verifyMarker),
-      ...ifDefined('middleware', options.middleware),
+      ...toRuntimeOptions(options),
     });
 
     return runtimeInstance;

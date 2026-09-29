@@ -157,12 +157,32 @@ describe('the cursor option is checked when the factory is called', () => {
     expect(() =>
       postgres<Contract>({ contractJson: fixtureContract, url, cursor: { batchSize: 0 } }),
     ).toThrow(invalidCursor({ batchSize: 0 }, 'postgres'));
+    expect(() =>
+      postgres<Contract>({ contractJson: fixtureContract, url, cursor: { batchSize: 1.5 } }),
+    ).toThrow(invalidCursor({ batchSize: 1.5 }, 'postgres'));
   });
 
   it('postgresServerless() rejects a batchSize that is not a positive integer', () => {
     expect(() =>
       postgresServerless<Contract>({ contractJson: fixtureContract, cursor: { batchSize: 0 } }),
     ).toThrow(invalidCursor({ batchSize: 0 }, 'postgresServerless'));
+    expect(() =>
+      postgresServerless<Contract>({ contractJson: fixtureContract, cursor: { batchSize: 1.5 } }),
+    ).toThrow(invalidCursor({ batchSize: 1.5 }, 'postgresServerless'));
+  });
+
+  it('postgres() reads through a cursor in batches of 100 when batchSize is undefined', async () => {
+    await readUsersThroughPostgres({ batchSize: undefined });
+
+    expect(cursorQueryCount()).toBeGreaterThan(0);
+    expect(recorded.cursorReadSizes).toEqual([100]);
+  });
+
+  it('postgresServerless() reads through a cursor in batches of 100 when batchSize is undefined', async () => {
+    await readUsersThroughServerless({ batchSize: undefined });
+
+    expect(cursorQueryCount()).toBeGreaterThan(0);
+    expect(recorded.cursorReadSizes).toEqual([100]);
   });
 });
 
