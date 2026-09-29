@@ -1,6 +1,9 @@
 import postgresAdapter from '@internal/adapter-postgres/runtime';
 import type { Contract } from '@internal/contract/types';
-import postgresDriver, { suppressIdleConnectionErrors } from '@internal/driver-postgres/runtime';
+import postgresDriver, {
+  DEFAULT_CONNECT_TIMEOUT_MILLIS,
+  suppressIdleConnectionErrors,
+} from '@internal/driver-postgres/runtime';
 import { instantiateExecutionStack } from '@internal/framework-components/execution';
 import type { SqlStorage } from '@internal/sql-contract/types';
 import type { Runtime } from '@internal/sql-runtime';
@@ -75,8 +78,6 @@ function resolveContract<TContract extends Contract<SqlStorage>>(
     'caller supplies the generic contract type that matches the serialized Postgres contract'
   >(contractSerializer.deserializeContract(contractJson));
 }
-
-const CONNECT_TIMEOUT_MILLIS = 20_000;
 
 function validateConnectionString(url: string): string {
   const trimmed = url.trim();
@@ -208,7 +209,10 @@ export default function postgresServerless<TContract extends Contract<SqlStorage
       });
 
       const client = suppressIdleConnectionErrors(
-        new Client({ connectionString: url, connectionTimeoutMillis: CONNECT_TIMEOUT_MILLIS }),
+        new Client({
+          connectionString: url,
+          connectionTimeoutMillis: DEFAULT_CONNECT_TIMEOUT_MILLIS,
+        }),
       );
       await driver.connect({ kind: 'pgClient', client });
 

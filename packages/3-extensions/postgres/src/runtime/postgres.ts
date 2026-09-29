@@ -1,6 +1,9 @@
 import postgresAdapter from '@internal/adapter-postgres/runtime';
 import type { Contract } from '@internal/contract/types';
-import postgresDriver, { suppressIdleConnectionErrors } from '@internal/driver-postgres/runtime';
+import postgresDriver, {
+  DEFAULT_CONNECT_TIMEOUT_MILLIS,
+  suppressIdleConnectionErrors,
+} from '@internal/driver-postgres/runtime';
 import { instantiateExecutionStack } from '@internal/framework-components/execution';
 import type { SqlStorage } from '@internal/sql-contract/types';
 import type { Runtime } from '@internal/sql-runtime';
@@ -104,7 +107,8 @@ function toRuntimeBinding<TContract extends Contract<SqlStorage>>(
     pool: suppressIdleConnectionErrors(
       new Pool({
         connectionString: binding.url,
-        connectionTimeoutMillis: options.poolOptions?.connectionTimeoutMillis ?? 20_000,
+        connectionTimeoutMillis:
+          options.poolOptions?.connectionTimeoutMillis ?? DEFAULT_CONNECT_TIMEOUT_MILLIS,
         idleTimeoutMillis: options.poolOptions?.idleTimeoutMillis ?? 30_000,
       }),
     ),
