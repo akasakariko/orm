@@ -21,6 +21,13 @@ function createMiddleware() {
 export const postgres = postgresServerless<Contract>({
   contractJson,
   middleware: createMiddleware(),
-  // Remove behind Cloudflare Hyperdrive: reads with cursors on hang there.
+});
+
+/**
+ * Module-scope client with cursors on, used only by the `/cursor/large` route to stream a large result. Reads through it hang behind Cloudflare Hyperdrive.
+ */
+export const streamingPostgres = postgresServerless<Contract>({
+  contractJson,
+  middleware: createMiddleware(),
   cursor: { batchSize: 100 },
 });

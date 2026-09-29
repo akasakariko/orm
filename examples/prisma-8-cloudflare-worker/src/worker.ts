@@ -2,7 +2,7 @@ import 'temporal-polyfill/full/global';
 
 import { Client } from 'pg';
 import { createOrmClient } from './orm-client/client';
-import { postgres } from './prisma/db';
+import { postgres, streamingPostgres } from './prisma/db';
 
 interface Env {
   HYPERDRIVE: { connectionString: string };
@@ -16,7 +16,8 @@ export default {
       return Response.json({ ok: true });
     }
 
-    await using db = await postgres.connect({ url: env.HYPERDRIVE.connectionString });
+    const routeClient = url.pathname === '/cursor/large' ? streamingPostgres : postgres;
+    await using db = await routeClient.connect({ url: env.HYPERDRIVE.connectionString });
 
     if (url.pathname === '/sql/users') {
       const limit = parseLimit(url.searchParams.get('limit'), 10);
@@ -124,7 +125,8 @@ export default {
 
         const t0 = Date.now();
         // SELECT bounded to the post-table budget cap (10_000 — see
-        // `src/prisma/db.ts`). With cursor enabled the driver opens a
+        // `src/prisma/db.ts`). `db` comes from `streamingPostgres`, so the
+        // cursor is enabled: the driver opens a
         // server-side cursor and streams in ~100-row batches; an early
         // `break` only fetches one batch and closes. With cursor disabled
         // the driver buffers all 10_000 rows before the first yield.

@@ -126,7 +126,7 @@ await db.transaction(async (tx) => {
 
 `postgresServerless()` used to read through `pg-cursor` in batches of 100 rows unless you passed `cursor: { disabled: true }`. Reads are now buffered by default, the same as on `postgres()`: the whole result arrives before the first row is yielded.
 
-1. If code relies on batched streaming, for example `for await` over a large result with an early `break`, pass `cursor: { batchSize: 100 }` to `postgresServerless(...)`, and note next to it that it must be removed behind Cloudflare Hyperdrive. Reads with cursors on hang behind Cloudflare Hyperdrive, so do not add the option there.
+1. If code relies on batched streaming, for example `for await` over a large result with an early `break`, pass `cursor: { batchSize: 100 }` to `postgresServerless(...)`. Reads with cursors on hang behind Cloudflare Hyperdrive, so do not add the option there. To stream on some paths only, create a second module-scope client with the `cursor` option and connect through it only on those paths; the other paths keep the client without it.
 2. Remove `cursor: { disabled: true }` from `postgresServerless(...)` options. It is now the default.
 3. Replace the type `PostgresServerlessCursorOptions` with `PostgresCursorOptions`, exported from `@prisma/orm-postgres/serverless` and `@prisma/orm-postgres/runtime`.
 4. Update comments and README text that say the serverless client streams through a cursor by default.
@@ -143,8 +143,8 @@ const cursor: PostgresServerlessCursorOptions = { disabled: true };
 // behind Cloudflare Hyperdrive
 export const postgres = postgresServerless<Contract>({ contractJson, cursor });
 
-// elsewhere, streaming with the old default
-export const streaming = postgresServerless<Contract>({ contractJson });
+// elsewhere, a client for paths that stream, relying on the old default
+export const streamingPostgres = postgresServerless<Contract>({ contractJson });
 ```
 
 After:
@@ -155,10 +155,9 @@ import postgresServerless from '@prisma/orm-postgres/serverless';
 // behind Cloudflare Hyperdrive
 export const postgres = postgresServerless<Contract>({ contractJson });
 
-// elsewhere, streaming
-export const streaming = postgresServerless<Contract>({
+// elsewhere, a client for paths that stream, not behind Cloudflare Hyperdrive
+export const streamingPostgres = postgresServerless<Contract>({
   contractJson,
-  // Remove behind Cloudflare Hyperdrive: reads with cursors on hang there.
   cursor: { batchSize: 100 },
 });
 ```
