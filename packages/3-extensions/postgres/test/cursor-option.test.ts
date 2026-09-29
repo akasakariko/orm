@@ -1,4 +1,5 @@
 import { validateSqlContractFully } from '@internal/sql-contract/validators';
+import { ifDefined } from '@internal/utils/defined';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Contract } from './fixtures/generated/contract';
 import fixtureContractJson from './fixtures/generated/contract.json' with { type: 'json' };
@@ -9,7 +10,10 @@ interface Submittable {
   close: (callback: (error?: Error | null) => void) => void;
 }
 
-const recorded = vi.hoisted(() => ({ queryArguments: [] as unknown[] }));
+const recorded = vi.hoisted(() => ({
+  queryArguments: [] as unknown[],
+  cursorReadSizes: [] as number[],
+}));
 
 // Only mock the third-party pg boundary. Real drivers, adapters, and runtimes
 // run over this fake pool and client. Like pg, `query` hands a submittable
@@ -27,7 +31,10 @@ vi.mock('pg', () => {
   function query(request: unknown) {
     recorded.queryArguments.push(request);
     if (isSubmittable(request)) {
-      request.read = (_size, callback) => callback(null, []);
+      request.read = (size, callback) => {
+        recorded.cursorReadSizes.push(size);
+        callback(null, []);
+      };
       request.close = (callback) => callback(null);
       return request;
     }
@@ -81,7 +88,7 @@ async function readUsersThroughPostgres(cursor?: PostgresCursorOptions): Promise
     contractJson: fixtureContract,
     url,
     verifyMarker: false,
-    ...(cursor === undefined ? {} : { cursor }),
+    ...ifDefined('cursor', cursor),
   });
   await db.runtime().query(db.sql.public.users.select('id').build()).toArray();
 }
@@ -90,7 +97,7 @@ async function readUsersThroughServerless(cursor?: PostgresCursorOptions): Promi
   const serverless = postgresServerless<Contract>({
     contractJson: fixtureContract,
     verifyMarker: false,
-    ...(cursor === undefined ? {} : { cursor }),
+    ...ifDefined('cursor', cursor),
   });
   await using db = await serverless.connect({ url });
   await db.runtime().query(db.sql.public.users.select('id').build()).toArray();
@@ -98,6 +105,7 @@ async function readUsersThroughServerless(cursor?: PostgresCursorOptions): Promi
 
 beforeEach(() => {
   recorded.queryArguments.length = 0;
+  recorded.cursorReadSizes.length = 0;
 });
 
 describe('postgres() cursor option', () => {
@@ -112,6 +120,7 @@ describe('postgres() cursor option', () => {
     await readUsersThroughPostgres({ batchSize: 50 });
 
     expect(cursorQueryCount()).toBeGreaterThan(0);
+    expect(recorded.cursorReadSizes).toEqual([50]);
   });
 });
 
@@ -127,5 +136,6 @@ describe('postgresServerless() cursor option', () => {
     await readUsersThroughServerless({ batchSize: 50 });
 
     expect(cursorQueryCount()).toBeGreaterThan(0);
+    expect(recorded.cursorReadSizes).toEqual([50]);
   });
 });
