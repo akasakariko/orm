@@ -409,7 +409,7 @@ An enum declares a `codecId` that no family, target, or extension pack in the co
 
 ### CONTRACT.ENUM_INVALID
 
-An enum declaration is malformed. Raised while authoring a contract. Payload: `enumName` and `reason`, plus `member` (a member's name; for `enumType()`'s `duplicate-member-value`, the repeated value), `members` (both names) or the declaration key (`declarationKey` in the SQL builder, `declaredKey` in the Mongo builder), depending on the case. The cases, by `reason`:
+An enum declaration is malformed. Raised while authoring a contract. Payload: `enumName` and `reason`, plus `member` (a member's name; for `enumType()`'s `duplicate-member-value` and `nativeEnum()`'s `duplicate member value`, the repeated value), `members` (both names) or the declaration key (`declarationKey` in the SQL builder, `declaredKey` in the Mongo builder), depending on the case. The cases, by `reason`:
 
 - `enumType()` itself:
   - `no-members`: the enum has no members;
