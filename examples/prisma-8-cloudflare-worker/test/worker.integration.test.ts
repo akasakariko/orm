@@ -1,5 +1,7 @@
-import { SELF } from 'cloudflare:test';
+import { env, SELF } from 'cloudflare:test';
 import { describe, expect, inject, it } from 'vitest';
+import { postgres } from '../src/prisma/db';
+import { countPostRowsSent } from './rows-sent';
 
 const ALICE = inject('alice-id');
 const BOB = inject('bob-id');
@@ -104,20 +106,27 @@ describe('worker — postgresServerless against Hyperdrive (local)', () => {
     expect(body.rowsTransmitted).toBeLessThan(500);
   });
 
-  it('a route on the serverless client without the cursor option receives the whole result before the first row', async () => {
-    const breakAfter = 7;
-    const res = await get(`/cursor/buffered?break=${breakAfter}`);
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as {
-      ok: boolean;
-      consumed: number;
-      cancelled: boolean;
-      rowsTransmitted: number;
-    };
-    expect(body.ok).toBe(true);
-    expect(body.consumed).toBe(breakAfter);
-    expect(body.cancelled).toBe(true);
-    expect(body.rowsTransmitted).toBe(10_000);
+  it('the main serverless client receives the whole result before the first row', async () => {
+    const connectionString = env.HYPERDRIVE.connectionString;
+    await using db = await postgres.connect({ url: connectionString });
+    let consumed = 0;
+
+    const rowsSent = await countPostRowsSent(connectionString, async () => {
+      const iter = db.runtime().query(
+        db.sql.public.post
+          .select('id', 'title')
+          .orderBy((f) => f.createdAt, { direction: 'asc' })
+          .limit(10_000)
+          .build(),
+      );
+      for await (const _row of iter) {
+        consumed += 1;
+        if (consumed >= 7) break;
+      }
+    });
+
+    expect(consumed).toBe(7);
+    expect(rowsSent).toBe(10_000);
   });
 
   it('returns 404 for unknown routes', async () => {
