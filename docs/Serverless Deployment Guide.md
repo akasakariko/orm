@@ -14,7 +14,7 @@ This guide covers the per-request facade `@internal/postgres/serverless`. If you
 | `sql`, `raw`, `enums`, `nativeEnums`              | on `db`                               | on `postgres` and on each per-request `db` (the same objects)       |
 | `context`, `contract`, `stack`                    | on `db`                               | on `postgres` and on each per-request `db` (the same objects)       |
 | `orm`, `runtime()`, `transaction()`, `prepare()`  | on `db`, bound to one lazy pool       | on the per-request `db` from `postgres.connect({ url })` only       |
-| Cursor default                                    | disabled                              | enabled                                                             |
+| Cursor default                                    | off; `cursor: { batchSize }` streams  | off; `cursor: { batchSize }` streams                                |
 | Disposal                                          | `db.close()` at process shutdown      | `await using db = await postgres.connect(...)` closes per request   |
 
 The static members are the same on both sides. They are a pure function of the contract, so they are safe to build once per isolate. Everything bound to a connection differs in where it lives: `postgres()` keeps it on the long-lived client, and `postgresServerless()` puts it on a per-request client returned by `connect({ url })`. That per-request client has the members of a `postgres()` client except `connect`. See [ADR 207 — Per-environment facade asymmetry](./architecture%20docs/adrs/ADR%20207%20-%20Per-environment%20facade%20asymmetry.md) for the architectural rationale and the rejected alternatives.
@@ -93,7 +93,7 @@ Wrangler prints a binding ID. Wire it into `wrangler.jsonc`:
 
 `nodejs_compat` is required: the Postgres driver (`pg`) uses several Node built-ins that workerd polyfills under that flag. The M1 audit confirmed `pg` + `pg-cursor` work under `nodejs_compat` end-to-end (open / read / cursor early-break / close) when validated against a localhost Postgres origin and against `vitest-pool-workers`'s miniflare emulator — i.e., paths that do not put real Hyperdrive in front of the origin.
 
-> **Production caveat — read this before deploying.** Against real Hyperdrive, the default cursor path hangs (`pg-cursor`'s extended-query named portal trips a Hyperdrive parser bug — full diagnostic in the [Cursor mode hangs on Cloudflare Hyperdrive](#known-limitations) entry below). Until the upstream fix lands, pass `cursor: { disabled: true }` to `postgresServerless({...})`. The miniflare emulator and localhost Postgres paths above don't reproduce the hang, so the example's local tests pass with cursor enabled — the bug only surfaces against a real deployed Hyperdrive config.
+> **Production caveat — read this before deploying.** Against real Hyperdrive, reads with cursors on hang (`pg-cursor`'s extended-query named portal trips a Hyperdrive parser bug — full diagnostic in the [Reads with cursors on hang on Cloudflare Hyperdrive](#known-limitations) entry below). Cursors are off by default; until the upstream fix lands, do not turn them on behind Hyperdrive. The miniflare emulator and localhost Postgres paths above don't reproduce the hang, so the example's local tests pass with cursors on — the bug only surfaces against a real deployed Hyperdrive config.
 
 #### 3. Local dev
 
@@ -126,10 +126,9 @@ export const postgres = postgresServerless<Contract>({
   contractJson,
   // middleware: [...],   // optional — telemetry, lints, budgets, ...
   // extensions: [...],   // optional
-  // cursor: { disabled: true },  // REQUIRED if your origin is behind Cloudflare
+  // cursor: { batchSize: 100 },  // optional — stream reads in batches. Off by
+                                  // default. Do not turn on behind Cloudflare
                                   // Hyperdrive — see Production caveat above.
-                                  // Default is enabled; safe to leave as-is on
-                                  // any non-Hyperdrive origin.
 });
 ```
 
@@ -184,7 +183,16 @@ export default {
 
 #### Cursor streaming
 
-`postgresServerless` enables `pg-cursor` by default. The `for-await ... break` shape exits early without materializing the rest of the result; the cursor closes cleanly on `break`:
+Reads are buffered by default. To stream, pass `cursor: { batchSize: 100 }` to `postgresServerless({...})`; the driver then reads through `pg-cursor` in batches of that size:
+
+```ts
+export const postgres = postgresServerless<Contract>({
+  contractJson,
+  cursor: { batchSize: 100 },
+});
+```
+
+With cursors on, the `for-await ... break` shape exits early without materializing the rest of the result; the cursor closes cleanly on `break`:
 
 ```ts
 if (url.pathname === '/cursor/large') {
@@ -204,7 +212,7 @@ if (url.pathname === '/cursor/large') {
 }
 ```
 
-The cursor default is the inverse of the long-lived `postgres()` facade's default (off) because the dominant per-request shape is "stream and return early"; isolate memory pressure makes buffering a 10k-row result before yielding the first row a foot-gun. Both facades expose a `cursor` option for opt-out / opt-in.
+Both facades default to cursors off and accept the same `cursor` option. Turn cursors on where a request streams a large result and returns early, because isolate memory pressure makes buffering a 10k-row result before yielding the first row a foot-gun. Do not turn them on behind Cloudflare Hyperdrive.
 
 ### Wiring the ORM client
 
@@ -267,11 +275,9 @@ The existing migration commands accept a connection string (typically via `DATAB
 
 - **Inside a transaction, run every query through `tx`.** A per-request client has one connection, so inside `db.transaction(async (tx) => ...)` a query through `db` is not independent of the transaction; run every query through `tx`. A query that uses the client's connection directly, such as a `db.orm` read, a single-statement `db.orm` write or `db.runtime().query(...)`, runs inside the open transaction without saying so. An operation that asks for a connection of its own, such as `db.runtime().connection()`, a `db.orm` create that also writes related rows, or a nested `db.transaction(...)`, waits for the connection the transaction holds, and the request hangs. A second client opened inside the callback with `await using db2 = await postgres.connect(...)` has its own connection, so statements sent through it are not part of the transaction.
 
-- **Isolate memory limits.** Workers isolates have bounded memory (128 MiB by default; higher on Workers Unbound). ORM `findMany`-style operations materialize the result set into a JS array before returning; `limit(...)` is your hard memory cap on those. If you need to stream, use the SQL DSL with `db.runtime().query(...)` — the iterator is cursor-backed by default and yields rows as they arrive, with `for-await ... break` cancelling cleanly without buffering the rest of the result set.
+- **Isolate memory limits.** Workers isolates have bounded memory (128 MiB by default; higher on Workers Unbound). ORM `findMany`-style operations materialize the result set into a JS array before returning; `limit(...)` is your hard memory cap on those. If you need to stream, pass `cursor: { batchSize }` and use the SQL DSL with `db.runtime().query(...)` — the iterator then reads through a cursor and yields rows as they arrive, with `for-await ... break` cancelling cleanly without buffering the rest of the result set. Not behind Cloudflare Hyperdrive; see the next entry.
 
-- **Cursor enabled by default.** The default for `postgresServerless` is `cursor: { /* enabled */ }`. Long-lived `postgres()` defaults to `cursor: { disabled: true }`. The asymmetry is intentional (see [ADR 207](./architecture%20docs/adrs/ADR%20207%20-%20Per-environment%20facade%20asymmetry.md) and the cursor section above). To opt out on the per-request side, pass `cursor: { disabled: true }` to `postgresServerless({...})`.
-
-- **Cursor mode hangs on Cloudflare Hyperdrive — pass `cursor: { disabled: true }` if your origin sits behind Hyperdrive.** Empirically verified during the May 2026 production smoke. The default cursor path uses `pg-cursor`'s extended-query named-portal protocol; after rows are returned and the client sends `Close portal + Sync`, Hyperdrive emits `Protocol Error: Unexpected protocol code: C` (SQLSTATE `58000`) and never follows up with the expected `ReadyForQuery`. The connection wedges; Cloudflare's runtime kills the request at 30 s with error 1101. This affects every read path (SQL DSL, ORM `.all()` / `.first()`, `for await`) — there is no per-call short-circuit, the cursor decision is made at the driver layer for every read. Wrapping the read in `db.transaction(...)` does not help: the failure is in Hyperdrive's protocol parser state, not in connection pinning. The driver's catch-block fallback to simple-query mode does **not** save you either — it only fires on certain thrown errors, and a hang doesn't throw. Workaround: pass `cursor: { disabled: true }` to `postgresServerless({...})` to force the simple-protocol path. Tracking upstream as a Cloudflare Hyperdrive bug.
+- **Reads with cursors on hang on Cloudflare Hyperdrive — cursors are off by default; do not turn them on if your origin sits behind Hyperdrive.** Empirically verified during the May 2026 production smoke. The cursor path uses `pg-cursor`'s extended-query named-portal protocol; after rows are returned and the client sends `Close portal + Sync`, Hyperdrive emits `Protocol Error: Unexpected protocol code: C` (SQLSTATE `58000`) and never follows up with the expected `ReadyForQuery`. The connection wedges; Cloudflare's runtime kills the request at 30 s with error 1101. With cursors on, this affects every read path (SQL DSL, ORM `.all()` / `.first()`, `for await`) — there is no per-call short-circuit, the cursor decision is made at the driver layer for every read. Wrapping the read in `db.transaction(...)` does not help: the failure is in Hyperdrive's protocol parser state, not in connection pinning. The driver's catch-block fallback to simple-query mode does **not** save you either — it only fires on certain thrown errors, and a hang doesn't throw. Workaround: leave the `cursor` option unset behind Hyperdrive, so reads take the buffered path. Tracking upstream as a Cloudflare Hyperdrive bug.
 
 - **The `@internal/postgres` package statically imports `pg-pool` and `pg-cloudflare`.** The serverless facade does not construct a `pg.Pool` and does not exercise the pool path, but the `pg` library imports both at module load. The bundle includes them. This is not a correctness concern — `pg-cloudflare` activates only when `navigator.userAgent === 'Cloudflare-Workers'` is true at runtime — but it adds bundle weight. The example's full bundle measures around 254 KiB gzipped including these.
 

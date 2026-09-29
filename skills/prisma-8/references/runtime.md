@@ -268,7 +268,7 @@ Order matters: `beforeQuery` runs in registration order for every middleware bef
 
 ## Workflow — Configure the connection
 
-The concept: the runtime takes one of three binding shapes — `url`, `pg` (a pre-constructed `pg.Pool` or `pg.Client`), or `binding` (an explicit kind tag). They're mutually exclusive. The `pg` form is for projects that already manage their own pool (e.g. a Lambda layer); `url` is the default. Pool tuning is `poolOptions.connectionTimeoutMillis` / `poolOptions.idleTimeoutMillis` — *not* `driverOptions`.
+The concept: the runtime takes one of three binding shapes — `url`, `pg` (a pre-constructed `pg.Pool` or `pg.Client`), or `binding` (an explicit kind tag). They're mutually exclusive. The `pg` form is for projects that already manage their own pool (e.g. a Lambda layer); `url` is the default. Pool tuning is `poolOptions.connectionTimeoutMillis` / `poolOptions.idleTimeoutMillis` — *not* `driverOptions`. Reads are buffered by default; `cursor: { batchSize: 100 }` makes them stream through a server-side cursor (see `references/queries.md` § *Streaming*). `postgresServerless()` takes the same `cursor` option.
 
 ```typescript
 // Default — URL string, factory constructs the pool.
@@ -279,6 +279,7 @@ postgres<Contract>({
     connectionTimeoutMillis: 20_000,
     idleTimeoutMillis: 30_000,
   },
+  // cursor: { batchSize: 100 },  // optional — stream reads in batches instead of buffering
 });
 
 // BYO pool — pass a pg.Pool you already created.

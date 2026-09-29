@@ -186,6 +186,8 @@ When URL binding is used, pool timeouts are configurable via `poolOptions`:
 - `poolOptions.connectionTimeoutMillis` (default `20_000`)
 - `poolOptions.idleTimeoutMillis` (default `30_000`)
 
+Reads are buffered by default. Pass `cursor: { batchSize }` to read through a server-side cursor (`pg-cursor`) in batches of that size. `postgresServerless()` accepts the same option, typed `PostgresCursorOptions`.
+
 ### Prepared SQL and ORM rows
 
 Use `db.prepare(declaration, params => ...)` to prepare SQL queries, ORM row reads or ORM aggregates once and execute them with different parameter values.
@@ -255,7 +257,7 @@ Re-exports the Postgres target pack (the value passed as `target:` to `defineCon
 
 `PostgresServerlessConnection<Contract>` is `PostgresClient<Contract>` without `connect`: `sql`, `raw`, `enums`, `nativeEnums`, `context`, `contract` and `stack` (the same objects as on the module-scope client), plus `orm`, `runtime()`, `transaction(fn)`, `prepare(...)`, `close()` and `[Symbol.asyncDispose]`.
 
-Each `connect()` call constructs a fresh `pg.Client` and a fresh runtime. No `pg.Pool` is allocated. `close()` and `[Symbol.asyncDispose]` close the runtime once, which closes the underlying client. After that, `db.runtime()`, ORM queries, `db.transaction(...)` and `db.prepare(...)` fail with `DRIVER.NOT_CONNECTED`. The connection has one `pg.Client`, so inside `db.transaction(async (tx) => ...)` run every query through `tx`. `pg-cursor` is enabled by default; opt out via `cursor: { disabled: true }`.
+Each `connect()` call constructs a fresh `pg.Client` and a fresh runtime. No `pg.Pool` is allocated. `close()` and `[Symbol.asyncDispose]` close the runtime once, which closes the underlying client. After that, `db.runtime()`, ORM queries, `db.transaction(...)` and `db.prepare(...)` fail with `DRIVER.NOT_CONNECTED`. The connection has one `pg.Client`, so inside `db.transaction(async (tx) => ...)` run every query through `tx`. Reads are buffered by default; pass `cursor: { batchSize }` to read through `pg-cursor` in batches. Do not turn cursors on behind Cloudflare Hyperdrive: reads with cursors on hang there.
 
 ## Responsibilities
 
