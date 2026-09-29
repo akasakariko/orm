@@ -76,7 +76,7 @@ cp .env.example .env             # gitignored
 ```bash
 pnpm db:up                       # docker compose up -d --wait (postgres:16 on :5433)
 pnpm db:init                     # prisma db init → CREATE TABLE …, then CREATE EXTENSION pg_stat_statements
-pnpm seed                        # Insert Alice + Bob, 8 posts of theirs, and 10 000 generated posts for /cursor/large
+pnpm seed                        # Empty the tables, then insert Alice + Bob, 8 posts of theirs, and 10 000 generated posts for /cursor/large
 ```
 
 Tear down with `pnpm db:down` (drops the container + volume — data is `tmpfs`-backed for fast restarts), or `pnpm db:reset` to do everything in one command.

@@ -21,7 +21,11 @@ async function main() {
     throw new Error(`Set ${HYPERDRIVE_VAR} in .env (or DATABASE_URL) before running pnpm seed.`);
   }
 
+  const bulk = new Client({ connectionString: url });
+  await bulk.connect();
   await using db = await postgres.connect({ url });
+
+  await bulk.query('TRUNCATE "post", "task", "user" RESTART IDENTITY CASCADE');
 
   await db.runtime().execute(
     db.sql.public.user
@@ -102,8 +106,6 @@ async function main() {
     );
   }
 
-  const bulk = new Client({ connectionString: url });
-  await bulk.connect();
   try {
     await insertGeneratedPosts(bulk, [alice.id, bob.id], GENERATED_POST_COUNT);
   } finally {
@@ -112,7 +114,7 @@ async function main() {
 
   console.log(`Seeded users: alice=${alice.id}, bob=${bob.id}`);
   console.log(
-    `Seeded 8 posts of theirs plus ${GENERATED_POST_COUNT} generated posts for /cursor/large (tasks/bugs/features intentionally empty — exercised by tests).`,
+    `Seeded 8 posts of theirs plus ${GENERATED_POST_COUNT} generated posts for /cursor/large (tasks/bugs/features intentionally empty — exercised by tests). Running seed again starts from empty tables.`,
   );
 }
 
