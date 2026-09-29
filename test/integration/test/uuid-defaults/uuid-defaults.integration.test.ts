@@ -368,6 +368,32 @@ describe(
       },
       timeouts.spinUpPpgDev,
     );
+
+    it('in a PSL enum, refuse two members that store the same uuid, naming both', async () => {
+      const emitted = await emitPsl(
+        testDir,
+        `// use prisma-8
+
+enum Key {
+  @@type("pg/uuid@1")
+  Upper = "A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11"
+  Lower = "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"
+}
+
+model T {
+  id Int @id
+}
+`,
+      );
+
+      expect(emitted.ok ? [] : emitted.failure.diagnostics?.diagnostics).toEqual([
+        expect.objectContaining({
+          code: 'PSL_ENUM_DUPLICATE_MEMBER_VALUE',
+          message:
+            'enum "Key": members "Upper" and "Lower" both store "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"',
+        }),
+      ]);
+    });
   },
   timeouts.spinUpPpgDev,
 );

@@ -45,4 +45,28 @@ describe('uuid-backed enum authoring against the real Postgres pack', () => {
       ],
     });
   });
+
+  it('refuses two members that store the same uuid, naming both', () => {
+    const Key = enumType(
+      'Key',
+      pgUuid,
+      member('Upper', 'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'),
+      member('Lower', 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'),
+    );
+    expect(() =>
+      defineContract({ enums: { Key } }, ({ field, model }) => ({
+        models: {
+          Item: model('Item', {
+            fields: { id: field.id.uuidv4String(), key: field.namedType(Key) },
+          }),
+        },
+      })),
+    ).toThrow(
+      expect.objectContaining({
+        code: 'CONTRACT.ENUM_INVALID',
+        message:
+          'enumType("Key"): members "Upper" and "Lower" both store "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11". Member values must be unique as the column stores them.',
+      }),
+    );
+  });
 });

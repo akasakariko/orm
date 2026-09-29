@@ -95,4 +95,24 @@ describe('enum lowering encodes member values through the codec', () => {
     expect(valueSetValues(contract, 'Role')).toEqual(['USER', 'ADMIN']);
     expect(memberValues(contract, 'Role')).toEqual(['USER', 'ADMIN']);
   });
+
+  it('refuses two members the codec writes as the same value, naming both', () => {
+    const Role = enumType('Role', pgText, member('Shouted', 'ADMIN'), member('Quiet', 'admin'));
+    const codecLookup = codecLookupOf({
+      'pg/text@1': stubCodec('pg/text@1', (v) => String(v).toLowerCase()),
+    });
+
+    expect(() => buildSqlContractFromDefinition(definitionWith(Role), codecLookup)).toThrow(
+      expect.objectContaining({
+        code: 'CONTRACT.ENUM_INVALID',
+        message:
+          'enumType("Role"): members "Shouted" and "Quiet" both store "admin". Member values must be unique as the column stores them.',
+        meta: expect.objectContaining({
+          enumName: 'Role',
+          members: ['Shouted', 'Quiet'],
+          reason: 'duplicate-member-value',
+        }),
+      }),
+    );
+  });
 });

@@ -9,6 +9,7 @@ import {
 import type { InferBlock, PslBlockSpecDescriptor } from '@internal/psl-parser';
 import { blockAttribute, jsonValue, mapBlock, str } from '@internal/psl-parser';
 import { type EnumTypeHandle, enumType } from '@internal/sql-contract-ts/contract-builder';
+import { canonicalStringify } from '@internal/utils/canonical-stringify';
 
 export function sqlFamilyEnumSpec() {
   return mapBlock({
@@ -61,7 +62,7 @@ export const sqlFamilyEnumEntityDescriptor = {
         return undefined;
       }
 
-      const seenValues = new Set<string>();
+      const memberByStoredValue = new Map<string, string>();
       const members: { name: string; value: unknown }[] = [];
       let memberError = false;
 
@@ -97,18 +98,20 @@ export const sqlFamilyEnumEntityDescriptor = {
           }
         }
 
-        const valueKey = String(value);
-        if (seenValues.has(valueKey)) {
+        const storedValue = codec.encodeJson(value);
+        const storedKey = canonicalStringify(storedValue);
+        const earlier = memberByStoredValue.get(storedKey);
+        if (earlier !== undefined) {
           diagnostics?.push({
             code: 'PSL_ENUM_DUPLICATE_MEMBER_VALUE',
-            message: `enum "${block.name}": duplicate member value "${valueKey}"`,
+            message: `enum "${block.name}": members "${earlier}" and "${memberName}" both store ${JSON.stringify(storedValue)}`,
             sourceId,
             span,
           });
           memberError = true;
           continue;
         }
-        seenValues.add(valueKey);
+        memberByStoredValue.set(storedKey, memberName);
         members.push({ name: memberName, value });
       }
 

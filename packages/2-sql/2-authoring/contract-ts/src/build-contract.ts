@@ -77,6 +77,7 @@ import {
   derivedCheckPrefixes,
 } from '@internal/sql-schema-ir/naming';
 import { invariant } from '@internal/utils/assertions';
+import { canonicalStringify } from '@internal/utils/canonical-stringify';
 import { blindCast } from '@internal/utils/casts';
 import { ifDefined } from '@internal/utils/defined';
 import { InternalError } from '@internal/utils/internal-error';
@@ -492,6 +493,38 @@ function resolveCheckExpressionRenderer(
 }
 
 /**
+ * Each member of an `enumType()` with its value encoded as the column stores it. Two members the
+ * codec writes as the same value are one value in the database, so they are refused.
+ */
+function encodedEnumMembers(
+  handle: EnumTypeHandle,
+  codecLookup: CodecLookup | undefined,
+): readonly { readonly name: string; readonly value: JsonValue }[] {
+  const codec = codecLookup?.get(handle.codecId);
+  const memberByStoredValue = new Map<string, string>();
+  return handle.enumMembers.map((m) => {
+    const value = encodeViaCodec(m.value, codec);
+    const key = canonicalStringify(value);
+    const earlier = memberByStoredValue.get(key);
+    if (earlier !== undefined) {
+      throw contractError(
+        'CONTRACT.ENUM_INVALID',
+        `enumType("${handle.enumName}"): members "${earlier}" and "${m.name}" both store ${JSON.stringify(value)}. Member values must be unique as the column stores them.`,
+        {
+          meta: {
+            enumName: handle.enumName,
+            members: [earlier, m.name],
+            reason: 'duplicate-member-value',
+          },
+        },
+      );
+    }
+    memberByStoredValue.set(key, m.name);
+    return { name: m.name, value };
+  });
+}
+
+/**
  * The member values a membership check must enforce, encoded exactly as the
  * column stores them. Membership predicates support strings and finite numbers.
  */
@@ -499,9 +532,7 @@ function checkMemberValues(
   handle: EnumTypeHandle,
   codecLookup: CodecLookup | undefined,
 ): readonly (string | number)[] {
-  const encoded = handle.values.map((value) =>
-    encodeViaCodec(value, codecLookup?.get(handle.codecId)),
-  );
+  const encoded = encodedEnumMembers(handle, codecLookup).map((m) => m.value);
   const values: (string | number)[] = [];
   for (const value of encoded) {
     if (typeof value !== 'string' && !(typeof value === 'number' && Number.isFinite(value))) {
@@ -1667,23 +1698,15 @@ export function buildSqlContractFromDefinition(
       domainSlot = {};
       domainEnumsByNs[nsId] = domainSlot;
     }
-    domainSlot[enumName] = {
-      codecId: handle.codecId,
-      members: handle.enumMembers.map((m) => ({
-        name: m.name,
-        value: encodeViaCodec(m.value, codecLookup?.get(handle.codecId)),
-      })),
-    };
+    const members = encodedEnumMembers(handle, codecLookup);
+    domainSlot[enumName] = { codecId: handle.codecId, members };
 
     let storageSlot = storageValueSetsByNs[nsId];
     if (storageSlot === undefined) {
       storageSlot = {};
       storageValueSetsByNs[nsId] = storageSlot;
     }
-    storageSlot[enumName] = {
-      kind: 'valueSet',
-      values: handle.values.map((v) => encodeViaCodec(v, codecLookup?.get(handle.codecId))),
-    };
+    storageSlot[enumName] = { kind: 'valueSet', values: members.map((m) => m.value) };
   }
 
   const { createNamespace } = definition;
