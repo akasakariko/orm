@@ -114,10 +114,17 @@ const cache = createCacheMiddleware({
 ## `CacheStore`
 
 ```typescript
-interface CacheStore {
+interface CacheStore<TMeta = unknown> {
   get(key: string): Promise<CachedEntry | undefined>;
-  set(target: { readonly key: string; readonly meta: unknown; readonly entry: CachedEntry }): Promise<void>;
-  unset(target: { readonly keys: readonly string[] | undefined; readonly meta: unknown }): Promise<void>;
+  set(target: {
+    readonly key: string;
+    readonly meta: TMeta | undefined;
+    readonly entry: CachedEntry;
+  }): Promise<void>;
+  unset(target: {
+    readonly keys: readonly string[] | undefined;
+    readonly meta: TMeta | undefined;
+  }): Promise<void>;
 }
 
 interface CachedEntry {
@@ -237,7 +244,7 @@ Rules:
 - **Delete through `invalidate`.** Calling the store's `unset` on its own skips the guard for overlapping reads.
 - **Overlapping reads.** A read that missed the cache before an `invalidate` and finishes after it does not store its rows, because they may predate the write. `invalidate({ keys })` stops only the reads for those keys. `invalidate({ meta })` stops every read in flight, because only the store knows which entries `meta` matches, so frequent invalidation by `meta` lowers the hit rate. If an `invalidate` runs while a read's `store.set` is in flight, the middleware calls `store.unset({ keys: [key] })` once the `set` resolves. Each skipped store is logged at debug level as `middleware.cache.store-skipped` with the key.
 - **One process only.** The guard is per middleware instance. With a shared store such as Redis, a read in another process is not stopped, and can store rows that predate the write.
-- **Abandoned reads leave a small counter.** The guard keeps a counter per key while a miss for it is pending. A miss whose `afterQuery` never runs, because the consumer stopped reading the rows early or an earlier middleware's `afterQuery` threw, leaves that key's counter in memory. The growth is bounded by distinct keys, not by reads.
+- **Abandoned reads leave a small counter.** The guard keeps a counter per key while a miss for it is pending. A miss whose `afterQuery` never runs, because the consumer stopped reading the rows early or an earlier middleware's `afterQuery` threw, leaves that key's counter in memory. The number of leftover counters grows with the number of distinct keys, not with the number of reads; with content-hash keys, that means distinct parameter sets.
 - **Until `invalidate` resolves,** reads can still return entries it has not removed yet.
 - **Store errors propagate.** If `unset` rejects, `invalidate` rejects with that error. Overlapping reads still skip their store, which costs one extra miss.
 

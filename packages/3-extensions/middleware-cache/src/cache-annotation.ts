@@ -23,6 +23,18 @@ export interface CacheAnnotationOptions<TMeta = unknown> {
 }
 
 /**
+ * The type of `cacheAnnotation`: a call generic in `TMeta`, plus the read-only `namespace`,
+ * `applicableTo` and `read` of the underlying annotation handle.
+ */
+export type CacheAnnotationHandle = (<TMeta = unknown>(
+  options: CacheAnnotationOptions<TMeta>,
+) => AnnotationValue<CacheAnnotationOptions, 'read'>) & {
+  readonly namespace: string;
+  readonly applicableTo: ReadonlySet<'read'>;
+  readonly read: AnnotationHandle<CacheAnnotationOptions, 'read'>['read'];
+};
+
+/**
  * Marks a read for the cache middleware. It applies to reads only: a write terminal refuses it at
  * compile time and at run time. The middleware reads it from `plan.meta.annotations.cache`.
  *
@@ -48,18 +60,20 @@ export interface CacheAnnotationOptions<TMeta = unknown> {
  *   .build();
  * ```
  */
-export const cacheAnnotation = withTypedMeta(
+export const cacheAnnotation: CacheAnnotationHandle = withTypedMeta(
   defineAnnotation<CacheAnnotationOptions>()({ namespace: 'cache', applicableTo: ['read'] }),
 );
 
-function withTypedMeta(handle: AnnotationHandle<CacheAnnotationOptions, 'read'>) {
-  function annotate<TMeta = unknown>(
+function withTypedMeta(
+  handle: AnnotationHandle<CacheAnnotationOptions, 'read'>,
+): CacheAnnotationHandle {
+  function cacheAnnotationWithMeta<TMeta = unknown>(
     options: CacheAnnotationOptions<TMeta>,
   ): AnnotationValue<CacheAnnotationOptions, 'read'> {
     return handle(options);
   }
   return Object.freeze(
-    Object.assign(annotate, {
+    Object.assign(cacheAnnotationWithMeta, {
       namespace: handle.namespace,
       applicableTo: handle.applicableTo,
       read: handle.read,

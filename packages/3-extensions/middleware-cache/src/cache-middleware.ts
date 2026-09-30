@@ -58,7 +58,8 @@ export function deriveKeyFromContentHash(
 /**
  * The generation of one key, kept while misses for it are pending. A miss whose `afterQuery` never
  * runs (an abandoned row stream, or an earlier middleware's `afterQuery` throwing) leaves its key's
- * entry behind: one small counter per such key, bounded by distinct keys rather than by reads.
+ * entry behind. The number of leftover counters grows with the number of distinct keys, not with
+ * the number of reads; with content-hash keys, that means distinct parameter sets.
  */
 interface KeyState {
   generation: number;

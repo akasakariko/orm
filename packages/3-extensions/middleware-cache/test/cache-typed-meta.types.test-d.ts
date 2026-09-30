@@ -1,5 +1,6 @@
 import { expectTypeOf, test } from 'vitest';
 import {
+  type CacheAnnotationHandle,
   type CacheAnnotationOptions,
   type CachedEntry,
   type CacheMiddleware,
@@ -70,4 +71,14 @@ test('untyped calls default to unknown', () => {
   createCacheMiddleware().invalidate({ meta: { anything: 1 } });
   cacheAnnotation({ meta: { anything: 1 } });
   expectTypeOf(cacheAnnotation.read).returns.toEqualTypeOf<CacheAnnotationOptions | undefined>();
+});
+
+test('cacheAnnotation is a CacheAnnotationHandle with readonly handle members', () => {
+  expectTypeOf(cacheAnnotation).toEqualTypeOf<CacheAnnotationHandle>();
+
+  // @ts-expect-error - namespace is readonly
+  cacheAnnotation.namespace = 'other';
+
+  // @ts-expect-error - read is readonly
+  cacheAnnotation.read = () => undefined;
 });

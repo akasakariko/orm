@@ -27,10 +27,17 @@ How long an entry lives is the store's policy. The default store, `createInMemor
 ## The store
 
 ```ts
-interface CacheStore {
+interface CacheStore<TMeta = unknown> {
   get(key: string): Promise<CachedEntry | undefined>;
-  set(target: { readonly key: string; readonly meta: unknown; readonly entry: CachedEntry }): Promise<void>;
-  unset(target: { readonly keys: readonly string[] | undefined; readonly meta: unknown }): Promise<void>;
+  set(target: {
+    readonly key: string;
+    readonly meta: TMeta | undefined;
+    readonly entry: CachedEntry;
+  }): Promise<void>;
+  unset(target: {
+    readonly keys: readonly string[] | undefined;
+    readonly meta: TMeta | undefined;
+  }): Promise<void>;
 }
 ```
 
@@ -87,7 +94,7 @@ await db.orm.public.User.where({ id: 1 }).update({ name: 'Alicia' });
 await cache.invalidate({ keys: ['user-1'] });
 ```
 
-A read that missed before an `invalidate` and finishes after it does not store its rows: `invalidate({ keys })` stops the reads for those keys, and `invalidate({ meta })` stops every read in flight, because only the store knows what `meta` matches. This guard works within one process only. A miss whose `afterQuery` never runs (an abandoned row stream, or an earlier middleware's `afterQuery` throwing) leaves one small counter for its key in memory, bounded by distinct keys. Call `invalidate` after the write has committed: inside a transaction, another request can put the old rows back in the cache before the commit. An error from the store propagates.
+A read that missed before an `invalidate` and finishes after it does not store its rows: `invalidate({ keys })` stops the reads for those keys, and `invalidate({ meta })` stops every read in flight, because only the store knows what `meta` matches. This guard works within one process only. A miss whose `afterQuery` never runs (an abandoned row stream, or an earlier middleware's `afterQuery` throwing) leaves one small counter for its key in memory. The number of leftover counters grows with the number of distinct keys, not with the number of reads; with content-hash keys, that means distinct parameter sets. Call `invalidate` after the write has committed: inside a transaction, another request can put the old rows back in the cache before the commit. An error from the store propagates.
 
 A tag scheme is a store policy: `cacheAnnotation({ meta: { tags: ['users'] } })` on the read, a store that indexes `meta.tags` in `set`, and `cache.invalidate({ meta: { tags: ['users'] } })` after the write.
 
