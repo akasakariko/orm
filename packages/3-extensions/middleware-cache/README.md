@@ -171,17 +171,24 @@ await db.orm.public.User.where({ id: 1 }).update({ name: 'Alicia' });
 await cache.invalidate({ keys: ['user-1'] });
 ```
 
-Keys are compared literally with the strings passed to `cacheAnnotation({ key })`. The keys form is a convenience built on the same guard as the function form: it calls the store's `delete` for each key, in order. It is the only form that checks the store: when the store has no `delete`, it throws `RUNTIME.CACHE_STORE_CANNOT_INVALIDATE` (with `meta.missingMethod: 'delete'`) before anything else. Empty `keys` do nothing.
+Keys are compared literally with the strings passed to `cacheAnnotation({ key })`. The keys form is a convenience built on the same guard as the function form: it calls the store's `delete` for each key, in order. It is the only form that checks the store: when the store has no `delete`, it throws `RUNTIME.CACHE_STORE_CANNOT_INVALIDATE` (with `meta.missingMethod: 'delete'`) before anything else, even for empty `keys`. On a store with `delete`, empty `keys` do nothing.
 
 ### By a function
 
 `invalidate(run)` makes in-flight misses skip their store, then awaits `run`. `run` receives no argument: it deletes through a store reference you hold. To use the default store's `deleteWhere`, create the store yourself and pass it in:
 
 ```typescript
-import { createCacheMiddleware, createInMemoryCacheStore } from '@internal/middleware-cache';
+import {
+  createCacheMiddleware,
+  createInMemoryCacheStore,
+  deriveKeyFromContentHash,
+} from '@internal/middleware-cache';
 
 const store = createInMemoryCacheStore({ maxEntries: 1_000 });
-const cache = createCacheMiddleware({ store });
+const cache = createCacheMiddleware({
+  store,
+  deriveKey: async (exec, ctx) => `users:${await deriveKeyFromContentHash(exec, ctx)}`,
+});
 
 await cache.invalidate(() => store.deleteWhere((entry) => entry.key.startsWith('users:')));
 ```
@@ -217,7 +224,7 @@ A custom store can support the same policy by reading `entry.attributes` in `set
 
 - **Delete through `invalidate`.** Calling `store.delete` or `store.deleteWhere` on its own skips the guard for overlapping reads.
 - **Call it after the write has committed.** `invalidate` works from any scope, but if you call it inside a transaction, another request can read the old rows before the commit and put them back in the cache. Invalidate once the transaction has returned.
-- **Overlapping reads.** A read that missed the cache before an `invalidate` and finishes after it does not store its rows, because they may predate the write. This guard is per middleware instance and so per process: with a shared store such as Redis, a read in another process is not protected, and can store rows that predate the write. Every `invalidate` call makes every in-flight miss skip its store, whatever it removes, including a function that removes nothing; the only exceptions are a refused keys call and empty `keys`. Frequent invalidation therefore lowers the hit rate. If an `invalidate` runs while a miss's `store.set` is still in flight, the middleware deletes that key again once the `set` resolves; with a store whose `set` is asynchronous and that has no `delete`, a write that lands during an invalidation cannot be removed.
+- **Overlapping reads.** A read that missed the cache before an `invalidate` and finishes after it does not store its rows, because they may predate the write. This guard is per middleware instance and so per process: with a shared store such as Redis, a read in another process is not protected, and can store rows that predate the write. Every `invalidate` call makes every in-flight miss skip its store, whatever it removes, including a function that removes nothing; the only exceptions are a refused keys call and empty `keys`. Frequent invalidation therefore lowers the hit rate. Each skipped store is logged at debug level as `middleware.cache.store-skipped` with the key. If an `invalidate` runs while a miss's `store.set` is still in flight, the middleware deletes that key again once the `set` resolves; with a store whose `set` is asynchronous and that has no `delete`, a write that lands during an invalidation cannot be removed.
 - **Until `invalidate` resolves,** reads can still return entries it has not removed yet.
 - **Store errors.** If the store's `delete`, or `run`, rejects partway, `invalidate` rejects with that error; entries already removed stay removed, and calling `invalidate` again is safe. In-flight misses still skip their store.
 

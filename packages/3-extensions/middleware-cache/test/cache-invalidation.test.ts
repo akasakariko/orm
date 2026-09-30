@@ -135,11 +135,14 @@ describe('createCacheMiddleware — invalidate({ keys })', () => {
       expect(store.setSpy).toHaveBeenCalledTimes(1);
     });
 
-    it('accepts empty keys', async () => {
+    it('refuses empty keys too', async () => {
       const store = spyStore();
       const mw = createCacheMiddleware({ store: { get: store.get, set: store.set } });
 
-      await expect(mw.invalidate({ keys: [] })).resolves.toBeUndefined();
+      await expect(mw.invalidate({ keys: [] })).rejects.toMatchObject({
+        code: 'RUNTIME.CACHE_STORE_CANNOT_INVALIDATE',
+        meta: { missingMethod: 'delete' },
+      });
     });
   });
 });
@@ -184,8 +187,11 @@ describe('createCacheMiddleware — invalidate(run)', () => {
     expect(store.setSpy).not.toHaveBeenCalled();
   });
 
-  it('turns a synchronous throw into a rejection', async () => {
-    const mw = createCacheMiddleware({ store: spyStore() });
+  it('turns a synchronous throw into a rejection after moving the counter', async () => {
+    const store = spyStore();
+    const mw = createCacheMiddleware({ store });
+    const ctx = makeCtx();
+    const exec = await startMiss(mw, ctx);
     const failure = new Error('run failed');
 
     await expect(
@@ -193,6 +199,9 @@ describe('createCacheMiddleware — invalidate(run)', () => {
         throw failure;
       }),
     ).rejects.toBe(failure);
+    await finishMiss(mw, exec, ctx);
+
+    expect(store.setSpy).not.toHaveBeenCalled();
   });
 
   it('runs against a store without delete', async () => {

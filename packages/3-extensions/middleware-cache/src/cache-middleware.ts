@@ -49,7 +49,7 @@ export interface CacheMiddlewareOptions {
  *
  * - `invalidate({ keys })` calls the store's `delete` for each key, in order. It throws
  *   `RUNTIME.CACHE_STORE_CANNOT_INVALIDATE` before anything else when the store has no `delete`,
- *   and does nothing for empty `keys`.
+ *   even for empty `keys`; otherwise empty `keys` do nothing.
  * - `invalidate(run)` awaits `run`, which deletes through a store reference the caller holds. It
  *   performs no capability check.
  *
@@ -289,13 +289,13 @@ export function createCacheMiddleware(options?: CacheMiddlewareOptions): CacheMi
       await target();
       return;
     }
-    const { keys } = target;
-    if (keys.length === 0) {
-      return;
-    }
     const deleteKey = store.delete;
     if (deleteKey === undefined) {
       throw cannotInvalidate('delete');
+    }
+    const { keys } = target;
+    if (keys.length === 0) {
+      return;
     }
 
     invalidations += 1;

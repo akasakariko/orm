@@ -44,7 +44,7 @@ An explicit annotation `key` is used literally and bypasses `deriveKey`, so a te
 
 `createCacheMiddleware()` returns a middleware with an `invalidate` method in two forms. Both first make every read that missed the cache before the call skip storing its rows.
 
-- `invalidate({ keys })` removes the entries stored under those `cacheAnnotation({ key })` strings through the store's `delete`. It is a convenience over the function form, and the only form that checks the store: without `delete` it throws `RUNTIME.CACHE_STORE_CANNOT_INVALIDATE` before anything else. Empty `keys` do nothing.
+- `invalidate({ keys })` removes the entries stored under those `cacheAnnotation({ key })` strings through the store's `delete`. It is a convenience over the function form, and the only form that checks the store: without `delete` it throws `RUNTIME.CACHE_STORE_CANNOT_INVALIDATE` before anything else, even for empty `keys`. On a store with `delete`, empty `keys` do nothing.
 - `invalidate(run)` awaits `run`, which receives no argument and deletes through a store reference you hold. To use `deleteWhere`, create the store yourself and pass it in.
 
 Tags are a policy built on these: store them in `attributes` and delete by predicate.
