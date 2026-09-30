@@ -218,7 +218,7 @@ namespace auth {
         entityName: 'AalLevel',
       },
     });
-    expect(aalsColumn?.many).toBe(true);
+    expect(aalsColumn?.many).toEqual({ elementNullable: false });
   });
 
   it('stores a list of member names written as a default on a pg.enum(E)[] field', () => {

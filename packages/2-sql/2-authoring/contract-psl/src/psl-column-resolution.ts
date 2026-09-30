@@ -49,7 +49,12 @@ import {
   reportUncomposedNamespace,
   reportUnknownFieldPreset,
 } from '@internal/psl-parser/interpret';
-import { ArrayLiteralAst, IdentifierAst, type FieldAttributeAst, type PslSources } from '@internal/psl-parser/syntax';
+import {
+  ArrayLiteralAst,
+  type FieldAttributeAst,
+  IdentifierAst,
+  type PslSources,
+} from '@internal/psl-parser/syntax';
 import {
   SQL_EXPRESSION_DATA_TYPE_ID,
   SQL_EXPRESSION_TAG,
@@ -680,7 +685,12 @@ export function lowerDefaultForField(input: {
   });
   if (interpreted === undefined) return {};
   const value = interpreted.value;
-  if (Array.isArray(value) && value.includes(null) && rejectStrictListNullDefault({ ...input, node })) return {};
+  if (
+    Array.isArray(value) &&
+    value.includes(null) &&
+    rejectStrictListNullDefault({ ...input, node })
+  )
+    return {};
   if (value === null) {
     if (!input.field.optional) {
       input.diagnostics.push({
@@ -712,7 +722,13 @@ export function lowerDefaultForField(input: {
     if (Array.isArray(value) && value.includes(null) && Array.isArray(lowered.value)) {
       let index = 0;
       const nonNullValues = lowered.value;
-      return { defaultValue: { kind: 'literal' as const, value: value.map((element) => element === null ? null : nonNullValues[index++]), canonical: true } };
+      return {
+        defaultValue: {
+          kind: 'literal' as const,
+          value: value.map((element) => (element === null ? null : nonNullValues[index++])),
+          canonical: true,
+        },
+      };
     }
     return { defaultValue: { kind: 'literal' as const, value: lowered.value, canonical: true } };
   };
@@ -753,7 +769,9 @@ export function lowerDefaultForField(input: {
   if (input.columnDescriptor.valueSet !== undefined) {
     if (typeof value === 'string') return { defaultValue: { kind: 'literal', value } };
     if (Array.isArray(value)) {
-      const members = value.filter((element): element is string | null => element === null || typeof element === 'string');
+      const members = value.filter(
+        (element): element is string | null => element === null || typeof element === 'string',
+      );
       if (members.length === value.length) {
         return { defaultValue: { kind: 'literal', value: members } };
       }

@@ -265,8 +265,12 @@ describe('value objects', () => {
   function addressContract(field: ContractField) {
     return deserialize(
       widgetContract({
-        columns: { address: { nativeType: 'jsonb', codecId: 'pg/jsonb@1', nullable: false } },
-        fields: { address: { nullable: false, type: { kind: 'valueObject', name: 'Address' } } },
+        columns: {
+          address: { many: false, nativeType: 'jsonb', codecId: 'pg/jsonb@1', nullable: false },
+        },
+        fields: {
+          address: { many: false, nullable: false, type: { kind: 'valueObject', name: 'Address' } },
+        },
         domain: { valueObjects: { Address: { fields: { street: field } } } },
       }),
     );
@@ -290,6 +294,7 @@ describe('value objects', () => {
   it('refuses a value-object field whose type is a union', () => {
     expect(
       withAddress({
+        many: false,
         nullable: false,
         type: { kind: 'union', members: [{ kind: 'scalar', codecId: 'pg/text@1' }] },
       }),
@@ -304,13 +309,17 @@ describe('value objects', () => {
 
   it('refuses a value-object field whose codec no Postgres codec in the stack names a native type for', () => {
     expect(
-      withAddress({ nullable: false, type: { kind: 'scalar', codecId: 'pgvector/vector@1' } }),
+      withAddress({
+        many: false,
+        nullable: false,
+        type: { kind: 'scalar', codecId: 'pgvector/vector@1' },
+      }),
     ).toThrow(refusal({ coordinate: '"public".Address.street', codecId: 'pgvector/vector@1' }));
   });
 
   it('refuses a value-object field whose codec names a native type only from type parameters', () => {
     expect(
-      withAddress({ nullable: false, type: { kind: 'scalar', codecId: 'pg/enum@1' } }),
+      withAddress({ many: false, nullable: false, type: { kind: 'scalar', codecId: 'pg/enum@1' } }),
     ).toThrow(refusal({ coordinate: '"public".Address.street', codecId: 'pg/enum@1' }));
   });
 
@@ -328,6 +337,7 @@ describe('value objects', () => {
     });
     const document = buildPostgresPslContract(
       addressContract({
+        many: false,
         nullable: false,
         type: { kind: 'scalar', codecId: extensionCodec.codecId },
       }),
@@ -346,6 +356,7 @@ describe('value objects', () => {
   it('refuses a value-object field whose type carries type parameters, which the PSL source drops', () => {
     expect(
       withAddress({
+        many: false,
         nullable: false,
         type: { kind: 'scalar', codecId: 'sql/varchar@1', typeParams: { length: 20 } },
       }),

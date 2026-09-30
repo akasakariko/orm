@@ -64,7 +64,7 @@ function columnTypeLike(
     // `column.many` is unset on contract-derived columns (array-ness rides
     // on the `nativeType` `[]` suffix there instead) — `codecRef.many`
     // carries it. Hand-built/introspected columns set `column.many` directly.
-    ...ifDefined('many', identity.many ?? identity.codecRef.many),
+    many: (identity.many ?? identity.codecRef.many) ? { elementNullable: false } : false,
     ...ifDefined(
       'typeParams',
       identity.codecRef.typeParams !== undefined
@@ -174,5 +174,6 @@ export function renderColumnDefaultSql(
     nativeType: buildColumnTypeSql(typeLike, codecHooks, {}, false),
     ...ifDefined('dataTypeId', defaultNode.dataType?.id),
     ...ifDefined('many', typeLike.many),
+    many: typeLike.many,
   });
 }

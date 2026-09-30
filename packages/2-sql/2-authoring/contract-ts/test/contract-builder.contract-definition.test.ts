@@ -293,6 +293,7 @@ describe('shared contract definition lowering', () => {
             tableName: 'document',
             fields: [
               {
+                many: false,
                 fieldName: 'embedding',
                 columnName: 'embedding',
                 descriptor: {
@@ -395,42 +396,42 @@ describe('shared contract definition lowering', () => {
   });
 
   it('builds phase-specific execution defaults', () => {
-  const contract = buildSqlContractFromDefinition({
-    warnings: undefined,
-    target: postgresTargetPack,
-    createNamespace: createTestSqlNamespace,
-    models: [
-      {
-        modelName: 'User',
-        tableName: 'app_user',
-        fields: [
-          {
-            fieldName: 'updatedAt',
-            columnName: 'updated_at',
-            descriptor: {
-              codecId: 'pg/timestamptz-temporal@1',
-              nativeType: 'timestamptz',
+    const contract = buildSqlContractFromDefinition({
+      warnings: undefined,
+      target: postgresTargetPack,
+      createNamespace: createTestSqlNamespace,
+      models: [
+        {
+          modelName: 'User',
+          tableName: 'app_user',
+          fields: [
+            {
+              fieldName: 'updatedAt',
+              columnName: 'updated_at',
+              descriptor: {
+                codecId: 'pg/timestamptz-temporal@1',
+                nativeType: 'timestamptz',
+              },
+              nullable: false,
+              many: false,
+              executionDefaults: {
+                onCreate: { kind: 'generator', id: 'timestampNow' },
+                onUpdate: { kind: 'generator', id: 'timestampNow' },
+              },
             },
-            nullable: false,
-            many: false,
-            executionDefaults: {
-              onCreate: { kind: 'generator', id: 'timestampNow' },
-              onUpdate: { kind: 'generator', id: 'timestampNow' },
-            },
-          },
-        ],
-      },
-    ],
-  });
+          ],
+        },
+      ],
+    });
 
-  expect(contract.execution?.mutations.defaults).toEqual([
-    {
-      ref: { namespace: 'public', entry: 'app_user', field: 'updated_at' },
-      onCreate: { kind: 'generator', id: 'timestampNow' },
-      onUpdate: { kind: 'generator', id: 'timestampNow' },
-    },
-  ]);
-});
+    expect(contract.execution?.mutations.defaults).toEqual([
+      {
+        ref: { namespace: 'public', entry: 'app_user', field: 'updated_at' },
+        onCreate: { kind: 'generator', id: 'timestampNow' },
+        onUpdate: { kind: 'generator', id: 'timestampNow' },
+      },
+    ]);
+  });
 
   it('rejects generated fields that also declare storage defaults', () => {
     expect(() =>

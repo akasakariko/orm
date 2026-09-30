@@ -47,7 +47,7 @@ describe('interpretPslDocumentToSqlContract list fields with type parameters', (
       one: { type: { kind: 'scalar', codecId: 'sql/varchar@1', typeParams: { length: 12 } } },
       many: {
         type: { kind: 'scalar', codecId: 'sql/varchar@1', typeParams: { length: 12 } },
-        many: true,
+        many: { elementNullable: false },
       },
     });
   });

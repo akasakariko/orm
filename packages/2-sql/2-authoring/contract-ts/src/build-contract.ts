@@ -277,7 +277,9 @@ function encodeColumnDefault(
       value: defaultInput.value.map((element, index) => {
         if (element !== null) return encodeDefaultValue(element, codec, site, index + 1);
         if (elementNullable) return null;
-        throw new InternalError('Literal default on a strict list column cannot contain null elements.');
+        throw new InternalError(
+          'Literal default on a strict list column cannot contain null elements.',
+        );
       }),
     };
   }

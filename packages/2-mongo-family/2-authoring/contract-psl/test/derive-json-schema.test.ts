@@ -2,8 +2,8 @@ import type { ContractValueObject } from '@internal/contract/types';
 import { describe, expect, it } from 'vitest';
 import { deriveJsonSchema, derivePolymorphicJsonSchema } from '../src/derive-json-schema';
 import {
-  arrayField,
   arrayEnumField,
+  arrayField,
   mongoCodecLookup,
   scalarField,
   voArrayField,

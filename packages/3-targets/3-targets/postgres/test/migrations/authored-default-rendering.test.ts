@@ -28,6 +28,7 @@ function expectedColumn(nativeType: string, codecId: string, expression: string)
               orders: new StorageTable({
                 columns: {
                   value: {
+                    many: false,
                     nativeType,
                     codecId,
                     nullable: false,
@@ -114,6 +115,8 @@ describe("a literal-shaped sql`'{}'::jsonb` body on Postgres", () => {
     );
     expect(resolved).toEqual({ kind: 'literal', value: {} });
     if (resolved.kind !== 'literal') throw new Error('literal expected');
-    expect(renderDefaultLiteral(resolved.value, { nativeType: 'jsonb' })).toBe("'{}'::jsonb");
+    expect(renderDefaultLiteral(resolved.value, { nativeType: 'jsonb', many: false })).toBe(
+      "'{}'::jsonb",
+    );
   });
 });

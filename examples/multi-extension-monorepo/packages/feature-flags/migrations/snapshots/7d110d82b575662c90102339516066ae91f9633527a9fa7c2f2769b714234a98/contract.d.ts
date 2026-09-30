@@ -314,12 +314,12 @@ type ContractBase = Omit<
           readonly table: {
             readonly feature_flag: {
               columns: {
-                readonly enabled: {
+                readonly enabled: { readonly many: false;
                   readonly nativeType: 'bool';
                   readonly codecId: 'pg/bool@1';
                   readonly nullable: false;
                 };
-                readonly key: {
+                readonly key: { readonly many: false;
                   readonly nativeType: 'text';
                   readonly codecId: 'pg/text@1';
                   readonly nullable: false;
@@ -352,11 +352,11 @@ type ContractBase = Omit<
         readonly models: {
           readonly FeatureFlag: {
             readonly fields: {
-              readonly enabled: {
+              readonly enabled: { readonly many: false;
                 readonly nullable: false;
                 readonly type: { readonly kind: 'scalar'; readonly codecId: 'pg/bool@1' };
               };
-              readonly key: {
+              readonly key: { readonly many: false;
                 readonly nullable: false;
                 readonly type: { readonly kind: 'scalar'; readonly codecId: 'pg/text@1' };
               };

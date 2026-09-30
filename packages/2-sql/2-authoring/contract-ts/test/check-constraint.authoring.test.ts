@@ -504,7 +504,13 @@ describe('check emission — guards', () => {
         }),
       );
       expect(hookCalls).toEqual([
-        { tableName: 'User', columnName: 'id', many: false, memberValues: undefined },
+        {
+          tableName: 'User',
+          columnName: 'id',
+          many: false,
+          elementNullable: false,
+          memberValues: undefined,
+        },
       ]);
     },
   );
@@ -550,12 +556,16 @@ describe('check emission — guards', () => {
         tableName: 'User',
         columnName: 'normalized',
         many,
+        elementNullable: false,
         memberValues: ['1', 'two'],
       });
       expect(flatten(checksOf(contract))).toEqual(
         many
           ? [
-              wire('User_normalized_check', `"normalized"::text[] <@ ARRAY['1', 'two']::text[]`),
+              wire(
+                'User_normalized_check',
+                `array_remove("normalized"::text[], NULL) <@ ARRAY['1', 'two']::text[]`,
+              ),
               wire('User_normalized_elem_not_null', `array_position("normalized", NULL) IS NULL`),
             ]
           : [wire('User_normalized_check', `"normalized" IN ('1', 'two')`)],

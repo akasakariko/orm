@@ -1870,7 +1870,7 @@ async function pgRenderDdlColumnDefault(
   const dataTypeId =
     codecRef === undefined ? undefined : codecLookup.descriptorFor?.(codecRef.codecId)?.dataType;
   if (Array.isArray(def.value) && nativeType.endsWith('[]')) {
-    return `DEFAULT ${renderDefaultLiteral(def.value, { many: true, nativeType, dataTypeId })}`;
+    return `DEFAULT ${renderDefaultLiteral(def.value, { many: { elementNullable: false }, nativeType, dataTypeId })}`;
   }
   if (typeof def.value === 'string' && isPostgresDateTimeDataType(dataTypeId)) {
     return `DEFAULT ${pgInlineLiteral(postgresDateTimeDdlText(def.value, dataTypeId), nativeType)}`;

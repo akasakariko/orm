@@ -40,7 +40,11 @@ import {
   storageName,
 } from './psl-attribute-parsing';
 import type { ColumnDescriptor, FieldPresetContributions } from './psl-column-resolution';
-import { lowerDefaultForField, rejectStrictListNullDefault, resolveFieldTypeDescriptor } from './psl-column-resolution';
+import {
+  lowerDefaultForField,
+  rejectStrictListNullDefault,
+  resolveFieldTypeDescriptor,
+} from './psl-column-resolution';
 import {
   fieldSpecContext,
   interpretFieldAttribute,
@@ -94,8 +98,20 @@ function lowerEnumDefaultForField(input: {
   const member = interpreted.value;
   if (Array.isArray(member)) {
     if (member.includes(null) && rejectStrictListNullDefault({ ...input, node })) return {};
-    const values = member.map((entry) => entry === null ? null : enumHandle.enumMembers.find((candidate) => candidate.name === entry)?.value);
-    return { defaultValue: { kind: 'literal', value: blindCast<ColumnDefaultLiteralInputValue, 'enum member values are codec-validated JsonValue-compatible scalars'>(values) } };
+    const values = member.map((entry) =>
+      entry === null
+        ? null
+        : enumHandle.enumMembers.find((candidate) => candidate.name === entry)?.value,
+    );
+    return {
+      defaultValue: {
+        kind: 'literal',
+        value: blindCast<
+          ColumnDefaultLiteralInputValue,
+          'enum member values are codec-validated JsonValue-compatible scalars'
+        >(values),
+      },
+    };
   }
   invariant(
     typeof member === 'string',
