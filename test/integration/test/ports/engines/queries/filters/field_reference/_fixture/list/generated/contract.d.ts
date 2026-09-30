@@ -574,7 +574,6 @@ type ContractBase = Omit<
               readonly bInt: {
                 readonly nullable: true;
                 readonly type: { readonly kind: 'scalar'; readonly codecId: 'pg/int8@1' };
-                readonly many: false;
               };
               readonly bInt_list: {
                 readonly nullable: false;
@@ -589,7 +588,6 @@ type ContractBase = Omit<
               readonly bool: {
                 readonly nullable: true;
                 readonly type: { readonly kind: 'scalar'; readonly codecId: 'pg/bool@1' };
-                readonly many: false;
               };
               readonly bool_list: {
                 readonly nullable: false;
@@ -604,7 +602,6 @@ type ContractBase = Omit<
               readonly bytes: {
                 readonly nullable: true;
                 readonly type: { readonly kind: 'scalar'; readonly codecId: 'pg/bytea@1' };
-                readonly many: false;
               };
               readonly bytes_list: {
                 readonly nullable: false;
@@ -622,7 +619,6 @@ type ContractBase = Omit<
                   readonly kind: 'scalar';
                   readonly codecId: 'pg/timestamptz-temporal@1';
                 };
-                readonly many: false;
               };
               readonly dt_list: {
                 readonly nullable: false;
@@ -643,7 +639,6 @@ type ContractBase = Omit<
               readonly float: {
                 readonly nullable: true;
                 readonly type: { readonly kind: 'scalar'; readonly codecId: 'pg/float8@1' };
-                readonly many: false;
               };
               readonly float_list: {
                 readonly nullable: false;
@@ -658,12 +653,10 @@ type ContractBase = Omit<
               readonly id: {
                 readonly nullable: false;
                 readonly type: { readonly kind: 'scalar'; readonly codecId: 'pg/int4@1' };
-                readonly many: false;
               };
               readonly int: {
                 readonly nullable: true;
                 readonly type: { readonly kind: 'scalar'; readonly codecId: 'pg/int4@1' };
-                readonly many: false;
               };
               readonly int_list: {
                 readonly nullable: false;
@@ -678,7 +671,6 @@ type ContractBase = Omit<
               readonly string: {
                 readonly nullable: true;
                 readonly type: { readonly kind: 'scalar'; readonly codecId: 'pg/text@1' };
-                readonly many: false;
               };
               readonly string_list: {
                 readonly nullable: false;

@@ -400,22 +400,18 @@ type ContractBase = Omit<
               readonly d10_0: {
                 readonly nullable: true;
                 readonly type: { readonly kind: 'scalar'; readonly codecId: 'pg/numeric@1' };
-                readonly many: false;
               };
               readonly d20_10: {
                 readonly nullable: true;
                 readonly type: { readonly kind: 'scalar'; readonly codecId: 'pg/numeric@1' };
-                readonly many: false;
               };
               readonly d38_30: {
                 readonly nullable: true;
                 readonly type: { readonly kind: 'scalar'; readonly codecId: 'pg/numeric@1' };
-                readonly many: false;
               };
               readonly id: {
                 readonly nullable: false;
                 readonly type: { readonly kind: 'scalar'; readonly codecId: 'pg/text@1' };
-                readonly many: false;
               };
             };
             readonly relations: Record<string, never>;

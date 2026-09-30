@@ -460,7 +460,6 @@ type ContractBase = Omit<
                   readonly kind: 'scalar';
                   readonly codecId: 'pg/timestamptz-temporal@1';
                 };
-                readonly many: false;
               };
               readonly id: {
                 readonly nullable: false;
@@ -469,17 +468,14 @@ type ContractBase = Omit<
                   readonly codecId: 'sql/char@1';
                   readonly typeParams: { readonly length: 36 };
                 };
-                readonly many: false;
               };
               readonly title: {
                 readonly nullable: false;
                 readonly type: { readonly kind: 'scalar'; readonly codecId: 'pg/text@1' };
-                readonly many: false;
               };
               readonly userId: {
                 readonly nullable: false;
                 readonly type: { readonly kind: 'scalar'; readonly codecId: 'pg/text@1' };
-                readonly many: false;
               };
             };
             readonly relations: {
@@ -512,12 +508,10 @@ type ContractBase = Omit<
                   readonly kind: 'scalar';
                   readonly codecId: 'pg/timestamptz-temporal@1';
                 };
-                readonly many: false;
               };
               readonly email: {
                 readonly nullable: false;
                 readonly type: { readonly kind: 'scalar'; readonly codecId: 'pg/text@1' };
-                readonly many: false;
               };
               readonly id: {
                 readonly nullable: false;
@@ -526,7 +520,6 @@ type ContractBase = Omit<
                   readonly codecId: 'sql/char@1';
                   readonly typeParams: { readonly length: 36 };
                 };
-                readonly many: false;
               };
             };
             readonly relations: {

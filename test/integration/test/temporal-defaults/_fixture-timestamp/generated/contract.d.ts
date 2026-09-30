@@ -379,12 +379,10 @@ type ContractBase = Omit<
               readonly id: {
                 readonly nullable: false;
                 readonly type: { readonly kind: 'scalar'; readonly codecId: 'pg/int4@1' };
-                readonly many: false;
               };
               readonly label: {
                 readonly nullable: false;
                 readonly type: { readonly kind: 'scalar'; readonly codecId: 'pg/text@1' };
-                readonly many: false;
               };
               readonly updatedAt: {
                 readonly nullable: false;
@@ -393,7 +391,6 @@ type ContractBase = Omit<
                   readonly codecId: 'pg/timestamp-temporal@1';
                   readonly typeParams: { readonly precision: 3 };
                 };
-                readonly many: false;
               };
               readonly updatedAtTz: {
                 readonly nullable: false;
@@ -402,7 +399,6 @@ type ContractBase = Omit<
                   readonly codecId: 'pg/timestamptz-temporal@1';
                   readonly typeParams: { readonly precision: 3 };
                 };
-                readonly many: false;
               };
             };
             readonly relations: Record<string, never>;

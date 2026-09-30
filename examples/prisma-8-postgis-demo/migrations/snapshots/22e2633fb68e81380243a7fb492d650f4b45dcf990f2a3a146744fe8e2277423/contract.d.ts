@@ -501,17 +501,14 @@ type ContractBase = Omit<
                   readonly codecId: 'sql/char@1';
                   readonly typeParams: { readonly length: 36 };
                 };
-                readonly many: false;
               };
               readonly location: {
                 readonly nullable: false;
                 readonly type: { readonly kind: 'scalar'; readonly codecId: 'pg/geometry@1' };
-                readonly many: false;
               };
               readonly name: {
                 readonly nullable: false;
                 readonly type: { readonly kind: 'scalar'; readonly codecId: 'pg/text@1' };
-                readonly many: false;
               };
             };
             readonly relations: Record<string, never>;
@@ -530,7 +527,6 @@ type ContractBase = Omit<
               readonly boundary: {
                 readonly nullable: false;
                 readonly type: { readonly kind: 'scalar'; readonly codecId: 'pg/geometry@1' };
-                readonly many: false;
               };
               readonly id: {
                 readonly nullable: false;
@@ -539,12 +535,10 @@ type ContractBase = Omit<
                   readonly codecId: 'sql/char@1';
                   readonly typeParams: { readonly length: 36 };
                 };
-                readonly many: false;
               };
               readonly name: {
                 readonly nullable: false;
                 readonly type: { readonly kind: 'scalar'; readonly codecId: 'pg/text@1' };
-                readonly many: false;
               };
             };
             readonly relations: Record<string, never>;
@@ -567,17 +561,14 @@ type ContractBase = Omit<
                   readonly codecId: 'sql/char@1';
                   readonly typeParams: { readonly length: 36 };
                 };
-                readonly many: false;
               };
               readonly name: {
                 readonly nullable: false;
                 readonly type: { readonly kind: 'scalar'; readonly codecId: 'pg/text@1' };
-                readonly many: false;
               };
               readonly path: {
                 readonly nullable: false;
                 readonly type: { readonly kind: 'scalar'; readonly codecId: 'pg/geometry@1' };
-                readonly many: false;
               };
             };
             readonly relations: Record<string, never>;
