@@ -255,12 +255,15 @@ export function createCacheMiddleware(options?: CacheMiddlewareOptions): CacheMi
       return;
     }
 
-    if (slot.invalidations !== invalidations) {
+    const logSkipped = () =>
       ctx.log.debug?.({
         event: 'middleware.cache.store-skipped',
         middleware: 'cache',
         key: slot.key,
       });
+
+    if (slot.invalidations !== invalidations) {
+      logSkipped();
       return;
     }
 
@@ -269,6 +272,12 @@ export function createCacheMiddleware(options?: CacheMiddlewareOptions): CacheMi
       { rows: slot.buffer, storedAt: clock(), ...ifDefined('attributes', slot.attributes) },
       slot.ttlMs,
     );
+
+    if (slot.invalidations !== invalidations) {
+      await store.delete?.(slot.key);
+      logSkipped();
+      return;
+    }
     ctx.log.debug?.({ event: 'middleware.cache.store', middleware: 'cache', key: slot.key });
   }
 

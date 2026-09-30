@@ -239,4 +239,69 @@ describe('createCacheMiddleware — reads overlapping invalidate', () => {
 
     expect(store.setSpy).toHaveBeenCalledTimes(1);
   });
+
+  describe('when an invalidate runs while store.set is in flight', () => {
+    function pendingSetStore() {
+      const events: string[] = [];
+      let resolveSet: () => void = () => {};
+      const store = {
+        get: vi.fn(async () => undefined),
+        set: vi.fn(
+          (key: string) =>
+            new Promise<void>((resolve) => {
+              resolveSet = () => {
+                events.push(`set:${key}`);
+                resolve();
+              };
+            }),
+        ),
+        delete: vi.fn(async (key: string) => {
+          events.push(`delete:${key}`);
+        }),
+      };
+      return { store, events, resolveSet: () => resolveSet() };
+    }
+
+    it('deletes the key again after the set lands, and logs the skip', async () => {
+      const { store, events, resolveSet } = pendingSetStore();
+      const mw = createCacheMiddleware({ store });
+      const debug = vi.fn();
+      const ctx = makeCtx({ log: { info: () => {}, warn: () => {}, error: () => {}, debug } });
+      const exec = await startMiss(mw, ctx);
+
+      const finishing = finishMiss(mw, exec, ctx);
+      await vi.waitFor(() => expect(store.set).toHaveBeenCalledTimes(1));
+      await mw.invalidate({ keys: ['key:select 1'] });
+      resolveSet();
+      await finishing;
+
+      expect(events).toEqual(['delete:key:select 1', 'set:key:select 1', 'delete:key:select 1']);
+      expect(debug).toHaveBeenCalledWith({
+        event: 'middleware.cache.store-skipped',
+        middleware: 'cache',
+        key: 'key:select 1',
+      });
+    });
+
+    it('only logs the skip when the store has no delete', async () => {
+      const { store, resolveSet } = pendingSetStore();
+      const mw = createCacheMiddleware({ store: { get: store.get, set: store.set } });
+      const debug = vi.fn();
+      const ctx = makeCtx({ log: { info: () => {}, warn: () => {}, error: () => {}, debug } });
+      const exec = await startMiss(mw, ctx);
+
+      const finishing = finishMiss(mw, exec, ctx);
+      await vi.waitFor(() => expect(store.set).toHaveBeenCalledTimes(1));
+      await mw.invalidate(async () => {});
+      resolveSet();
+      await finishing;
+
+      expect(store.delete).not.toHaveBeenCalled();
+      expect(debug).toHaveBeenCalledWith({
+        event: 'middleware.cache.store-skipped',
+        middleware: 'cache',
+        key: 'key:select 1',
+      });
+    });
+  });
 });
