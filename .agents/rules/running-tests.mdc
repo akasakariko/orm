@@ -29,10 +29,6 @@ Each `:agent` run has a hard timeout (default 5 minutes, override with `AGENT_CM
 | `pnpm lint:deps:agent` | Dependency-layering check |
 | `pnpm fixtures:check:agent` | Regenerate fixtures and diff them |
 
-## Never run the full integration suite locally
-
-`pnpm test:integration` in full is too slow and flakes under load. Run only the files for your change (`pnpm --filter integration-tests test -- test/cross-package/<name>`) and let CI run the whole suite. Same for `pnpm test:packages`: run the changed package's own `pnpm test`.
-
 ## 2. Run one package's tests
 
 ```bash
@@ -72,8 +68,8 @@ tail -50 wip/test-packages.20260615-190441.32317.log
 
 ## Don't
 
-- **Don't run the full suite when you already know which file is failing.** Use the targeted commands in §3 — they run in seconds.
-- **Don't run the bare canonical commands (`pnpm test:packages`, etc.) for a full-suite run.** They dump the entire output into your context window. Use the `:agent` variant.
-- **Don't pipe a `:agent` command to `tail`/`grep`/`head`.** The point is that the output is already on disk — read the log path the `:agent` command printed.
+- **Don't run the full integration suite locally.** It is too slow and flakes under load: run only the files for your change (`pnpm --filter integration-tests test -- test/cross-package/<name>`) and let CI run the rest. Same for `pnpm test:packages`: run the changed package's own `pnpm test`. When you know the failing file, use §3.
+- **Don't run bare `pnpm test:packages` etc. for a full run.** They dump everything into your context; use the `:agent` variant.
+- **Don't pipe a `:agent` command to `tail`/`grep`/`head`.** Read the log path it printed.
 - **Don't re-run a suite to refine a grep.** Grep the file you already have.
 - **Don't pass `--force` to `turbo`.** The cache is correct by default. Only force when this same run edited `tsconfig.json` or a lockfile.
