@@ -1,22 +1,9 @@
-import postgresAdapter from '@internal/adapter-postgres/runtime';
-import postgresDriver from '@internal/driver-postgres/runtime';
-import pgvector from '@internal/extension-pgvector/runtime';
-import {
-  type ExecutionStackInstance,
-  instantiateExecutionStack,
-  type RuntimeDriverInstance,
-} from '@internal/framework-components/execution';
 import type {
   AfterQueryResult,
   CrossFamilyMiddleware,
   RuntimeMiddlewareContext,
 } from '@internal/framework-components/runtime';
-import {
-  cacheAnnotation,
-  createCacheMiddleware,
-  createInMemoryCacheStore,
-} from '@internal/middleware-cache';
-import { PostgresRuntimeImpl } from '@internal/postgres/runtime';
+import { cacheAnnotation, createCacheMiddleware } from '@internal/middleware-cache';
 import { sql } from '@internal/sql-builder/runtime';
 import {
   AndExpr,
@@ -25,27 +12,14 @@ import {
   LiteralExpr,
   type SelectAst,
 } from '@internal/sql-relational-core/ast';
-import type { ExecutionContext } from '@internal/sql-relational-core/query-lane-context';
-import {
-  createExecutionContext,
-  createSqlExecutionStack,
-  type Runtime,
-  type SqlMiddleware,
-  type SqlRuntimeAdapterInstance,
-  type SqlRuntimeDriverInstance,
-  type SqlRuntimeExtensionInstance,
-} from '@internal/sql-runtime';
-import postgresTarget, { PostgresContractSerializer } from '@internal/target-postgres/runtime';
-import { createDevDatabase, timeouts } from '@repo/test-utils';
-import { Client } from 'pg';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { contract } from '../sql-builder/fixtures/contract';
-import type { Contract } from '../sql-builder/fixtures/generated/contract';
-import { setupTestDatabase } from '../utils';
+import type { SqlMiddleware } from '@internal/sql-runtime';
+import { timeouts } from '@repo/test-utils';
+import { describe, expect, it } from 'vitest';
+import { useMiddlewareCacheDatabase } from './middleware-cache-database';
 
-/**
+/*
  * Integration tests for `@internal/middleware-cache` against real
- * Postgres. The tests assert four behaviours end-to-end against
+ * Postgres. The tests assert these behaviours end-to-end against
  * `createDevDatabase`:
  *
  * - Stop condition: a repeated annotated query is served from cache
@@ -56,20 +30,9 @@ import { setupTestDatabase } from '../utils';
  *   on `afterQuery` round-trips driver vs middleware fetches.
  * - Concurrency: two parallel calls of the same plan don't cross-talk
  *   through the per-exec WeakMap buffer.
- * - Invalidation: `invalidate` by key, or by a function that deletes
- *   entries whose attributes match, makes the next read see a write that
- *   happened after the rows were cached.
+ *
+ * Invalidation is covered in `middleware-cache-invalidation.test.ts`.
  */
-
-const sqlContract = new PostgresContractSerializer().deserializeContract(contract) as Contract;
-
-type TestStackInstance = ExecutionStackInstance<
-  'sql',
-  'postgres',
-  SqlRuntimeAdapterInstance<'postgres'>,
-  RuntimeDriverInstance<'sql', 'postgres'>,
-  SqlRuntimeExtensionInstance<'postgres'>
->;
 
 /**
  * A `beforeCompile` middleware that injects a predicate filtering out
@@ -78,15 +41,6 @@ type TestStackInstance = ExecutionStackInstance<
  * cache key reflects the rewritten SQL because the cache middleware
  * sees the post-lowering plan.
  */
-function hasTags(attributes: unknown): attributes is { readonly tags: readonly unknown[] } {
-  return (
-    typeof attributes === 'object' &&
-    attributes !== null &&
-    'tags' in attributes &&
-    Array.isArray(attributes.tags)
-  );
-}
-
 function activeUsersOnly(): SqlMiddleware {
   return {
     name: 'active-users-only',
@@ -107,122 +61,17 @@ function activeUsersOnly(): SqlMiddleware {
 describe('integration: middleware-cache against real Postgres', {
   timeout: timeouts.databaseOperation,
 }, () => {
-  let context: ExecutionContext<typeof sqlContract>;
-  let driver: SqlRuntimeDriverInstance<'postgres'>;
-  let stackInstance: TestStackInstance;
-  let driverQuerySpy: ReturnType<typeof vi.spyOn>;
-  let client: Client;
-  const closeFns: Array<() => Promise<void>> = [];
-
-  beforeAll(async () => {
-    const database = await createDevDatabase();
-    client = new Client({ connectionString: database.connectionString });
-    await client.connect();
-
-    await setupTestDatabase(client, sqlContract, async (c) => {
-      await c.query(`
-          CREATE TABLE users (
-            id int4 PRIMARY KEY,
-            name text NOT NULL,
-            email text NOT NULL,
-            invited_by_id int4
-          )
-        `);
-      await c.query('CREATE EXTENSION IF NOT EXISTS vector');
-      await c.query(`
-          CREATE TABLE posts (
-            id int4 PRIMARY KEY,
-            title text NOT NULL,
-            user_id int4 NOT NULL,
-            views int4 NOT NULL,
-            embedding vector(3)
-          )
-        `);
-      await c.query(`
-          CREATE TABLE comments (
-            id int4 PRIMARY KEY,
-            body text NOT NULL,
-            post_id int4 NOT NULL
-          )
-        `);
-      await c.query(`
-          CREATE TABLE profiles (
-            id int4 PRIMARY KEY,
-            user_id int4 NOT NULL,
-            bio text NOT NULL
-          )
-        `);
-      await c.query(`
-          CREATE TABLE articles (
-            id uuid PRIMARY KEY,
-            title text NOT NULL
-          )
-        `);
-
-      await c.query(`
-          INSERT INTO users (id, name, email, invited_by_id) VALUES
-            (1, 'Alice',   'alice@example.com',   NULL),
-            (2, 'Bob',     'bob@example.com',     1),
-            (3, 'Charlie', 'charlie@example.com', 1),
-            (4, 'Diana',   'diana@example.com',   2)
-        `);
-    });
-
-    const stack = createSqlExecutionStack({
-      target: postgresTarget,
-      adapter: postgresAdapter,
-      driver: {
-        ...postgresDriver,
-        create() {
-          return postgresDriver.create({ cursor: { disabled: true } });
-        },
-      },
-      extensions: [pgvector],
-    });
-
-    stackInstance = instantiateExecutionStack(stack) as TestStackInstance;
-    context = createExecutionContext({ contract: sqlContract, stack });
-    const resolvedDriver = stackInstance.driver;
-    if (!resolvedDriver) throw new Error('Driver missing');
-    driver = resolvedDriver as SqlRuntimeDriverInstance<'postgres'>;
-    await driver.connect({ kind: 'pgClient', client });
-
-    // Spy on the driver's query so we can count round-trips. The
-    // cache middleware short-circuits via `interceptQuery` upstream of
-    // `runDriver`, so a hit shows up here as zero invocations.
-    driverQuerySpy = vi.spyOn(driver, 'query');
-
-    closeFns.push(
-      () => driver.close(),
-      () => client.end(),
-      () => database.close(),
-    );
-  }, timeouts.spinUpPpgDev);
-
-  afterAll(async () => {
-    for (const fn of closeFns) {
-      try {
-        await fn();
-      } catch {
-        // ignore cleanup errors
-      }
-    }
-  });
-
-  function buildRuntime(middleware: SqlMiddleware[]): Runtime {
-    return new PostgresRuntimeImpl({
-      context,
-      adapter: stackInstance.adapter,
-      driver,
-      middleware,
-    });
-  }
+  const database = useMiddlewareCacheDatabase();
+  const { buildRuntime } = database;
 
   describe('stop condition', () => {
     it('serves a repeated annotated read from cache without hitting the driver', async () => {
       const cache = createCacheMiddleware({ maxEntries: 100 });
       const runtime = buildRuntime([cache]);
-      const db = sql({ context, rawCodecInferer: { inferCodec: () => 'pg/text' } });
+      const db = sql({
+        context: database.context,
+        rawCodecInferer: { inferCodec: () => 'pg/text' },
+      });
 
       const buildPlan = () =>
         db.public.users
@@ -230,16 +79,16 @@ describe('integration: middleware-cache against real Postgres', {
           .annotate(cacheAnnotation({ ttl: 60_000 }))
           .build();
 
-      driverQuerySpy.mockClear();
+      database.driverQuerySpy.mockClear();
 
       // First call — cache miss; driver invoked.
       const first = await runtime.query(buildPlan()).toArray();
-      const driverCallsAfterFirst = driverQuerySpy.mock.calls.length;
+      const driverCallsAfterFirst = database.driverQuerySpy.mock.calls.length;
       expect(driverCallsAfterFirst).toBeGreaterThan(0);
 
       // Second call — cache hit; driver not invoked again.
       const second = await runtime.query(buildPlan()).toArray();
-      expect(driverQuerySpy.mock.calls.length).toBe(driverCallsAfterFirst);
+      expect(database.driverQuerySpy.mock.calls.length).toBe(driverCallsAfterFirst);
 
       // Both calls produce equivalent decoded rows.
       expect(second).toEqual(first);
@@ -250,22 +99,28 @@ describe('integration: middleware-cache against real Postgres', {
     it('still hits the driver for an un-annotated query (cache is opt-in)', async () => {
       const cache = createCacheMiddleware({ maxEntries: 100 });
       const runtime = buildRuntime([cache]);
-      const db = sql({ context, rawCodecInferer: { inferCodec: () => 'pg/text' } });
+      const db = sql({
+        context: database.context,
+        rawCodecInferer: { inferCodec: () => 'pg/text' },
+      });
 
-      driverQuerySpy.mockClear();
+      database.driverQuerySpy.mockClear();
 
       await runtime.query(db.public.users.select('id').build()).toArray();
-      const callsAfterFirst = driverQuerySpy.mock.calls.length;
+      const callsAfterFirst = database.driverQuerySpy.mock.calls.length;
 
       await runtime.query(db.public.users.select('id').build()).toArray();
       // Second un-annotated call hits the driver again.
-      expect(driverQuerySpy.mock.calls.length).toBeGreaterThan(callsAfterFirst);
+      expect(database.driverQuerySpy.mock.calls.length).toBeGreaterThan(callsAfterFirst);
     });
 
     it('does not cache a query when its cacheAnnotation has skip: true', async () => {
       const cache = createCacheMiddleware({ maxEntries: 100 });
       const runtime = buildRuntime([cache]);
-      const db = sql({ context, rawCodecInferer: { inferCodec: () => 'pg/text' } });
+      const db = sql({
+        context: database.context,
+        rawCodecInferer: { inferCodec: () => 'pg/text' },
+      });
 
       const buildPlan = () =>
         db.public.users
@@ -273,14 +128,14 @@ describe('integration: middleware-cache against real Postgres', {
           .annotate(cacheAnnotation({ ttl: 60_000, skip: true }))
           .build();
 
-      driverQuerySpy.mockClear();
+      database.driverQuerySpy.mockClear();
 
       await runtime.query(buildPlan()).toArray();
-      const callsAfterFirst = driverQuerySpy.mock.calls.length;
+      const callsAfterFirst = database.driverQuerySpy.mock.calls.length;
 
       await runtime.query(buildPlan()).toArray();
       // Both calls hit the driver — skip: true bypasses the cache.
-      expect(driverQuerySpy.mock.calls.length).toBeGreaterThan(callsAfterFirst);
+      expect(database.driverQuerySpy.mock.calls.length).toBeGreaterThan(callsAfterFirst);
     });
   });
 
@@ -292,7 +147,10 @@ describe('integration: middleware-cache against real Postgres', {
       const rewriter = activeUsersOnly();
       const cache = createCacheMiddleware({ maxEntries: 100 });
       const runtime = buildRuntime([rewriter, cache]);
-      const db = sql({ context, rawCodecInferer: { inferCodec: () => 'pg/text' } });
+      const db = sql({
+        context: database.context,
+        rawCodecInferer: { inferCodec: () => 'pg/text' },
+      });
 
       const buildPlan = () =>
         db.public.users
@@ -300,11 +158,11 @@ describe('integration: middleware-cache against real Postgres', {
           .annotate(cacheAnnotation({ ttl: 60_000 }))
           .build();
 
-      driverQuerySpy.mockClear();
+      database.driverQuerySpy.mockClear();
 
       // First call: rewriter prepends `id >= 2`, driver executes.
       const first = await runtime.query(buildPlan()).toArray();
-      const callsAfterFirst = driverQuerySpy.mock.calls.length;
+      const callsAfterFirst = database.driverQuerySpy.mock.calls.length;
       expect(callsAfterFirst).toBeGreaterThan(0);
 
       // The rewriter's `id >= 2` predicate filtered out user 1
@@ -314,7 +172,7 @@ describe('integration: middleware-cache against real Postgres', {
       // Second call: cache hit, driver skipped, but the consumer
       // still sees the rewritten (filtered) result set.
       const second = await runtime.query(buildPlan()).toArray();
-      expect(driverQuerySpy.mock.calls.length).toBe(callsAfterFirst);
+      expect(database.driverQuerySpy.mock.calls.length).toBe(callsAfterFirst);
       expect(second).toEqual(first);
       expect(second.map((r) => r['id']).sort()).toEqual([2, 3, 4]);
     });
@@ -331,25 +189,28 @@ describe('integration: middleware-cache against real Postgres', {
       const cacheWithRewrite = createCacheMiddleware({ store: sharedStore });
       const runtimeWithRewrite = buildRuntime([activeUsersOnly(), cacheWithRewrite]);
 
-      const db = sql({ context, rawCodecInferer: { inferCodec: () => 'pg/text' } });
+      const db = sql({
+        context: database.context,
+        rawCodecInferer: { inferCodec: () => 'pg/text' },
+      });
       const buildPlan = () =>
         db.public.users
           .select('id')
           .annotate(cacheAnnotation({ ttl: 60_000 }))
           .build();
 
-      driverQuerySpy.mockClear();
+      database.driverQuerySpy.mockClear();
 
       // First runtime (no rewriter) populates the cache under one key.
       const noRewrite = await runtimeNoRewrite.query(buildPlan()).toArray();
-      const callsAfterNoRewrite = driverQuerySpy.mock.calls.length;
+      const callsAfterNoRewrite = database.driverQuerySpy.mock.calls.length;
       expect(noRewrite.map((r) => r['id']).sort()).toEqual([1, 2, 3, 4]);
 
       // Second runtime (with rewriter) sees a *different* lowered SQL
       // and therefore a different contentHash — it must miss and
       // hit the driver again.
       const withRewrite = await runtimeWithRewrite.query(buildPlan()).toArray();
-      expect(driverQuerySpy.mock.calls.length).toBeGreaterThan(callsAfterNoRewrite);
+      expect(database.driverQuerySpy.mock.calls.length).toBeGreaterThan(callsAfterNoRewrite);
       expect(withRewrite.map((r) => r['id']).sort()).toEqual([2, 3, 4]);
     });
   });
@@ -399,7 +260,10 @@ describe('integration: middleware-cache against real Postgres', {
       // both paths and observes the `source` field, which is the
       // canonical hit-vs-miss signal.
       const runtime = buildRuntime([cache, observer]);
-      const db = sql({ context, rawCodecInferer: { inferCodec: () => 'pg/text' } });
+      const db = sql({
+        context: database.context,
+        rawCodecInferer: { inferCodec: () => 'pg/text' },
+      });
 
       const buildPlan = () =>
         db.public.users
@@ -407,7 +271,7 @@ describe('integration: middleware-cache against real Postgres', {
           .annotate(cacheAnnotation({ ttl: 60_000 }))
           .build();
 
-      driverQuerySpy.mockClear();
+      database.driverQuerySpy.mockClear();
       events.length = 0;
 
       // Miss path.
@@ -428,7 +292,7 @@ describe('integration: middleware-cache against real Postgres', {
       expect(missAfter!.rowCount).toBe(4);
 
       events.length = 0;
-      driverQuerySpy.mockClear();
+      database.driverQuerySpy.mockClear();
 
       // Hit path.
       await runtime.query(buildPlan()).toArray();
@@ -442,7 +306,7 @@ describe('integration: middleware-cache against real Postgres', {
       expect(hitAfter).toBeDefined();
       expect(hitAfter!.source).toBe('middleware');
       expect(hitAfter!.rowCount).toBe(4);
-      expect(driverQuerySpy.mock.calls.length).toBe(0);
+      expect(database.driverQuerySpy.mock.calls.length).toBe(0);
     });
 
     it('observer rowCount and latencyMs populate correctly on both paths', async () => {
@@ -450,7 +314,10 @@ describe('integration: middleware-cache against real Postgres', {
       const observer = createObserver(events);
       const cache = createCacheMiddleware({ maxEntries: 100 });
       const runtime = buildRuntime([cache, observer]);
-      const db = sql({ context, rawCodecInferer: { inferCodec: () => 'pg/text' } });
+      const db = sql({
+        context: database.context,
+        rawCodecInferer: { inferCodec: () => 'pg/text' },
+      });
 
       const buildPlan = () =>
         db.public.users
@@ -476,7 +343,10 @@ describe('integration: middleware-cache against real Postgres', {
     it('two parallel queries of the same plan do not cross-talk via the per-exec buffer', async () => {
       const cache = createCacheMiddleware({ maxEntries: 100 });
       const runtime = buildRuntime([cache]);
-      const db = sql({ context, rawCodecInferer: { inferCodec: () => 'pg/text' } });
+      const db = sql({
+        context: database.context,
+        rawCodecInferer: { inferCodec: () => 'pg/text' },
+      });
 
       const buildPlan = () =>
         db.public.users
@@ -484,7 +354,7 @@ describe('integration: middleware-cache against real Postgres', {
           .annotate(cacheAnnotation({ ttl: 60_000, key: 'concurrency-test' }))
           .build();
 
-      driverQuerySpy.mockClear();
+      database.driverQuerySpy.mockClear();
 
       // Two parallel executions of the same logical plan. Each
       // produces its own frozen `exec` object inside the runtime
@@ -509,9 +379,12 @@ describe('integration: middleware-cache against real Postgres', {
     it('parallel queries of two different plans land in distinct cache slots', async () => {
       const cache = createCacheMiddleware({ maxEntries: 100 });
       const runtime = buildRuntime([cache]);
-      const db = sql({ context, rawCodecInferer: { inferCodec: () => 'pg/text' } });
+      const db = sql({
+        context: database.context,
+        rawCodecInferer: { inferCodec: () => 'pg/text' },
+      });
 
-      driverQuerySpy.mockClear();
+      database.driverQuerySpy.mockClear();
 
       const planA = db.public.users
         .select('id')
@@ -532,7 +405,7 @@ describe('integration: middleware-cache against real Postgres', {
 
       // The next call to each lands on the cache (driver count
       // unchanged after these reads).
-      const callsAfterParallel = driverQuerySpy.mock.calls.length;
+      const callsAfterParallel = database.driverQuerySpy.mock.calls.length;
       await runtime
         .query(
           db.public.users
@@ -549,68 +422,7 @@ describe('integration: middleware-cache against real Postgres', {
             .build(),
         )
         .toArray();
-      expect(driverQuerySpy.mock.calls.length).toBe(callsAfterParallel);
-    });
-  });
-
-  describe('invalidation', () => {
-    function readUserOneName(runtime: Runtime) {
-      const db = sql({ context, rawCodecInferer: { inferCodec: () => 'pg/text' } });
-      return runtime
-        .query(
-          db.public.users
-            .select('name')
-            .where((f, fns) => fns.eq(f.id, 1))
-            .annotate(
-              cacheAnnotation({ ttl: 60_000, key: 'user-1', attributes: { tags: ['users'] } }),
-            )
-            .build(),
-        )
-        .toArray();
-    }
-
-    it.each([
-      {
-        by: 'key',
-        setUp: () => {
-          const cache = createCacheMiddleware({ maxEntries: 100 });
-          return { cache, invalidate: () => cache.invalidate({ keys: ['user-1'] }) };
-        },
-      },
-      {
-        by: 'attributes',
-        setUp: () => {
-          const store = createInMemoryCacheStore({ maxEntries: 100 });
-          const cache = createCacheMiddleware({ store });
-          const invalidate = () =>
-            cache.invalidate(() =>
-              store.deleteWhere(
-                (e) => hasTags(e.attributes) && e.attributes.tags.includes('users'),
-              ),
-            );
-          return { cache, invalidate };
-        },
-      },
-    ])('a read after invalidating by $by sees the committed write', async ({ setUp }) => {
-      const { cache, invalidate } = setUp();
-      const runtime = buildRuntime([cache]);
-
-      try {
-        expect(await readUserOneName(runtime)).toEqual([{ name: 'Alice' }]);
-
-        await client.query(`UPDATE users SET name = 'Alicia' WHERE id = 1`);
-        driverQuerySpy.mockClear();
-
-        expect(await readUserOneName(runtime)).toEqual([{ name: 'Alice' }]);
-        expect(driverQuerySpy).not.toHaveBeenCalled();
-
-        await invalidate();
-
-        expect(await readUserOneName(runtime)).toEqual([{ name: 'Alicia' }]);
-        expect(driverQuerySpy).toHaveBeenCalledTimes(1);
-      } finally {
-        await client.query(`UPDATE users SET name = 'Alice' WHERE id = 1`);
-      }
+      expect(database.driverQuerySpy.mock.calls.length).toBe(callsAfterParallel);
     });
   });
 });
