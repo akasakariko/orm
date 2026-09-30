@@ -428,10 +428,13 @@ describe('a closed connection', () => {
     expect(() => db.runtime()).toThrow(expect.objectContaining(closedConnectionError));
   });
 
-  it('an ORM read fails with DRIVER.NOT_CONNECTED', async () => {
+  it('an ORM read is refused by the closed runtime with DRIVER.NOT_CONNECTED', async () => {
     const db = await closedConnection();
 
-    await expect(db.orm.public.User.first()).rejects.toMatchObject(closedConnectionError);
+    await expect(db.orm.public.User.first()).rejects.toMatchObject({
+      code: 'DRIVER.NOT_CONNECTED',
+      message: 'Runtime is closed',
+    });
   });
 
   it('db.transaction() fails with DRIVER.NOT_CONNECTED', async () => {

@@ -147,20 +147,22 @@ export default function postgresServerless<TContract extends Contract<SqlStorage
     rawCodecInferer,
   );
 
-  const buildRuntimeBoundMembers = (getRuntime: () => Runtime) =>
+  const buildRuntimeBoundMembers = (getRuntime: () => Runtime, getOrmRuntime: () => Runtime) =>
     buildPostgresRuntimeBoundMembers<TContract>({
       context,
       rawCodecInferer,
       enums,
       nativeEnums,
       getRuntime,
+      getOrmRuntime,
     });
 
   // The ORM checks the execution context when it is built. Building the members once here makes
   // a contract or extension the ORM rejects fail at the factory call, as it does for postgres().
-  buildRuntimeBoundMembers(() => {
+  const noRuntime = (): never => {
     throw new InternalError('The serverless client has no runtime');
-  });
+  };
+  buildRuntimeBoundMembers(noRuntime, noRuntime);
 
   const createConnection = (runtime: Runtime): PostgresServerlessConnection<TContract> => {
     let closing: Promise<void> | undefined;
@@ -168,12 +170,15 @@ export default function postgresServerless<TContract extends Contract<SqlStorage
       closing ??= runtime.close();
       return closing;
     };
-    const runtimeBoundMembers = buildRuntimeBoundMembers(() => {
-      if (closing !== undefined) {
-        throw closedConnectionError();
-      }
-      return runtime;
-    });
+    const runtimeBoundMembers = buildRuntimeBoundMembers(
+      () => {
+        if (closing !== undefined) {
+          throw closedConnectionError();
+        }
+        return runtime;
+      },
+      () => runtime,
+    );
 
     return {
       sql,

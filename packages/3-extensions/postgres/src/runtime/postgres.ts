@@ -157,7 +157,6 @@ export default function postgres<TContract extends Contract<SqlStorage>>(
   let driverConnected = false;
   let connectPromise: Promise<void> | undefined;
   let backgroundConnectError: unknown;
-  let closed = false;
   let closePromise: Promise<void> | undefined;
   // True once the driver holds a pool this client created. close() then closes the runtime, which
   // ends that pool; a pool or client the caller passed in stays open, and so does the runtime.
@@ -188,7 +187,7 @@ export default function postgres<TContract extends Contract<SqlStorage>>(
   };
 
   const getRuntime = (): Runtime => {
-    if (closed) {
+    if (closePromise !== undefined) {
       throw postgresError('DRIVER.NOT_CONNECTED', 'Postgres client is closed', {
         why: 'close() was called on this client.',
         fix: 'Create a new postgres(...) client.',
@@ -228,12 +227,26 @@ export default function postgres<TContract extends Contract<SqlStorage>>(
     return runtime;
   };
 
+  // Once connected, the runtime's close starts in the same call as close(), so the runtime's tick rule is measured from the caller's close().
+  const closeOwnedRuntime = async (): Promise<void> => {
+    if (!driverConnected) {
+      await connectPromise?.catch(() => undefined);
+    }
+    if (ownsPool) {
+      await runtimeInstance?.close();
+    }
+  };
+
   const runtimeBoundMembers = buildPostgresRuntimeBoundMembers<TContract>({
     context,
     rawCodecInferer: stack.adapter.rawCodecInferer,
     enums,
     nativeEnums,
     getRuntime,
+    getOrmRuntime: () =>
+      closePromise !== undefined && ownsPool && runtimeInstance !== undefined
+        ? runtimeInstance
+        : getRuntime(),
   });
 
   return {
@@ -247,7 +260,7 @@ export default function postgres<TContract extends Contract<SqlStorage>>(
     stack,
 
     async connect(bindingInput) {
-      if (closed) {
+      if (closePromise !== undefined) {
         throw postgresError('DRIVER.NOT_CONNECTED', 'Postgres client is closed', {
           why: 'close() was called on this client.',
           fix: 'Create a new postgres(...) client.',
@@ -284,14 +297,7 @@ export default function postgres<TContract extends Contract<SqlStorage>>(
     },
 
     close(): Promise<void> {
-      if (closePromise) return closePromise;
-      closed = true;
-      closePromise = (async () => {
-        await connectPromise?.catch(() => undefined);
-        if (ownsPool) {
-          await runtimeInstance?.close();
-        }
-      })();
+      closePromise ??= closeOwnedRuntime();
       return closePromise;
     },
 

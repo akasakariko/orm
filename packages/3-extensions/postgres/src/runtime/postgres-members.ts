@@ -61,23 +61,25 @@ export interface PostgresRuntimeBoundMembersOptions<TContract extends Contract<S
   readonly enums: NamespacedEnums<TContract>;
   readonly nativeEnums: NamespacedNativeEnums<TContract>;
   readonly getRuntime: () => Runtime;
+  // The runtime the ORM's own queries run on. After close() it may return the closed runtime, so an ORM write whose inner queries start in the tick of the close is admitted by the runtime's rule instead of failing on the owner's closed check.
+  readonly getOrmRuntime: () => Runtime;
 }
 
 export function buildPostgresRuntimeBoundMembers<TContract extends Contract<SqlStorage>>(
   options: PostgresRuntimeBoundMembersOptions<TContract>,
 ): PostgresRuntimeBoundMembers<TContract> {
-  const { context, rawCodecInferer, enums, nativeEnums, getRuntime } = options;
+  const { context, rawCodecInferer, enums, nativeEnums, getRuntime, getOrmRuntime } = options;
 
   const orm: OrmClient<TContract> = ormBuilder({
     runtime: {
       query(plan) {
-        return getRuntime().query(plan);
+        return getOrmRuntime().query(plan);
       },
       execute(plan) {
-        return getRuntime().execute(plan);
+        return getOrmRuntime().execute(plan);
       },
       connection() {
-        return getRuntime().connection();
+        return getOrmRuntime().connection();
       },
     },
     context,

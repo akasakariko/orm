@@ -236,8 +236,12 @@ describe('a promise pending when close() is called on a client that owns its poo
       async () => {
         checkedOut += 1;
         return {
-          query: vi.fn(async () => {
+          query: vi.fn(async (arg: unknown) => {
             calls.push('query');
+            const text = typeof arg === 'string' ? arg : String((arg as { text: unknown }).text);
+            const ada = { id: 1, email: 'ada@example.com', name: 'Ada', invited_by_id: null };
+            if (text.startsWith('INSERT INTO "public"."users"')) return { rows: [ada] };
+            if (text.includes('json_agg')) return { rows: [{ ...ada, posts: [] }] };
             return { rows: [], rowCount: 0 };
           }),
           release: vi.fn(() => {
@@ -322,5 +326,49 @@ describe('a promise pending when close() is called on a client that owns its poo
 
     expect(outcome).toEqual({ resolved: { affectedRows: 0 } });
     expect(calls.indexOf('query')).toBeLessThan(calls.indexOf('end'));
+  });
+
+  it('an ORM create() whose insert starts in the tick of the close is admitted and resolves', async () => {
+    const db = await connectedClient();
+
+    const outcome = await closeWhilePending(
+      db,
+      db.orm.public.User.create({ email: 'ada@example.com', name: 'Ada' }),
+    );
+
+    expect(outcome).toEqual({
+      resolved: { id: 1, email: 'ada@example.com', name: 'Ada', invitedById: null },
+    });
+  });
+
+  it("an ORM include('posts').create() started in the tick of the close is admitted and resolves", async () => {
+    const db = await connectedClient();
+
+    const outcome = await closeWhilePending(
+      db,
+      db.orm.public.User.include('posts').create({ email: 'ada@example.com', name: 'Ada' }),
+    );
+
+    expect(outcome).toEqual({
+      resolved: { id: 1, email: 'ada@example.com', name: 'Ada', invitedById: null, posts: [] },
+    });
+  });
+
+  it('close() closes the runtime in the same call, so a lazy read awaited a tick later is refused, as on a connection', async () => {
+    const db = await connectedClient();
+    const runtimeClose = vi.spyOn(db.runtime(), 'close');
+    const pending = db.orm.public.User.all();
+
+    const closing = db.close();
+    expect(runtimeClose).toHaveBeenCalledOnce();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const outcome = await pending.then(
+      (value) => ({ resolved: value }),
+      (reason: unknown) => ({ rejected: reason }),
+    );
+    await closing;
+
+    expect(outcome).toEqual({ rejected: expect.objectContaining(runtimeClosedError) });
+    expect.soft(unhandledRejections).toEqual([]);
   });
 });

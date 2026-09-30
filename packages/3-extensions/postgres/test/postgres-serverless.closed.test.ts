@@ -5,6 +5,8 @@ import fixtureContractJson from './fixtures/generated/contract.json' with { type
 
 const recorded = vi.hoisted(() => ({
   calls: [] as string[],
+  statements: [] as string[],
+  answerOnATimer: false,
   failNextQuery: undefined as Error | undefined,
 }));
 
@@ -15,12 +17,26 @@ vi.mock('pg', () => {
   class Client {
     on = vi.fn().mockReturnThis();
     connect = vi.fn().mockResolvedValue(undefined);
-    query = vi.fn(async () => {
+    query = vi.fn(async (arg: unknown) => {
       recorded.calls.push('query');
       const failure = recorded.failNextQuery;
       if (failure !== undefined) {
         recorded.failNextQuery = undefined;
         throw failure;
+      }
+      const text = typeof arg === 'string' ? arg : String((arg as { text: unknown }).text);
+      recorded.statements.push(text);
+      if (recorded.answerOnATimer) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      if (text.startsWith('INSERT INTO "public"."posts"')) {
+        return { rows: [{ id: 1, title: 'Hello', user_id: 1, views: 0 }], rowCount: 1 };
+      }
+      if (text.startsWith('INSERT INTO "public"."users"') || text.includes('json_agg')) {
+        return {
+          rows: [{ id: 1, email: 'ada@example.com', name: 'Ada', invited_by_id: null, posts: [] }],
+          rowCount: 1,
+        };
       }
       return { rows: [], rowCount: 0 };
     });
@@ -55,6 +71,8 @@ const recordUnhandledRejection = (reason: unknown): void => {
 
 beforeEach(() => {
   recorded.calls.length = 0;
+  recorded.statements.length = 0;
+  recorded.answerOnATimer = false;
   recorded.failNextQuery = undefined;
   unhandledRejections.length = 0;
   process.on('unhandledRejection', recordUnhandledRejection);
@@ -193,6 +211,72 @@ describe('an unawaited started query that fails for its own reason', () => {
     });
     expect(outcome).toEqual({ rejected: failed });
     expect(unhandledRejections).toEqual([failed]);
+    expectOneEndAndNoQueryAfterIt();
+  });
+});
+
+const ada = { email: 'ada@example.com', name: 'Ada' };
+const adaRow = { id: 1, email: 'ada@example.com', name: 'Ada', invitedById: null };
+
+async function countUsers(db: Connection): Promise<number> {
+  return (await db.orm.public.User.all()).length;
+}
+
+const sameTickReturns: ReadonlyArray<[...UnawaitedReturn, unknown]> = [
+  ['an async helper that awaits a lazy read', (db) => countUsers(db), 0],
+  [
+    'Promise.all over two lazy reads',
+    (db) => Promise.all([db.orm.public.User.all(), db.orm.public.Post.all()]),
+    [[], []],
+  ],
+  ['db.orm.public.User.create(data)', (db) => db.orm.public.User.create(ada), adaRow],
+  [
+    "db.orm.public.User.include('posts').create(data)",
+    (db) => db.orm.public.User.include('posts').create(ada),
+    { ...adaRow, posts: [] },
+  ],
+];
+
+describe('a promise returned without await whose first query starts in the tick of the close', () => {
+  const serverless = postgresServerless<Contract>({ contractJson: fixtureContract });
+
+  async function returnWithoutAwait(run: (db: Connection) => PromiseLike<unknown>) {
+    await using db = await serverless.connect({ url });
+    return run(db);
+  }
+
+  it.each(sameTickReturns)(
+    '%s is admitted, so the close waits for it and it resolves',
+    async (_name, run, value) => {
+      const outcome = await settled(returnWithoutAwait(run));
+
+      expect.soft(unhandledRejections).toEqual([]);
+      expect.soft(outcome).toEqual({ resolved: value });
+      expectOneEndAndNoQueryAfterIt();
+    },
+  );
+});
+
+describe('a nested create returned without await', () => {
+  // The database answers on a later tick, as a real socket does, so the reload after the commit starts after refusal has begun.
+  it('commits its rows, then its reload starts a tick later and is refused as an ordinary unawaited failure', async () => {
+    const serverless = postgresServerless<Contract>({ contractJson: fixtureContract });
+
+    async function returnWithoutAwait() {
+      await using db = await serverless.connect({ url });
+      await db.orm.public.User.first();
+      recorded.answerOnATimer = true;
+      return db.orm.public.User.create({
+        ...ada,
+        posts: (post) => post.create([{ id: 1, title: 'Hello', views: 0 }]),
+      });
+    }
+
+    const outcome = await settled(returnWithoutAwait());
+
+    expect(outcome).toEqual({ rejected: expect.objectContaining(runtimeClosedError) });
+    expect(unhandledRejections).toEqual([expect.objectContaining(runtimeClosedError)]);
+    expect(recorded.statements).toContain('COMMIT');
     expectOneEndAndNoQueryAfterIt();
   });
 });
