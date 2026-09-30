@@ -1,6 +1,6 @@
 # Slice spec: a query run after its connection or client is closed fails once, clearly, and never as an unhandled rejection
 
-Orphan slice (Linear TML-2419). One pull request. Branch `tml-2419-closed-runtime-errors`. The root-cause research is in [root-cause-findings.md](root-cause-findings.md); the review of the first implementation is in [reviews/](reviews/). This spec supersedes the design those reviews examined.
+Orphan slice (Linear TML-2419). One pull request. Branch `tml-2419-closed-runtime-errors`. The root-cause research is in [root-cause-findings.md](root-cause-findings.md); the review of the first implementation is in [reviews/first-implementation/](reviews/first-implementation/). This spec supersedes the design those reviews examined.
 
 ## At a glance
 
@@ -55,6 +55,6 @@ Out: detecting a query through `db` inside its own transaction (TML-3344); `tran
 
 ## Done when
 
-- Each row above and each finding in [reviews/code-review.md](reviews/code-review.md) and [reviews/system-design-review.md](reviews/system-design-review.md) has a test that fails before the fix, or a written reason why it is out of scope. The serverless test run fails on any unhandled rejection.
+- Each row above and each finding in [reviews/first-implementation/code-review.md](reviews/first-implementation/code-review.md) and [reviews/first-implementation/system-design-review.md](reviews/first-implementation/system-design-review.md) has a test that fails before the fix, or a written reason why it is out of scope. The serverless test run fails on any unhandled rejection.
 - Measured against Docker Postgres in Node: the unawaited `all()` and `runtime().query()` reject once with the new error; the unawaited `first()`, `runtime().execute()` and `transaction()` resolve; no unhandled rejection; the process keeps running.
 - `/drive-code-review` (no walkthrough) run again on the final tree and its findings fixed; manual QA done.
