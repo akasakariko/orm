@@ -5,6 +5,13 @@ function entry(rows: ReadonlyArray<Record<string, unknown>>, storedAt = 0): Cach
   return { rows, storedAt };
 }
 
+function tagged(
+  rows: ReadonlyArray<Record<string, unknown>>,
+  tags: readonly string[],
+): CachedEntry {
+  return { rows, storedAt: 0, tags };
+}
+
 describe('createInMemoryCacheStore', () => {
   describe('basic get/set', () => {
     it('returns undefined for a missing key', async () => {
@@ -222,6 +229,146 @@ describe('createInMemoryCacheStore', () => {
       const recovered = await store.get('k');
       expect(recovered).toEqual(original);
       expect(recovered?.storedAt).toBe(42);
+    });
+  });
+
+  describe('delete', () => {
+    it('removes an entry', async () => {
+      const store = createInMemoryCacheStore({ maxEntries: 10 });
+      await store.set('a', entry([{ v: 'A' }]), 60_000);
+      await store.set('b', entry([{ v: 'B' }]), 60_000);
+
+      await store.delete('a');
+
+      expect(await store.get('a')).toBeUndefined();
+      expect((await store.get('b'))?.rows).toEqual([{ v: 'B' }]);
+    });
+
+    it('does nothing for a missing key', async () => {
+      const store = createInMemoryCacheStore({ maxEntries: 10 });
+      await store.set('a', entry([{ v: 'A' }]), 60_000);
+
+      await store.delete('absent');
+
+      expect((await store.get('a'))?.rows).toEqual([{ v: 'A' }]);
+    });
+  });
+
+  describe('tags', () => {
+    it('stores an entry without tags with no tags property', async () => {
+      const store = createInMemoryCacheStore({ maxEntries: 10 });
+      await store.set('k', entry([{ v: 1 }]), 60_000);
+
+      const got = await store.get('k');
+
+      expect(got).toBeDefined();
+      expect(got).not.toHaveProperty('tags');
+    });
+
+    it('round-trips the tags of an entry', async () => {
+      const store = createInMemoryCacheStore({ maxEntries: 10 });
+      await store.set('k', tagged([{ v: 1 }], ['users']), 60_000);
+
+      expect(await store.get('k')).toEqual({ rows: [{ v: 1 }], storedAt: 0, tags: ['users'] });
+    });
+  });
+
+  describe('deleteByTag', () => {
+    it('removes every entry carrying the tag and leaves the others', async () => {
+      const store = createInMemoryCacheStore({ maxEntries: 10 });
+      await store.set('u1', tagged([{ v: 'u1' }], ['users']), 60_000);
+      await store.set('u2', tagged([{ v: 'u2' }], ['users', 'admins']), 60_000);
+      await store.set('p1', tagged([{ v: 'p1' }], ['posts']), 60_000);
+      await store.set('plain', entry([{ v: 'plain' }]), 60_000);
+
+      await store.deleteByTag(['users']);
+
+      expect(await store.get('u1')).toBeUndefined();
+      expect(await store.get('u2')).toBeUndefined();
+      expect((await store.get('p1'))?.rows).toEqual([{ v: 'p1' }]);
+      expect((await store.get('plain'))?.rows).toEqual([{ v: 'plain' }]);
+    });
+
+    it('removes entries carrying any of several tags', async () => {
+      const store = createInMemoryCacheStore({ maxEntries: 10 });
+      await store.set('u1', tagged([{ v: 'u1' }], ['users']), 60_000);
+      await store.set('p1', tagged([{ v: 'p1' }], ['posts']), 60_000);
+      await store.set('c1', tagged([{ v: 'c1' }], ['comments']), 60_000);
+
+      await store.deleteByTag(['users', 'posts']);
+
+      expect(await store.get('u1')).toBeUndefined();
+      expect(await store.get('p1')).toBeUndefined();
+      expect((await store.get('c1'))?.rows).toEqual([{ v: 'c1' }]);
+    });
+
+    it('does nothing for a tag no entry carries', async () => {
+      const store = createInMemoryCacheStore({ maxEntries: 10 });
+      await store.set('u1', tagged([{ v: 'u1' }], ['users']), 60_000);
+
+      await store.deleteByTag(['unknown']);
+
+      expect((await store.get('u1'))?.rows).toEqual([{ v: 'u1' }]);
+    });
+  });
+
+  describe('tag index cleanup', () => {
+    it('forgets the tags of a deleted key', async () => {
+      const store = createInMemoryCacheStore({ maxEntries: 10 });
+      await store.set('k', tagged([{ v: 'old' }], ['old-tag']), 60_000);
+      await store.delete('k');
+      await store.set('k', entry([{ v: 'new' }]), 60_000);
+
+      await store.deleteByTag(['old-tag']);
+
+      expect((await store.get('k'))?.rows).toEqual([{ v: 'new' }]);
+    });
+
+    it('forgets the tags of a key removed by deleteByTag', async () => {
+      const store = createInMemoryCacheStore({ maxEntries: 10 });
+      await store.set('k', tagged([{ v: 'old' }], ['a', 'b']), 60_000);
+      await store.deleteByTag(['a']);
+      await store.set('k', entry([{ v: 'new' }]), 60_000);
+
+      await store.deleteByTag(['b']);
+
+      expect((await store.get('k'))?.rows).toEqual([{ v: 'new' }]);
+    });
+
+    it('forgets the tags of an expired entry dropped by get', async () => {
+      let now = 0;
+      const store = createInMemoryCacheStore({ maxEntries: 10, clock: () => now });
+      await store.set('k', tagged([{ v: 'old' }], ['users']), 1_000);
+      now = 2_000;
+      expect(await store.get('k')).toBeUndefined();
+      await store.set('k', entry([{ v: 'new' }]), 1_000);
+
+      await store.deleteByTag(['users']);
+
+      expect((await store.get('k'))?.rows).toEqual([{ v: 'new' }]);
+    });
+
+    it('forgets the tags of an entry evicted by LRU', async () => {
+      const store = createInMemoryCacheStore({ maxEntries: 1 });
+      await store.set('k', tagged([{ v: 'old' }], ['users']), 60_000);
+      await store.set('other', entry([{ v: 'other' }]), 60_000);
+      await store.set('k', entry([{ v: 'new' }]), 60_000);
+
+      await store.deleteByTag(['users']);
+
+      expect((await store.get('k'))?.rows).toEqual([{ v: 'new' }]);
+    });
+
+    it('forgets the old tags when set overwrites a key', async () => {
+      const store = createInMemoryCacheStore({ maxEntries: 10 });
+      await store.set('k', tagged([{ v: 'old' }], ['old-tag']), 60_000);
+      await store.set('k', tagged([{ v: 'new' }], ['new-tag']), 60_000);
+
+      await store.deleteByTag(['old-tag']);
+      expect((await store.get('k'))?.rows).toEqual([{ v: 'new' }]);
+
+      await store.deleteByTag(['new-tag']);
+      expect(await store.get('k')).toBeUndefined();
     });
   });
 });

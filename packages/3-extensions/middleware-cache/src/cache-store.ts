@@ -11,10 +11,13 @@
  *   telemetry) and is **not** used by the in-memory store itself for
  *   expiry — TTL is driven by the store's own clock plus the `ttlMs`
  *   passed to `set`. Custom stores may use it differently.
+ * - `tags` label the entry so `deleteByTag` can remove it. An entry
+ *   stored without tags has no `tags` property.
  */
 export interface CachedEntry {
   readonly rows: readonly Record<string, unknown>[];
   readonly storedAt: number;
+  readonly tags?: readonly string[];
 }
 
 /**
@@ -35,6 +38,12 @@ export interface CachedEntry {
  *   room (LRU, LFU, etc.) and may treat the operation as fire-and-
  *   forget at scale; the cache middleware does not rely on `set`
  *   completing before subsequent `get`s.
+ * - `delete` (optional) removes the entry under the key, if any.
+ * - `deleteByTag` (optional) removes every entry carrying at least one
+ *   of the given tags.
+ *
+ * Stores that omit `delete` or `deleteByTag` cannot be invalidated by
+ * key or by tag respectively.
  *
  * Both methods are async to leave the door open for I/O-backed stores
  * (Redis, S3, etc.). The default in-memory store completes
@@ -44,6 +53,8 @@ export interface CachedEntry {
 export interface CacheStore {
   get(key: string): Promise<CachedEntry | undefined>;
   set(key: string, entry: CachedEntry, ttlMs: number): Promise<void>;
+  delete?(key: string): Promise<void>;
+  deleteByTag?(tags: readonly string[]): Promise<void>;
 }
 
 /**
@@ -85,14 +96,47 @@ interface StoredRecord {
  * candidate; the last key is the most recently used. Bumping recency is
  * a delete-then-set on the underlying map.
  *
+ * Tags are indexed in a separate tag-to-keys map. A key leaves the
+ * index whenever its entry leaves the store (delete, deleteByTag,
+ * expiry, eviction, overwrite), so a tag never reaches a later entry
+ * stored under the same key. The index does not count toward
+ * `maxEntries`.
+ *
  * The default store is **not** coherent across processes or replicas —
  * each process holds its own Map. Users who need a shared cache supply
  * their own `CacheStore` (Redis, Memcached, etc.).
  */
-export function createInMemoryCacheStore(options: InMemoryCacheStoreOptions): CacheStore {
+export function createInMemoryCacheStore(options: InMemoryCacheStoreOptions): Required<CacheStore> {
   const maxEntries = options.maxEntries;
   const clock = options.clock ?? Date.now;
   const map = new Map<string, StoredRecord>();
+  const keysByTag = new Map<string, Set<string>>();
+
+  function indexTags(key: string, tags: readonly string[]): void {
+    for (const tag of tags) {
+      const keys = keysByTag.get(tag);
+      if (keys === undefined) {
+        keysByTag.set(tag, new Set([key]));
+      } else {
+        keys.add(key);
+      }
+    }
+  }
+
+  function remove(key: string): void {
+    const record = map.get(key);
+    if (record === undefined) {
+      return;
+    }
+    map.delete(key);
+    for (const tag of record.entry.tags ?? []) {
+      const keys = keysByTag.get(tag);
+      keys?.delete(key);
+      if (keys?.size === 0) {
+        keysByTag.delete(tag);
+      }
+    }
+  }
 
   function get(key: string): Promise<CachedEntry | undefined> {
     const record = map.get(key);
@@ -100,7 +144,7 @@ export function createInMemoryCacheStore(options: InMemoryCacheStoreOptions): Ca
       return Promise.resolve(undefined);
     }
     if (clock() >= record.expiresAt) {
-      map.delete(key);
+      remove(key);
       return Promise.resolve(undefined);
     }
     // Bump recency: re-insert at the end of the iteration order.
@@ -111,15 +155,11 @@ export function createInMemoryCacheStore(options: InMemoryCacheStoreOptions): Ca
 
   function set(key: string, entry: CachedEntry, ttlMs: number): Promise<void> {
     const expiresAt = clock() + ttlMs;
-    // Re-set semantics: if the key is already present, deleting first
-    // ensures the new value lands at the end of the iteration order
-    // (most recently used) rather than retaining the old slot's
-    // position. This matters for LRU correctness when the same key is
-    // re-cached after a refresh.
-    if (map.has(key)) {
-      map.delete(key);
-    }
+    // Removing first ensures the new value lands at the end of the
+    // iteration order (most recently used) and drops the old entry's tags.
+    remove(key);
     map.set(key, { entry, expiresAt });
+    indexTags(key, entry.tags ?? []);
 
     // Evict LRU entries until the live count is within bounds. The
     // iterator yields keys in insertion order; the first one is the
@@ -129,11 +169,25 @@ export function createInMemoryCacheStore(options: InMemoryCacheStoreOptions): Ca
       if (oldest.done) {
         break;
       }
-      map.delete(oldest.value);
+      remove(oldest.value);
     }
 
     return Promise.resolve();
   }
 
-  return { get, set };
+  function deleteKey(key: string): Promise<void> {
+    remove(key);
+    return Promise.resolve();
+  }
+
+  function deleteByTag(tags: readonly string[]): Promise<void> {
+    for (const tag of tags) {
+      for (const key of [...(keysByTag.get(tag) ?? [])]) {
+        remove(key);
+      }
+    }
+    return Promise.resolve();
+  }
+
+  return { get, set, delete: deleteKey, deleteByTag };
 }
