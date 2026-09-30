@@ -47,15 +47,27 @@ test('createInMemoryCacheStore returns a CacheStore', () => {
   }>();
 });
 
-test('an old positional store is a type error', () => {
-  const positional = {
+test('an old positional set is a type error', () => {
+  const positionalSet = {
     get: async (_key: string): Promise<CachedEntry | undefined> => undefined,
     set: async (_key: string, _entry: CachedEntry, _ttlMs: number) => {},
+    unset: async (_target: Parameters<CacheStore['unset']>[0]) => {},
+  };
+
+  // @ts-expect-error - set takes one object argument
+  const store: CacheStore = positionalSet;
+  void store;
+});
+
+test('an old positional unset(key) is a type error', () => {
+  const positionalUnset = {
+    get: async (_key: string): Promise<CachedEntry | undefined> => undefined,
+    set: async (_target: Parameters<CacheStore['set']>[0]) => {},
     unset: async (_key: string) => {},
   };
 
-  // @ts-expect-error - set and unset take one object argument
-  const store: CacheStore = positional;
+  // @ts-expect-error - unset takes one object argument
+  const store: CacheStore = positionalUnset;
   void store;
 });
 
