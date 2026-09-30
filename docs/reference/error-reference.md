@@ -997,6 +997,10 @@ A client (`postgres()`, `sqlite()`, `mongo()`) received a connection binding who
 
 A client (`postgres()`, `sqlite()`, `mongo()`) was asked to connect with no binding at all (no connection string, no environment fallback). Payload: `expected`.
 
+### RUNTIME.CACHE_STORE_CANNOT_INVALIDATE
+
+The cache middleware's `invalidate({ keys, tags })` was asked to remove entries in a way its `CacheStore` does not support: `keys` need the store's optional `delete` method, and `tags` need its optional `deleteByTag` method. Both checks run before anything is deleted, so a refused call leaves the store unchanged. Supply a store that implements the missing method, or invalidate the other way. Payload: `missingMethod` (`delete` or `deleteByTag`).
+
 ### RUNTIME.CODEC_DESCRIPTOR_ARRAY_UNSUPPORTED
 
 A codec projection used `CodecRef.many` against a SQLite codec descriptor: SQLite has no stored scalar-array codec protocol, so projecting the whole stored array would be ambiguous. Use a scalar CodecRef or an explicit target representation. Payload: `codecId`.

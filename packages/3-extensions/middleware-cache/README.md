@@ -9,10 +9,11 @@ The package depends only on `@internal/framework-components/runtime` — no SQL 
 ## Responsibilities
 
 - Provide an opt-in caching `RuntimeMiddleware` that short-circuits repeated reads via the `interceptQuery` hook.
-- Define the `cacheAnnotation` handle (read-only) that lane terminals (SQL DSL `.annotate(...)`, ORM read terminals) use to attach per-query cache parameters (`ttl`, `skip`, `key`).
+- Define the `cacheAnnotation` handle (read-only) that lane terminals (SQL DSL `.annotate(...)`, ORM read terminals) use to attach per-query cache parameters (`ttl`, `skip`, `key`, `tags`).
 - Resolve the cache key per execution: per-query `cacheAnnotation({ key })` override, otherwise `RuntimeMiddlewareContext.contentHash(exec)` from the family runtime.
 - Buffer driver rows on a miss and commit to the `CacheStore` only on successful completion (`completed: true && source: 'driver'`).
 - Bypass the cache when `RuntimeMiddlewareContext.scope` is `'connection'` or `'transaction'`.
+- Remove entries on request by key or by tag through `invalidate`, and stop a read that overlapped an `invalidate` from storing its rows.
 - Ship a default in-memory LRU-with-TTL `CacheStore` and expose the `CacheStore` interface for pluggable backends (Redis, Memcached, etc.).
 
 ## Quick start
@@ -49,15 +50,24 @@ const fresh = await db.orm.User.first({ id: 1 }); // always hits the DB
 
 ## Opt-in by annotation
 
-The cache middleware acts only on plans that carry a `cacheAnnotation` payload with a `ttl` set:
+The cache middleware acts only on plans that carry a `cacheAnnotation` payload with a TTL: the annotation's `ttl`, or the middleware's `defaultTtlMs` option when the annotation has none:
 
 | Annotation state | Behavior |
 |---|---|
-| No `cacheAnnotation` on the plan | Pass through; never cached. |
-| `cacheAnnotation({ })` (no `ttl`) | Pass through; never cached. |
+| No `cacheAnnotation` on the plan | Pass through; never cached, even with `defaultTtlMs`. |
+| `cacheAnnotation({ })` (no `ttl`), no `defaultTtlMs` | Pass through; never cached. |
+| `cacheAnnotation({ })` (no `ttl`), with `defaultTtlMs` | Cache lookup; commit with `defaultTtlMs`. |
 | `cacheAnnotation({ skip: true })` | Pass through; never cached. |
 | `cacheAnnotation({ ttl })` | Cache lookup; commit on miss + success. |
 | `cacheAnnotation({ ttl, key })` | As above, but use the supplied key verbatim. |
+| `cacheAnnotation({ ttl, tags })` | As above; the stored entry carries the tags for `invalidate({ tags })`. |
+
+```typescript
+const middleware = createCacheMiddleware({ defaultTtlMs: 30_000 });
+
+// Cached for 30s: the annotation opts in, the default supplies the TTL.
+await db.orm.User.first({ id }, (meta) => meta.annotate(cacheAnnotation({})));
+```
 
 The annotation is **read-only**: it declares `applicableTo: ['read']`, so the lane gate (TML-2143 M2) rejects passing it to write terminals at both type and runtime levels. "Cache a mutation" is structurally impossible without an `as any` cast bypass at both the type and runtime levels — the cache middleware itself ships without any mutation classifier.
 
@@ -113,7 +123,33 @@ const redis: CacheStore = {
 const middleware = createCacheMiddleware({ store: redis });
 ```
 
+`delete(key)` and `deleteByTag(tags)` are optional. A store needs them only to support `invalidate` by key and by tag respectively (see [Invalidation](#invalidation)); a tag-capable store must remember each entry's `tags` so `deleteByTag` can find it. The default in-memory store implements both.
+
 The interface is intentionally minimal — `get` returns the entry if present and not expired (implementations gating on TTL should treat expired as absent), `set` writes the entry under the key with the per-call `ttlMs`. Both are async to leave room for I/O-backed stores; the default in-memory store completes synchronously and wraps results in `Promise.resolve` for type conformance.
+
+## Invalidation
+
+Tag a read so it can be removed later, then call `invalidate` on the middleware:
+
+```typescript
+const cache = createCacheMiddleware();
+const db = postgres<Contract>({ contractJson, url, middleware: [cache] });
+
+await db.orm.User.first({ id: 1 }, (meta) =>
+  meta.annotate(cacheAnnotation({ ttl: 60_000, key: 'user-1', tags: ['users'] })),
+);
+
+await db.orm.User.where({ id: 1 }).update({ name: 'Alicia' });
+
+await cache.invalidate({ tags: ['users'] }); // every entry tagged 'users'
+await cache.invalidate({ keys: ['user-1'] }); // the entry stored under 'user-1'
+```
+
+- **Keys** are compared literally with the strings passed to `cacheAnnotation({ key })`. Entries stored under the default content-hash key can only be removed by tag.
+- **Tags** remove every entry that carries at least one of the given tags. `invalidate({ keys, tags })` does both.
+- **Store support.** Invalidating by key needs `CacheStore.delete`; by tag needs `CacheStore.deleteByTag`. If the store lacks a method the target needs, `invalidate` throws `RUNTIME.CACHE_STORE_CANNOT_INVALIDATE` (with `meta.missingMethod`) before deleting anything. An empty target does nothing.
+- **Call it after the write has committed.** `invalidate` works from any scope, but if you call it inside a transaction, another request can read the old rows before the commit and put them back in the cache. Invalidate once the transaction has returned.
+- **Overlapping reads.** A read that missed the cache before an `invalidate` and finishes after it does not store its rows, because they may predate the write. This guard is per middleware instance and so per process: with a shared store such as Redis, a read in another process is not protected, and can store rows that predate the write.
 
 ## Transaction-scope guard
 
@@ -128,16 +164,21 @@ This avoids two surprises:
 
 The default `createInMemoryCacheStore({ maxEntries, clock? })`:
 
-- **TTL.** Each entry is committed with the per-query `ttl` (in milliseconds). The store evaluates expiry against its injected clock (defaults to `Date.now`); reads of expired entries return `undefined` and drop the entry as a side effect.
+- **TTL.** Each entry is committed with the per-query `ttl`, or the middleware's `defaultTtlMs` when the annotation has none (in milliseconds). The store evaluates expiry against its injected clock (defaults to `Date.now`); reads of expired entries return `undefined` and drop the entry as a side effect.
+- **Tags.** The store keeps an index from tag to keys. A key leaves the index whenever its entry leaves the store (delete, expiry, eviction, overwrite), so a tag never removes a later entry stored under the same key. The index does not count toward `maxEntries`.
 - **LRU.** Iteration order is the LRU order. Reads and writes both bump recency. When the live count would exceed `maxEntries`, the oldest entry is evicted.
 - **Failure handling.** The middleware commits to the store only when `afterQuery` reports `completed: true && source: 'driver'`. Driver errors mid-stream and middleware-served queries never populate the cache.
 
 ## Caveats
 
 - **Default store is not coherent across replicas.** Multiple processes / pods do not share state. Use a custom `CacheStore` (Redis, etc.) for cross-process coherence.
-- **Concurrent misses both populate the store.** Two concurrent first-time reads of the same key both run the driver and both commit; last writer wins. Single-flight / coalescing semantics are deferred to a follow-up.
+- **Concurrent misses both populate the store.** Two concurrent first-time reads of the same key both run the driver and both commit; last writer wins. Request coalescing is out of this package's scope (see [Scope](#scope)).
 - **Reads of stale-on-arrival entries.** With a custom replicated store, a follower may serve a stale entry for a brief window after the writer commits. Use the storage-hash discrimination plus a sensible TTL.
-- **No invalidation beyond TTL.** Entries are not invalidated by writes; tag-based or event-based invalidation is out of scope for this milestone. If a write invalidates a cached read, choose a TTL short enough to bound the staleness window, or pass `cacheAnnotation({ skip: true })` on the read that needs to be authoritative.
+- **Writes do not invalidate on their own.** The middleware never observes writes. Call `invalidate` after a write that changes cached reads, choose a TTL short enough to bound the staleness window, or pass `cacheAnnotation({ skip: true })` on the read that needs to be authoritative.
+
+## Scope
+
+This package is a read-through cache with a control surface: annotations to opt in, tags, `invalidate`, and the `CacheStore` interface. It does not decide when to invalidate. Write-driven invalidation, invalidation strategies, request coalescing, and routing between several stores are policy, and belong in separate extensions built on `invalidate`, tags, and the store interface.
 
 ## See also
 
