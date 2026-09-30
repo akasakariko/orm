@@ -199,6 +199,30 @@ await db.orm.public.User.where({ id: 1 }).update({ name: 'Alicia' });
 await cache.invalidate({ meta: { tags: ['users'] } });
 ```
 
+### Typed meta
+
+`CacheStore<TMeta>`, `createCacheMiddleware` and `cacheAnnotation<TMeta>` take the shape of `meta` as a type parameter; it defaults to `unknown`. `createCacheMiddleware` infers it from the store, so `invalidate` accepts only that shape:
+
+```typescript
+interface TagMeta {
+  tags: string[];
+}
+
+class TagStore implements CacheStore<TagMeta> {
+  // get, set({ key, meta, entry }), unset({ keys, meta }) with meta: TagMeta | undefined
+}
+
+const cache = createCacheMiddleware({ store: new TagStore() }); // CacheMiddleware<TagMeta>
+await cache.invalidate({ meta: { tags: ['users'] } }); // compiles
+await cache.invalidate({ meta: { tag: 'users' } }); // type error
+```
+
+Nothing ties the annotation's `TMeta` to the store's at compile time, because the annotation is written where the query is and the store where the middleware is set up. A store package should therefore export a wrapper typed with its own meta, so the two agree:
+
+```typescript
+export const cached = (o: CacheAnnotationOptions<TagMeta>) => cacheAnnotation<TagMeta>(o);
+```
+
 ## Invalidation
 
 `invalidate({ keys?, meta? })` removes entries through one `store.unset({ keys, meta })` call.

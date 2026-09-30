@@ -36,6 +36,30 @@ interface CacheStore {
 
 `set` stores one entry with the read annotation's `meta`. `unset` removes every entry named in `keys` (`undefined` or non-empty) and every entry that matches `meta`, and an `unset` by key also drops that key from any `meta` index. The middleware's `unset` after a stale `set` may remove a fresher entry under the same key, which costs one miss. The store interprets `meta` on both sides; the middleware never does. A store that cannot act on a `meta` given to `unset` must throw: the default store throws `RUNTIME.CACHE_STORE_META_UNSUPPORTED`. When `set` resolves, the entry must be visible to a later `unset` of the same key. `unset` must not run queries through the runtime that uses the middleware.
 
+## Typed meta
+
+`CacheStore<TMeta>`, `createCacheMiddleware` and `cacheAnnotation<TMeta>` take the shape of `meta` as a type parameter; it defaults to `unknown`. `createCacheMiddleware` infers it from the store, so `invalidate` accepts only that shape:
+
+```typescript
+interface TagMeta {
+  tags: string[];
+}
+
+class TagStore implements CacheStore<TagMeta> {
+  // get, set({ key, meta, entry }), unset({ keys, meta }) with meta: TagMeta | undefined
+}
+
+const cache = createCacheMiddleware({ store: new TagStore() }); // CacheMiddleware<TagMeta>
+await cache.invalidate({ meta: { tags: ['users'] } }); // compiles
+await cache.invalidate({ meta: { tag: 'users' } }); // type error
+```
+
+Nothing ties the annotation's `TMeta` to the store's at compile time, because the annotation is written where the query is and the store where the middleware is set up. A store package should therefore export a wrapper typed with its own meta, so the two agree:
+
+```typescript
+export const cached = (o: CacheAnnotationOptions<TagMeta>) => cacheAnnotation<TagMeta>(o);
+```
+
 ## Deriving keys
 
 `createCacheMiddleware({ deriveKey })` computes the key of every cached read whose annotation has no `key`. Build on the default to add a prefix:

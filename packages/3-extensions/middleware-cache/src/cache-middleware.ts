@@ -15,9 +15,11 @@ import { type CacheStore, createInMemoryCacheStore } from './cache-store';
  *   `deriveKeyFromContentHash`. It runs on every such read, hit or miss, and an error from it
  *   fails the read. It must return different keys whenever the rows can differ; build on
  *   `deriveKeyFromContentHash` to keep the statement, parameters and storage hash.
+ *
+ * `TMeta` is the store's meta type; `createCacheMiddleware` infers it from `store`.
  */
-export interface CacheMiddlewareOptions {
-  readonly store?: CacheStore;
+export interface CacheMiddlewareOptions<TMeta = unknown> {
+  readonly store?: CacheStore<TMeta>;
   readonly deriveKey?: (
     exec: ExecutionPlan,
     ctx: RuntimeMiddlewareContext,
@@ -32,11 +34,13 @@ export interface CacheMiddlewareOptions {
  * flight as stale so they skip storing their rows: reads for the named `keys`, and every read when
  * `meta` is given, because only the store knows which entries `meta` matches. This guard covers
  * reads in the same process only. An error from the store propagates.
+ *
+ * `TMeta` is the store's meta type, which `invalidate`'s `meta` must have.
  */
-export type CacheMiddleware = CrossFamilyMiddleware & {
+export type CacheMiddleware<TMeta = unknown> = CrossFamilyMiddleware & {
   readonly invalidate: (target: {
     readonly keys?: readonly string[];
-    readonly meta?: unknown;
+    readonly meta?: TMeta;
   }) => Promise<void>;
 };
 
@@ -101,8 +105,10 @@ interface PendingMiss {
  * await cache.invalidate({ keys: ['user-1'] });
  * ```
  */
-export function createCacheMiddleware(options?: CacheMiddlewareOptions): CacheMiddleware {
-  const store = options?.store ?? createInMemoryCacheStore();
+export function createCacheMiddleware<TMeta = unknown>(
+  options?: CacheMiddlewareOptions<TMeta>,
+): CacheMiddleware<TMeta> {
+  const store: CacheStore<unknown> = options?.store ?? createInMemoryCacheStore();
   const deriveKey = options?.deriveKey ?? deriveKeyFromContentHash;
   let globalGeneration = 0;
   const keyStates = new Map<string, KeyState>();
@@ -214,7 +220,7 @@ export function createCacheMiddleware(options?: CacheMiddlewareOptions): CacheMi
 
   async function invalidate(target: {
     readonly keys?: readonly string[];
-    readonly meta?: unknown;
+    readonly meta?: TMeta;
   }): Promise<void> {
     const keys = target.keys !== undefined && target.keys.length > 0 ? target.keys : undefined;
     if (keys === undefined && target.meta === undefined) {

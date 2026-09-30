@@ -1,4 +1,9 @@
-import { cacheAnnotation, createCacheMiddleware } from '@internal/middleware-cache';
+import {
+  type CachedEntry,
+  type CacheStore,
+  cacheAnnotation,
+  createCacheMiddleware,
+} from '@internal/middleware-cache';
 import type { MongoMiddleware } from '@internal/mongo-runtime';
 import type { SqlMiddleware } from '@internal/sql-runtime';
 import { test } from 'vitest';
@@ -24,4 +29,21 @@ test('a write refuses cacheAnnotation', () => {
 
   // @ts-expect-error - cacheAnnotation declares applicableTo: ['read'], not 'write'
   db.public.users.update({ name: 'Alicia' }).annotate(cacheAnnotation({}));
+});
+
+interface TagMeta {
+  tags: string[];
+}
+
+const tagStore: CacheStore<TagMeta> = {
+  get: async (_key: string): Promise<CachedEntry | undefined> => undefined,
+  set: async () => {},
+  unset: async () => {},
+};
+
+test('a CacheMiddleware with typed meta fits in SQL and Mongo middleware lists', () => {
+  const sqlMiddleware: SqlMiddleware[] = [createCacheMiddleware({ store: tagStore })];
+  const mongoMiddleware: MongoMiddleware[] = [createCacheMiddleware({ store: tagStore })];
+  void sqlMiddleware;
+  void mongoMiddleware;
 });

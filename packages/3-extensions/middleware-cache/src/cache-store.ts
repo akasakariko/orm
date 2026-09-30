@@ -23,17 +23,20 @@ export interface CachedEntry {
  * key issued after it resolves. The middleware's `unset` after a stale `set` may remove an entry a
  * later read stored under the same key; that costs one miss. `unset` must not run queries through
  * the runtime that uses the middleware.
+ *
+ * `TMeta` is the shape of `meta` the store understands. The middleware does not check that a read
+ * annotation's `meta` has this shape; see `cacheAnnotation`.
  */
-export interface CacheStore {
+export interface CacheStore<TMeta = unknown> {
   get(key: string): Promise<CachedEntry | undefined>;
   set(target: {
     readonly key: string;
-    readonly meta: unknown;
+    readonly meta: TMeta | undefined;
     readonly entry: CachedEntry;
   }): Promise<void>;
   unset(target: {
     readonly keys: readonly string[] | undefined;
-    readonly meta: unknown;
+    readonly meta: TMeta | undefined;
   }): Promise<void>;
 }
 
@@ -81,7 +84,7 @@ function invalidOption(argument: 'maxEntries' | 'ttlMs', received: number, expec
  * the process. It ignores `meta` in `set`, and its `unset` rejects any `meta`, including `null`.
  * It throws `RUNTIME.ARGUMENT_INVALID` for a `maxEntries` or `ttlMs` outside the ranges above.
  */
-export function createInMemoryCacheStore(options?: InMemoryCacheStoreOptions): CacheStore {
+export function createInMemoryCacheStore(options?: InMemoryCacheStoreOptions): CacheStore<unknown> {
   const maxEntries = options?.maxEntries ?? 1000;
   const ttlMs = options?.ttlMs ?? 60_000;
   const clock = options?.clock ?? Date.now;
