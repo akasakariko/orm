@@ -1,8 +1,4 @@
-import {
-  cacheAnnotation,
-  createCacheMiddleware,
-  createInMemoryCacheStore,
-} from '@internal/middleware-cache';
+import { cacheAnnotation, createCacheMiddleware } from '@internal/middleware-cache';
 import { sql } from '@internal/sql-builder/runtime';
 import type { Runtime } from '@internal/sql-runtime';
 import { timeouts } from '@repo/test-utils';
@@ -11,18 +7,8 @@ import { useMiddlewareCacheDatabase } from './middleware-cache-database';
 
 /*
  * Integration tests for `invalidate` on `@internal/middleware-cache` against real Postgres:
- * invalidating by key, or by a function that deletes entries whose attributes match, makes the
- * next read see a write that happened after the rows were cached.
+ * invalidating by key makes the next read see a write that happened after the rows were cached.
  */
-
-function hasTags(attributes: unknown): attributes is { readonly tags: readonly unknown[] } {
-  return (
-    typeof attributes === 'object' &&
-    attributes !== null &&
-    'tags' in attributes &&
-    Array.isArray(attributes.tags)
-  );
-}
 
 describe('integration: middleware-cache invalidation against real Postgres', {
   timeout: timeouts.databaseOperation,
@@ -37,36 +23,14 @@ describe('integration: middleware-cache invalidation against real Postgres', {
         db.public.users
           .select('name')
           .where((f, fns) => fns.eq(f.id, 1))
-          .annotate(
-            cacheAnnotation({ ttl: 60_000, key: 'user-1', attributes: { tags: ['users'] } }),
-          )
+          .annotate(cacheAnnotation({ key: 'user-1', meta: { tags: ['users'] } }))
           .build(),
       )
       .toArray();
   }
 
-  it.each([
-    {
-      by: 'key',
-      setUp: () => {
-        const cache = createCacheMiddleware({ maxEntries: 100 });
-        return { cache, invalidate: () => cache.invalidate({ keys: ['user-1'] }) };
-      },
-    },
-    {
-      by: 'attributes',
-      setUp: () => {
-        const store = createInMemoryCacheStore({ maxEntries: 100 });
-        const cache = createCacheMiddleware({ store });
-        const invalidate = () =>
-          cache.invalidate(() =>
-            store.deleteWhere((e) => hasTags(e.attributes) && e.attributes.tags.includes('users')),
-          );
-        return { cache, invalidate };
-      },
-    },
-  ])('a read after invalidating by $by sees the committed write', async ({ setUp }) => {
-    const { cache, invalidate } = setUp();
+  it('a read after invalidate({ keys }) sees the committed write', async () => {
+    const cache = createCacheMiddleware();
     const runtime = buildRuntime([cache]);
 
     try {
@@ -78,12 +42,22 @@ describe('integration: middleware-cache invalidation against real Postgres', {
       expect(await readUserOneName(runtime)).toEqual([{ name: 'Alice' }]);
       expect(database.driverQuerySpy).not.toHaveBeenCalled();
 
-      await invalidate();
+      await cache.invalidate({ keys: ['user-1'] });
 
       expect(await readUserOneName(runtime)).toEqual([{ name: 'Alicia' }]);
       expect(database.driverQuerySpy).toHaveBeenCalledTimes(1);
     } finally {
       await database.client.query(`UPDATE users SET name = 'Alice' WHERE id = 1`);
     }
+  });
+
+  it('invalidate({ meta }) rejects against the default store, which does not index meta', async () => {
+    const cache = createCacheMiddleware();
+    const runtime = buildRuntime([cache]);
+    await readUserOneName(runtime);
+
+    await expect(cache.invalidate({ meta: { tags: ['users'] } })).rejects.toMatchObject({
+      code: 'RUNTIME.CACHE_STORE_META_UNSUPPORTED',
+    });
   });
 });
