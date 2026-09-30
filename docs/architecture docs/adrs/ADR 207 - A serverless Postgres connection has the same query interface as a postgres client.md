@@ -118,7 +118,7 @@ The serverless client has only what is safe at module scope. A connection has ev
 
 `await using db = await postgres.connect(...)` closes the connection when the enclosing scope ends, whether the scope returns or throws. Closing ends the `pg.Client`. Calling `close()` or `[Symbol.asyncDispose]` more than once closes it once.
 
-After a connection is closed, `db.runtime()`, ORM queries, `db.transaction(...)` and `db.prepare(...)` fail with the error code `DRIVER.NOT_CONNECTED`. A query, transaction or prepared statement started before the close, and not yet at the database, rejects with `DRIVER.NOT_CONNECTED` ("Runtime is closed") once the connection has closed. The runtime holds that rejection until its close has settled, so it reaches only the caller and never Node's unhandled-rejection handler.
+After a connection is closed, `db.runtime()`, ORM queries, `db.transaction(...)` and `db.prepare(...)` fail with the error code `DRIVER.NOT_CONNECTED`. Closing waits for every query and statement that has started, including a transaction, and then ends the `pg.Client`. A query or statement that starts after `close()` is refused with `DRIVER.NOT_CONNECTED` ("Runtime is closed"). The rule belongs to the SQL runtime; see [Shutdown](../subsystems/4.%20Runtime%20&%20Middleware%20Framework.md#shutdown) in the runtime subsystem document.
 
 The `await using` line shows the lifetime of the connection at the place where the connection is opened. A reader can see that it belongs to this request without reading any documentation.
 
@@ -210,7 +210,7 @@ export async function publish(url: string, email: string, title: string) {
 
 ### Every query is awaited before the `await using` scope ends
 
-The connection closes when the scope ends. A query that the scope returns without `await` runs after the connection has closed, and fails when its rows are read:
+The connection closes when the scope ends. A lazy query that the scope returns without `await` reaches the runtime after the connection has closed and is refused:
 
 ```ts
 export async function listUsers(url: string) {
@@ -219,7 +219,7 @@ export async function listUsers(url: string) {
 }
 ```
 
-Writing `return db.orm.public.User.all()` in this function rejects with `DRIVER.NOT_CONNECTED` ("Runtime is closed"), whose `fix` names the missing `await`. So do `return db.orm.public.User.first()`, `return db.runtime().query(plan)`, `return db.runtime().execute(plan)` and `return db.transaction(fn)`, whether or not an earlier query on the connection was awaited; the transaction rolls back. The runtime owns this rule: every operation that reaches the driver after `close()` has started fails with this one error, and one that holds no connection is rejected only after the close has settled, so the caller's handler is attached first and Node reports no unhandled rejection. With a client the version without `await` works, because a client is not closed at the end of each request.
+Writing `return db.orm.public.User.all()` in this function rejects with `DRIVER.NOT_CONNECTED` ("Runtime is closed"), whose `fix` names the missing `await`: `all()` returns a lazy result whose work starts when the caller awaits it, after the close. `return db.runtime().query(plan)` behaves the same way. `return db.orm.public.User.first()`, `return db.runtime().execute(plan)` and `return db.transaction(fn)` start their work before the scope ends, so the close waits for them and they complete; the transaction commits. Every query and statement follows the [shutdown rule](../subsystems/4.%20Runtime%20&%20Middleware%20Framework.md#shutdown): `close()` waits for work that has started and refuses work that starts later. Nothing rejects while the close is pending, so this mistake never reaches Node's unhandled-rejection handler; unawaited work that fails for its own reason rejects like any unawaited promise. With a client the version without `await` works, because a client is not closed at the end of each request.
 
 ### On a connection with cursors on, a `for await` over a read ends before the next query through `db`
 
@@ -328,6 +328,8 @@ An object at module scope would have `db.orm` and `db.transaction(...)`, and wou
 
 There would be one factory per product, such as `postgresWorkers` and `postgresLambda`, each with conveniences for that product, for example `postgresWorkers({ hyperdrive: env.HYPERDRIVE })`. The convenience would be small, because every per-request runtime gives the application a connection string: `env.HYPERDRIVE.connectionString` on Workers, `process.env.DATABASE_URL` on Lambda, `Deno.env.get('DATABASE_URL')` on Deno Deploy. A factory per product would save one property access, at the cost of several nearly identical factories. The lifetime rule is the same for every product.
 
-### `close()` waits for work in flight
+### Refuse everything after `close()` has started and hold the rejection until the close settles
 
-A connection would count the queries, transactions and prepared statements it has started, and `close()` would wait for them before ending the `pg.Client`, so that `return db.transaction(fn)` from an `await using` scope would commit. The same mistake would then have two outcomes: `return db.orm.public.User.all()` would still fail, because its work starts only when the caller awaits it, after the scope has closed, while `return db.transaction(fn)` would succeed. And a read that is started and never finished, such as a `for await` loop left by an exception, would make `close()` wait for ever. Instead the runtime fails every operation that reaches the driver after `close()` has started with one error, and delivers the rejection after the close has settled.
+The runtime would refuse every query and statement that reaches the driver after `close()` has started, including the next statement of a transaction in flight, and would hold each rejection until the close had settled, so that the unawaited mistake would fail with one error in every case. This was the first implementation, and it has two faults. A transaction that holds the connection can be waiting on the refused work, and the close waits for that transaction's connection, so both hang for ever. And a rejection held only until this connection's close settles still reaches Node's unhandled-rejection handler when another resource in the same scope is disposed afterwards, such as a second connection. Marking the refused promise as handled instead would not help: "handled" is a property of a promise, not of an error, so the mark would also silence every genuine failure on that promise.
+
+An iterator that is started by hand and never finished or returned holds the driver's cursor lock, and `close()` waits for it. Leaving a `for await` loop by `break` or an exception calls `return()` on the iterator, which ends the read, so only an iterator advanced with `next()` and then dropped is affected. The chosen rule does not make this worse: the runtime stops waiting for a read once its first row has arrived, and from then on only the driver's own close waits.
