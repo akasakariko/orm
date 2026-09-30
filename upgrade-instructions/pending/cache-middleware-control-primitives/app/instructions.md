@@ -7,19 +7,18 @@ changes:
       matches:
         - '\bcacheAnnotation\s*\('
   - id: cache-annotation-skip-renamed-bypass
-    summary: "cacheAnnotation({ skip }) is now cacheAnnotation({ bypass }), and the CachePayload type is now CacheAnnotationOptions."
+    summary: "cacheAnnotation({ skip }) is now cacheAnnotation({ bypass }), and the CachePayload type is now CacheAnnotationOptions. Detection finds skip written inside a cacheAnnotation({ ... }) literal and any use of CachePayload; options built elsewhere without that type are not detected."
     detection:
       glob: "**/*.{ts,mts,cts,tsx,js,mjs,cjs,jsx}"
       matches:
         - '\bCachePayload\b'
-        - '\bskip\s*:'
+        - '\bcacheAnnotation\s*\(\s*\{[^}]*\bskip\s*:'
   - id: cache-middleware-store-options
-    summary: "createCacheMiddleware no longer takes maxEntries or clock. Pass them to createInMemoryCacheStore and hand that store to createCacheMiddleware({ store }), or drop them when they match the new defaults (1000 entries)."
+    summary: "createCacheMiddleware no longer takes maxEntries or clock. Pass them to createInMemoryCacheStore and hand that store to createCacheMiddleware({ store }), or drop them when they match the new defaults (1000 entries). Detection finds maxEntries or clock written in the options literal of a createCacheMiddleware call; it also matches an already-migrated createCacheMiddleware({ store: createInMemoryCacheStore({ maxEntries }) }), which needs no change."
     detection:
       glob: "**/*.{ts,mts,cts,tsx,js,mjs,cjs,jsx}"
       matches:
-        - '\bcreateCacheMiddleware\s*\('
-        - '\bmaxEntries\b'
+        - '\bcreateCacheMiddleware\s*\(\s*\{[^}]*\b(maxEntries|clock)\s*:'
   - id: cache-store-object-arguments
     summary: "A custom CacheStore implements set({ key, meta, entry }) instead of set(key, entry, ttlMs), and a new required unset({ keys, meta }). CachedEntry has no storedAt."
     detection:
