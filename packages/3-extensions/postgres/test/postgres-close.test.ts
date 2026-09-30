@@ -346,17 +346,17 @@ describe('a promise pending when close() is called on a client that owns its poo
     expect(calls.indexOf('query')).toBeLessThan(calls.indexOf('end'));
   });
 
-  it('an ORM create() issues its insert when it is called, so the close waits for it and it resolves', async () => {
+  it('an ORM create() left pending at close() starts its insert after the close, so the runtime refuses it and it must be awaited first', async () => {
     const db = await connectedClient();
 
     const outcome = await closeWhilePending(
       db,
       db.orm.public.User.create({ email: 'ada@example.com', name: 'Ada' }),
+      [expect.objectContaining(runtimeClosedError)],
     );
 
-    expect(outcome).toEqual({
-      resolved: { id: 1, email: 'ada@example.com', name: 'Ada', invitedById: null },
-    });
+    expect(outcome).toEqual({ rejected: expect.objectContaining(runtimeClosedError) });
+    expect(statements.some((text) => text.startsWith('INSERT'))).toBe(false);
   });
 
   it.each([
@@ -430,6 +430,30 @@ describe('a promise pending when close() is called on a client that owns its poo
     expect(closed).toBe(false);
     openGate();
     await expect(inFlight).resolves.toBeNull();
+    await closing;
+    expect(closed).toBe(true);
+  });
+
+  it('refuses a query through a runtime captured before close() at once, while the close waits only for the query already in flight', async () => {
+    const db = await connectedClient();
+    const runtime = db.runtime();
+    const plan = db.sql.public.users.select('id').build();
+    let openGate: () => void = () => {};
+    queryGate = new Promise<void>((resolve) => {
+      openGate = resolve;
+    });
+    const inFlight = runtime.query(plan).toArray();
+    await expect.poll(() => calls.includes('query')).toBe(true);
+    let closed = false;
+    const closing = db.close().then(() => {
+      closed = true;
+    });
+
+    await expect(runtime.query(plan).toArray()).rejects.toMatchObject(runtimeClosedError);
+    await expect(runtime.query(plan).toArray()).rejects.toMatchObject(runtimeClosedError);
+    expect(closed).toBe(false);
+    openGate();
+    await expect(inFlight).resolves.toEqual([]);
     await closing;
     expect(closed).toBe(true);
   });

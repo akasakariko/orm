@@ -226,11 +226,13 @@ export default function postgresServerless<TContract extends Contract<SqlStorage
 
       // Everything that can fail for a reason other than the database is built before the
       // database connection opens, so a failure here leaves nothing to close.
+      // A connection belongs to one request, so its close admits work that continues that request.
       const runtime = new PostgresRuntimeImpl({
         context,
         adapter: stackInstance.adapter,
         driver,
         ...toRuntimeOptions(options),
+        closeRefusal: 'when-idle',
       });
       const connection = createConnection(runtime);
 

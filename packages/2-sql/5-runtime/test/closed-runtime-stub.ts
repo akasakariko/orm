@@ -182,7 +182,10 @@ export function createMiddlewareSpy(): {
 }
 
 export function setup(
-  options: { readonly middleware?: readonly SqlMiddleware[] } = {},
+  options: {
+    readonly middleware?: readonly SqlMiddleware[];
+    readonly closeRefusal?: 'when-idle' | 'at-once';
+  } = {},
 ): ClosedRuntimeFixture {
   const stub = createStubDriver();
   const runtime = createTestRuntime({
@@ -191,6 +194,7 @@ export function setup(
     driver: stub.driver,
     verifyMarker: false,
     ...(options.middleware !== undefined ? { middleware: options.middleware } : {}),
+    ...(options.closeRefusal !== undefined ? { closeRefusal: options.closeRefusal } : {}),
   });
   return { runtime, ...stub };
 }

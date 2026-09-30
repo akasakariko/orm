@@ -208,6 +208,7 @@ function createTestSetup(options?: {
     driver: driver as unknown as SqlDriver,
     verifyMarker: options?.readMarker === undefined ? false : 'onFirstUse',
     middleware: options?.middleware ?? [],
+    closeRefusal: undefined,
   };
 
   const runtime = new TestRuntime(runtimeOptions);

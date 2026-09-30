@@ -213,11 +213,13 @@ export default function postgres<TContract extends Contract<SqlStorage>>(
       cursor: toDriverCursorOptions(cursor),
     });
     runtimeDriver = driver;
+    // A client is shared by many callers, so its runtime stops admitting work when close() is called.
     const runtime = new PostgresRuntimeImpl({
       context,
       adapter: stackInstance.adapter,
       driver,
       ...toRuntimeOptions(options),
+      closeRefusal: 'at-once',
     });
     runtimeInstance = runtime;
     if (binding !== undefined) {

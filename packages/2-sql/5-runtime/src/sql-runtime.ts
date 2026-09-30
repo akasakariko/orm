@@ -91,6 +91,11 @@ import { SqlFamilyAdapter } from './sql-family-adapter';
 
 export type Log = RuntimeLog;
 
+/**
+ * When `close()` starts refusing new runtime-scope work. `'when-idle'` (the default) waits until the runtime has been idle for one turn of the event loop, so work that keeps it busy from the close onward is admitted; use it for an owner with one caller, such as a per-request connection. `'at-once'` refuses from the call of `close()`; use it for an owner that many callers share. Both wait for work already in flight.
+ */
+export type CloseRefusal = 'when-idle' | 'at-once';
+
 export interface RuntimeOptions<TContract extends Contract<SqlStorage> = Contract<SqlStorage>> {
   readonly context: ExecutionContext<TContract>;
   readonly adapter: Adapter<AnyQueryAst, Contract<SqlStorage>, LoweredStatement>;
@@ -99,6 +104,7 @@ export interface RuntimeOptions<TContract extends Contract<SqlStorage> = Contrac
   readonly middleware?: readonly SqlMiddleware[];
   readonly mode?: 'strict' | 'permissive';
   readonly log?: Log;
+  readonly closeRefusal: CloseRefusal | undefined;
 }
 
 /**
@@ -190,6 +196,7 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
   // Memoises the first verifyMarker() call so concurrent first queries share one read and one log line, and is cleared when that read fails so the next query retries it. `null` until the first query; pre-resolved when `verifyMarkerOption === false`.
   private verifyMarkerPromise: Promise<void> | null;
   private closePromise: Promise<void> | null;
+  private readonly closeRefusal: CloseRefusal;
   readonly #inFlight = new InFlightOperations();
   #refusing = false;
   // Connections and transactions this runtime handed out. When the first query of the runtime runs on one of them, the runtime-wide marker read runs on it too, so it works while close() waits for their release, and concurrent first queries share its result. Other queryables, such as a subclass's raw connection, read the marker through the driver.
@@ -199,7 +206,7 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
   private _telemetry: RuntimeTelemetryEvent | null;
 
   constructor(options: RuntimeOptions<TContract>) {
-    const { context, adapter, driver, verifyMarker, middleware, mode, log } = options;
+    const { context, adapter, driver, verifyMarker, middleware, mode, log, closeRefusal } = options;
 
     if (middleware) {
       for (const mw of middleware) {
@@ -237,6 +244,7 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
     this.codecDescriptors = context.codecDescriptors;
     this.sqlCtx = sqlCtx;
     this.verifyMarkerOption = verifyMarker ?? 'onFirstUse';
+    this.closeRefusal = closeRefusal ?? 'when-idle';
     this.codecRegistryValidated = false;
     this.verifyMarkerPromise = this.verifyMarkerOption === false ? Promise.resolve() : null;
     this.closePromise = null;
@@ -1008,22 +1016,30 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
   }
 
   close(): Promise<void> {
-    this.closePromise ??= this.closeDriverWhenIdle();
+    this.closePromise ??= this.closeDriverAfterWork();
     return this.closePromise;
   }
 
-  // Refusal begins once the runtime has been idle for one turn of the event loop (a setTimeout(0)): no database work in flight, and none started since the timer was set. A chain of dependent queries that keeps the runtime busy from the close onward, such as an ORM write and its reload, is admitted to its end.
-  private async closeDriverWhenIdle(): Promise<void> {
+  // With 'when-idle', refusal begins once the runtime has been idle for one turn of the event loop (a setTimeout(0)): no database work in flight, and none started since the timer was set. A chain of dependent queries that keeps the runtime busy from the close onward, such as an ORM write and its reload, is admitted to its end. With 'at-once', close() has already started refusing.
+  // With 'at-once' nothing is awaited before the refusal flag is set, so it is set inside the call of close().
+  private async closeDriverAfterWork(): Promise<void> {
+    if (this.closeRefusal === 'when-idle') {
+      await this.waitForIdleTurn();
+    }
+    this.#refusing = true;
+    await this.#inFlight.drained();
+    await this.driver.close();
+  }
+
+  private async waitForIdleTurn(): Promise<void> {
     for (;;) {
       const startedBefore = this.#inFlight.started;
       await new Promise<void>((resolve) => scheduleTimer(resolve, 0));
       if (!this.#inFlight.active && this.#inFlight.started === startedBefore) {
-        break;
+        return;
       }
       await this.#inFlight.drained();
     }
-    this.#refusing = true;
-    await this.driver.close();
   }
 
   private ensureCodecRegistryValidated(): void {

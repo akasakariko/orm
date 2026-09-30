@@ -306,3 +306,20 @@ describe('close() under fake timers installed after the runtime module loaded', 
     expect(driver.close).toHaveBeenCalledOnce();
   }, 2000);
 });
+
+describe("a runtime whose close refuses 'at-once'", () => {
+  it('refuses an operation entering in the same turn as close(), and still completes an execute() started before it', async () => {
+    const { runtime, calls, hooks, driver } = setup({ closeRefusal: 'at-once' });
+    hooks.execute = () => delay(5);
+
+    const before = runtime.execute(affectedCountPlan());
+    const closing = runtime.close();
+    const after = runtime.execute(affectedCountPlan());
+
+    await expect(after).rejects.toMatchObject(closedError);
+    await expect(before).resolves.toEqual({ affectedRows: 1 });
+    await closing;
+    expect(driver.execute).toHaveBeenCalledTimes(1);
+    expect(calls).toEqual(['driver.execute', 'close', 'closed']);
+  });
+});
