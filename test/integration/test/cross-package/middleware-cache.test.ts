@@ -11,7 +11,11 @@ import type {
   CrossFamilyMiddleware,
   RuntimeMiddlewareContext,
 } from '@internal/framework-components/runtime';
-import { cacheAnnotation, createCacheMiddleware } from '@internal/middleware-cache';
+import {
+  cacheAnnotation,
+  createCacheMiddleware,
+  createInMemoryCacheStore,
+} from '@internal/middleware-cache';
 import { PostgresRuntimeImpl } from '@internal/postgres/runtime';
 import { sql } from '@internal/sql-builder/runtime';
 import {
@@ -52,8 +56,9 @@ import { setupTestDatabase } from '../utils';
  *   on `afterQuery` round-trips driver vs middleware fetches.
  * - Concurrency: two parallel calls of the same plan don't cross-talk
  *   through the per-exec WeakMap buffer.
- * - Invalidation: `invalidate` by tag or key makes the next read see a
- *   write that happened after the rows were cached.
+ * - Invalidation: `invalidate` by key, or by a function that deletes
+ *   entries whose attributes match, makes the next read see a write that
+ *   happened after the rows were cached.
  */
 
 const sqlContract = new PostgresContractSerializer().deserializeContract(contract) as Contract;
@@ -73,6 +78,15 @@ type TestStackInstance = ExecutionStackInstance<
  * cache key reflects the rewritten SQL because the cache middleware
  * sees the post-lowering plan.
  */
+function hasTags(attributes: unknown): attributes is { readonly tags: readonly unknown[] } {
+  return (
+    typeof attributes === 'object' &&
+    attributes !== null &&
+    'tags' in attributes &&
+    Array.isArray(attributes.tags)
+  );
+}
+
 function activeUsersOnly(): SqlMiddleware {
   return {
     name: 'active-users-only',
@@ -547,17 +561,38 @@ describe('integration: middleware-cache against real Postgres', {
           db.public.users
             .select('name')
             .where((f, fns) => fns.eq(f.id, 1))
-            .annotate(cacheAnnotation({ ttl: 60_000, key: 'user-1', tags: ['users'] }))
+            .annotate(
+              cacheAnnotation({ ttl: 60_000, key: 'user-1', attributes: { tags: ['users'] } }),
+            )
             .build(),
         )
         .toArray();
     }
 
     it.each([
-      { by: 'tag', target: { tags: ['users'] } },
-      { by: 'key', target: { keys: ['user-1'] } },
-    ])('a read after invalidating by $by sees the committed write', async ({ target }) => {
-      const cache = createCacheMiddleware({ maxEntries: 100 });
+      {
+        by: 'key',
+        setUp: () => {
+          const cache = createCacheMiddleware({ maxEntries: 100 });
+          return { cache, invalidate: () => cache.invalidate({ keys: ['user-1'] }) };
+        },
+      },
+      {
+        by: 'attributes',
+        setUp: () => {
+          const store = createInMemoryCacheStore({ maxEntries: 100 });
+          const cache = createCacheMiddleware({ store });
+          const invalidate = () =>
+            cache.invalidate(() =>
+              store.deleteWhere(
+                (e) => hasTags(e.attributes) && e.attributes.tags.includes('users'),
+              ),
+            );
+          return { cache, invalidate };
+        },
+      },
+    ])('a read after invalidating by $by sees the committed write', async ({ setUp }) => {
+      const { cache, invalidate } = setUp();
       const runtime = buildRuntime([cache]);
 
       try {
@@ -569,7 +604,7 @@ describe('integration: middleware-cache against real Postgres', {
         expect(await readUserOneName(runtime)).toEqual([{ name: 'Alice' }]);
         expect(driverQuerySpy).not.toHaveBeenCalled();
 
-        await cache.invalidate(target);
+        await invalidate();
 
         expect(await readUserOneName(runtime)).toEqual([{ name: 'Alicia' }]);
         expect(driverQuerySpy).toHaveBeenCalledTimes(1);
