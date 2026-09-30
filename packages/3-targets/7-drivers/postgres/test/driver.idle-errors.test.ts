@@ -107,7 +107,7 @@ describe('idle connection errors', () => {
     await connection.release();
 
     await expect(driver.acquireConnection()).rejects.toThrow(
-      'Postgres driver is closed. Call connect(binding) to reconnect.',
+      'Postgres connection lost or closed. Call connect(binding) to reconnect.',
     );
   });
 });

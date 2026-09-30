@@ -755,7 +755,12 @@ class PostgresDirectDriverImpl
       return;
     }
     this.#closed = true;
-    await this.directClient.end();
+    const releaseQueryLock = await acquireClientQueryLock(this.directClient);
+    try {
+      await this.directClient.end();
+    } finally {
+      releaseQueryLock();
+    }
     this.#connected = false;
   }
 

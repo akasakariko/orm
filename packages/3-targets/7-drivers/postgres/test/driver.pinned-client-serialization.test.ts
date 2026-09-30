@@ -30,7 +30,9 @@ function makeTrackedClient(state: ConcurrencyState) {
   return {
     connect: async () => undefined,
     on: () => undefined,
-    end: async () => undefined,
+    end: async () => {
+      state.completed.push('end');
+    },
     query: async (arg: unknown, _values?: unknown[]) => {
       const text = textOf(arg);
       state.inFlight++;
@@ -214,6 +216,18 @@ describe('pinned-client serialization', { timeout: timeouts.databaseOperation },
     await transaction.commit();
     await connection.release();
     expect(state.completed).toEqual(['BEGIN', 'select open-stream', 'COMMIT']);
+  });
+
+  it('close() on a direct driver ends the client only after the statement in flight finishes', async () => {
+    const state = createConcurrencyState();
+    const driver = makeDirectDriver(state);
+
+    const rows = queryRows(driver, 'select in-flight');
+    await expect.poll(() => state.started).toEqual(['select in-flight']);
+    await driver.close();
+    await rows;
+
+    expect(state.completed).toEqual(['select in-flight', 'end']);
   });
 
   it('does not serialize pool-level queries across distinct pool clients', async () => {

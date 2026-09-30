@@ -23,6 +23,8 @@ export type PostgresRuntimeDriver = RuntimeDriverInstance<'sql', 'postgres'> &
 const USE_BEFORE_CONNECT_MESSAGE =
   'Postgres driver not connected. Call connect(binding) before acquireConnection or execute.';
 const CLOSED_MESSAGE = 'Postgres driver is closed. Call connect(binding) to reconnect.';
+const CONNECTION_LOST_MESSAGE =
+  'Postgres connection lost or closed. Call connect(binding) to reconnect.';
 const ALREADY_CONNECTED_MESSAGE =
   'Postgres driver already connected. Call close() before reconnecting with a new binding.';
 
@@ -38,12 +40,18 @@ function unboundQuery<Row>(notConnected: () => Error): AsyncIterable<Row> {
   };
 }
 
+const notConnectedMessages = {
+  unbound: USE_BEFORE_CONNECT_MESSAGE,
+  close: CLOSED_MESSAGE,
+  'lost-connection': CONNECTION_LOST_MESSAGE,
+} as const;
+
 class PostgresUnboundDriverImpl implements PostgresRuntimeDriver {
   readonly familyId = 'sql' as const;
   readonly targetId = 'postgres' as const;
 
   #delegate: SqlDriver<PostgresBinding> | null = null;
-  #closed = false;
+  #closedBy: 'close' | 'lost-connection' | null = null;
   #cursorOpts: PostgresDriverCreateOptions['cursor'];
   #preparedStatements: PostgresDriverCreateOptions['preparedStatements'];
 
@@ -56,17 +64,14 @@ class PostgresUnboundDriverImpl implements PostgresRuntimeDriver {
     if (this.#delegate !== null) {
       return 'connected';
     }
-    if (this.#closed) {
+    if (this.#closedBy !== null) {
       return 'closed';
     }
     return 'unbound';
   }
 
   #notConnectedError(): Error {
-    return driverError(
-      'DRIVER.NOT_CONNECTED',
-      this.#closed ? CLOSED_MESSAGE : USE_BEFORE_CONNECT_MESSAGE,
-    );
+    return driverError('DRIVER.NOT_CONNECTED', notConnectedMessages[this.#closedBy ?? 'unbound']);
   }
 
   #requireDelegate(): SqlDriver<PostgresBinding> {
@@ -86,7 +91,7 @@ class PostgresUnboundDriverImpl implements PostgresRuntimeDriver {
     this.#delegate = createBoundDriverFromBinding(binding, this.#cursorOpts, {
       preparedStatements: this.#preparedStatements,
     });
-    this.#closed = false;
+    this.#closedBy = null;
   }
 
   async acquireConnection(): Promise<SqlConnection> {
@@ -107,7 +112,7 @@ class PostgresUnboundDriverImpl implements PostgresRuntimeDriver {
     const syncDelegateState = (): void => {
       if (this.#delegate === delegate && delegate.state === 'closed') {
         this.#delegate = null;
-        this.#closed = true;
+        this.#closedBy = 'lost-connection';
       }
     };
     const wrapped: SqlConnection = {
@@ -137,11 +142,9 @@ class PostgresUnboundDriverImpl implements PostgresRuntimeDriver {
 
   async close(): Promise<void> {
     const delegate = this.#delegate;
-    if (delegate !== null) {
-      this.#delegate = null;
-      await delegate.close();
-    }
-    this.#closed = true;
+    this.#delegate = null;
+    this.#closedBy = 'close';
+    await delegate?.close();
   }
 
   query<Row = Record<string, unknown>>(request: SqlExecuteRequest): AsyncIterable<Row> {
