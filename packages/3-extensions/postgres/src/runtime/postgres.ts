@@ -227,7 +227,7 @@ export default function postgres<TContract extends Contract<SqlStorage>>(
     return runtime;
   };
 
-  // Once connected, the runtime's close starts in the same call as close(), so the runtime's tick rule is measured from the caller's close().
+  // Once connected, the runtime's close starts in the same call as close(), so the runtime's idle wait is measured from the caller's close().
   const closeOwnedRuntime = async (): Promise<void> => {
     if (!driverConnected) {
       await connectPromise?.catch(() => undefined);
@@ -243,10 +243,7 @@ export default function postgres<TContract extends Contract<SqlStorage>>(
     enums,
     nativeEnums,
     getRuntime,
-    getOrmRuntime: () =>
-      closePromise !== undefined && ownsPool && runtimeInstance !== undefined
-        ? runtimeInstance
-        : getRuntime(),
+    getRuntimeForWork: getRuntime,
   });
 
   return {

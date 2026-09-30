@@ -215,13 +215,15 @@ describe('a promise pending when close() is called on a client that owns its poo
   };
   const calls: string[] = [];
   const statements: string[] = [];
+  let queryGate: Promise<void> | undefined;
 
   beforeEach(() => {
     unhandledRejections.length = 0;
     calls.length = 0;
     statements.length = 0;
+    queryGate = undefined;
     process.on('unhandledRejection', recordUnhandledRejection);
-    // Each statement is answered on a later tick, as a real socket does. Like pg-pool, end() waits for every checked-out client to be released, then settles on a
+    // Each statement is answered on a later turn of the event loop, as a real socket does. Like pg-pool, end() waits for every checked-out client to be released, then settles on a
     // later macrotask, as the real socket close does.
     let checkedOut = 0;
     let wakeEnd: (() => void) | undefined;
@@ -241,6 +243,7 @@ describe('a promise pending when close() is called on a client that owns its poo
           query: vi.fn(async (arg: unknown) => {
             calls.push('query');
             await new Promise((resolve) => setTimeout(resolve, 0));
+            await queryGate;
             const text = typeof arg === 'string' ? arg : String((arg as { text: unknown }).text);
             statements.push(text);
             const ada = { id: 1, email: 'ada@example.com', name: 'Ada', invited_by_id: null };
@@ -343,7 +346,7 @@ describe('a promise pending when close() is called on a client that owns its poo
     expect(calls.indexOf('query')).toBeLessThan(calls.indexOf('end'));
   });
 
-  it('an ORM create() whose insert starts in the tick of the close is admitted and resolves', async () => {
+  it('an ORM create() issues its insert when it is called, so the close waits for it and it resolves', async () => {
     const db = await connectedClient();
 
     const outcome = await closeWhilePending(
@@ -356,39 +359,82 @@ describe('a promise pending when close() is called on a client that owns its poo
     });
   });
 
-  it("an ORM include('posts').create() keeps the runtime busy from the close onward, so its insert and reload both run and it resolves", async () => {
+  it.each([
+    [
+      "include('posts').create()",
+      (db: Awaited<ReturnType<typeof connectedClient>>) =>
+        db.orm.public.User.include('posts').create({ email: 'ada@example.com', name: 'Ada' }),
+    ],
+    [
+      'nested create',
+      (db: Awaited<ReturnType<typeof connectedClient>>) =>
+        db.orm.public.User.create({
+          email: 'ada@example.com',
+          name: 'Ada',
+          posts: (post) => post.create([{ id: 1, title: 'Hello', views: 0 }]),
+        }),
+    ],
+  ])(
+    'an ORM %s left pending at close() is refused with "Postgres client is closed", so it must be awaited first',
+    async (_name, run) => {
+      const db = await connectedClient();
+
+      const outcome = await closeWhilePending(db, run(db), [
+        expect.objectContaining({ message: 'Postgres client is closed' }),
+      ]);
+
+      expect(outcome).toEqual({
+        rejected: expect.objectContaining({
+          code: 'DRIVER.NOT_CONNECTED',
+          message: 'Postgres client is closed',
+        }),
+      });
+    },
+  );
+
+  it("an ORM include('posts').create() awaited before close() completes", async () => {
     const db = await connectedClient();
 
-    const outcome = await closeWhilePending(
-      db,
-      db.orm.public.User.include('posts').create({ email: 'ada@example.com', name: 'Ada' }),
-    );
-
-    expect(outcome).toEqual({
-      resolved: { id: 1, email: 'ada@example.com', name: 'Ada', invitedById: null, posts: [] },
+    const created = await db.orm.public.User.include('posts').create({
+      email: 'ada@example.com',
+      name: 'Ada',
     });
-    expect(statements.some((text) => text.startsWith('INSERT INTO "public"."users"'))).toBe(true);
+    await db.close();
+
+    expect(created).toEqual({
+      id: 1,
+      email: 'ada@example.com',
+      name: 'Ada',
+      invitedById: null,
+      posts: [],
+    });
   });
 
-  it('a nested create keeps the runtime busy through its transaction and reload, so it commits and resolves', async () => {
+  it('refuses an unrelated ORM call made after close() at once, while the close waits only for the query already in flight', async () => {
     const db = await connectedClient();
-
-    const outcome = await closeWhilePending(
-      db,
-      db.orm.public.User.create({
-        email: 'ada@example.com',
-        name: 'Ada',
-        posts: (post) => post.create([{ id: 1, title: 'Hello', views: 0 }]),
-      }),
-    );
-
-    expect(outcome).toEqual({
-      resolved: { id: 1, email: 'ada@example.com', name: 'Ada', invitedById: null },
+    let openGate: () => void = () => {};
+    queryGate = new Promise<void>((resolve) => {
+      openGate = resolve;
     });
-    expect(statements).toContain('COMMIT');
+    const inFlight = db.orm.public.User.first();
+    await expect.poll(() => calls.includes('query')).toBe(true);
+    let closed = false;
+    const closing = db.close().then(() => {
+      closed = true;
+    });
+
+    await expect(db.orm.public.User.first()).rejects.toMatchObject({
+      code: 'DRIVER.NOT_CONNECTED',
+      message: 'Postgres client is closed',
+    });
+    expect(closed).toBe(false);
+    openGate();
+    await expect(inFlight).resolves.toBeNull();
+    await closing;
+    expect(closed).toBe(true);
   });
 
-  it('close() closes the runtime in the same call, so a lazy read awaited a tick later is refused, as on a connection', async () => {
+  it('close() closes the runtime in the same call, so a lazy read awaited a turn of the event loop later is refused, as on a connection', async () => {
     const db = await connectedClient();
     const runtimeClose = vi.spyOn(db.runtime(), 'close');
     const pending = db.orm.public.User.all();

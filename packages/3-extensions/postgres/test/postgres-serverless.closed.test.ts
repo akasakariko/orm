@@ -250,10 +250,18 @@ const busyChainReturns: ReadonlyArray<[...UnawaitedReturn, unknown]> = [
       }),
     adaRow,
   ],
+  [
+    'a helper that awaits a create and then returns a transaction',
+    async (db) => {
+      await db.orm.public.User.create(ada);
+      return db.transaction(async (tx) => (await tx.orm.public.User.all()).length);
+    },
+    1,
+  ],
 ];
 
-// The database answers on a later tick, as a real socket does, so each query of a chain starts after the previous one has answered.
-describe('a promise returned without await, with a database that answers on a later tick', () => {
+// The database answers on a later turn of the event loop, as a real socket does, so each query of a chain starts after the previous one has answered.
+describe('a promise returned without await, with a database that answers on a later turn of the event loop', () => {
   const serverless = postgresServerless<Contract>({ contractJson: fixtureContract });
 
   async function returnWithoutAwait(run: (db: Connection) => PromiseLike<unknown>) {
@@ -273,7 +281,7 @@ describe('a promise returned without await, with a database that answers on a la
     },
   );
 
-  it('a helper that waits on a timer before its query starts after the runtime was idle for a tick, and is refused', async () => {
+  it('a helper that waits on a timer before its query starts after the runtime was idle for a turn of the event loop, and is refused', async () => {
     const outcome = await settled(
       returnWithoutAwait(async (db) => {
         await new Promise((resolve) => setTimeout(resolve, 20));
@@ -282,6 +290,24 @@ describe('a promise returned without await, with a database that answers on a la
     );
 
     expect(outcome).toEqual({ rejected: expect.objectContaining(runtimeClosedError) });
+    expectOneEndAndNoQueryAfterIt();
+  });
+
+  it('a helper that calls db.runtime() after the scope has ended throws "Postgres connection is closed" at that call, as an ordinary unawaited failure', async () => {
+    const outcome = await settled(
+      returnWithoutAwait(async (db) => {
+        await db.orm.public.User.first();
+        return (await db.runtime().query(db.sql.public.users.select('id').build()).toArray())
+          .length;
+      }),
+    );
+
+    const connectionClosed = expect.objectContaining({
+      code: 'DRIVER.NOT_CONNECTED',
+      message: 'Postgres connection is closed',
+    });
+    expect(outcome).toEqual({ rejected: connectionClosed });
+    expect(unhandledRejections).toEqual([connectionClosed]);
     expectOneEndAndNoQueryAfterIt();
   });
 });

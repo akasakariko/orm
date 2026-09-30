@@ -61,25 +61,25 @@ export interface PostgresRuntimeBoundMembersOptions<TContract extends Contract<S
   readonly enums: NamespacedEnums<TContract>;
   readonly nativeEnums: NamespacedNativeEnums<TContract>;
   readonly getRuntime: () => Runtime;
-  // The runtime the ORM's own queries run on. After close() it may return the closed runtime, so an ORM write whose inner queries start in the tick of the close is admitted by the runtime's rule instead of failing on the owner's closed check.
-  readonly getOrmRuntime: () => Runtime;
+  // The runtime that ORM queries, transaction() and prepare() run on. An owner whose close() should let continuing work finish returns its runtime even after close(), so the runtime's own rule decides; otherwise it is getRuntime.
+  readonly getRuntimeForWork: () => Runtime;
 }
 
 export function buildPostgresRuntimeBoundMembers<TContract extends Contract<SqlStorage>>(
   options: PostgresRuntimeBoundMembersOptions<TContract>,
 ): PostgresRuntimeBoundMembers<TContract> {
-  const { context, rawCodecInferer, enums, nativeEnums, getRuntime, getOrmRuntime } = options;
+  const { context, rawCodecInferer, enums, nativeEnums, getRuntime, getRuntimeForWork } = options;
 
   const orm: OrmClient<TContract> = ormBuilder({
     runtime: {
       query(plan) {
-        return getOrmRuntime().query(plan);
+        return getRuntimeForWork().query(plan);
       },
       execute(plan) {
-        return getOrmRuntime().execute(plan);
+        return getRuntimeForWork().execute(plan);
       },
       connection() {
-        return getOrmRuntime().connection();
+        return getRuntimeForWork().connection();
       },
     },
     context,
@@ -93,7 +93,7 @@ export function buildPostgresRuntimeBoundMembers<TContract extends Contract<SqlS
     declaration: D,
     callback: (params: BindSiteParams<D>) => Q,
   ): Promise<PreparedFrom<ParamsFromDeclaration<D, CT>, Q>> {
-    return prepareQuery<D, Q, CT>(getRuntime(), declaration, callback);
+    return prepareQuery<D, Q, CT>(getRuntimeForWork(), declaration, callback);
   }
 
   return {
@@ -106,7 +106,7 @@ export function buildPostgresRuntimeBoundMembers<TContract extends Contract<SqlS
     prepare,
 
     transaction<R>(fn: (tx: PostgresTransactionContext<TContract>) => PromiseLike<R>): Promise<R> {
-      return withTransaction(getRuntime(), (txCtx) => {
+      return withTransaction(getRuntimeForWork(), (txCtx) => {
         const txSql: Db<TContract> = sqlBuilder<TContract>({
           context,
           rawCodecInferer,

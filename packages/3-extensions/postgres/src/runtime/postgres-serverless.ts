@@ -147,14 +147,14 @@ export default function postgresServerless<TContract extends Contract<SqlStorage
     rawCodecInferer,
   );
 
-  const buildRuntimeBoundMembers = (getRuntime: () => Runtime, getOrmRuntime: () => Runtime) =>
+  const buildRuntimeBoundMembers = (getRuntime: () => Runtime, getRuntimeForWork: () => Runtime) =>
     buildPostgresRuntimeBoundMembers<TContract>({
       context,
       rawCodecInferer,
       enums,
       nativeEnums,
       getRuntime,
-      getOrmRuntime,
+      getRuntimeForWork,
     });
 
   // The ORM checks the execution context when it is built. Building the members once here makes
