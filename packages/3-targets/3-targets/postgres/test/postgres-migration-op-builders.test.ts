@@ -7,9 +7,10 @@ import type {
 import type { ControlStack } from '@internal/framework-components/control';
 import type { SqlStorage } from '@internal/sql-contract/types';
 import type { DdlColumn, DdlTableConstraint } from '@internal/sql-relational-core/ast';
-import { col } from '@internal/sql-relational-core/contract-free';
+import { col, lit } from '@internal/sql-relational-core/contract-free';
 import { blindCast } from '@internal/utils/casts';
 import { describe, expect, it } from 'vitest';
+import type { ColumnDefaultSetting } from '../src/core/ddl/nodes';
 import type { AlterColumnTypeOptions } from '../src/core/migrations/op-factory-call';
 import type { DataTransformOptions } from '../src/core/migrations/operations/data-transform';
 import type { CreateIndexExtras } from '../src/core/migrations/operations/indexes';
@@ -178,13 +179,13 @@ class ExposedMigration extends PostgresMigration<Contract, Contract> {
     return this.dropNotNull(options);
   }
 
-  callSetDefault(options: {
-    readonly schema: string;
-    readonly table: string;
-    readonly column: string;
-    readonly defaultSql: string;
-    readonly operationClass?: 'additive' | 'widening';
-  }): Promise<Op> {
+  callSetDefault(
+    options: ColumnDefaultSetting & {
+      readonly schema: string;
+      readonly table: string;
+      readonly operationClass?: 'additive' | 'widening';
+    },
+  ): Promise<Op> {
     return this.setDefault(options);
   }
 
@@ -366,7 +367,8 @@ const cases: ReadonlyArray<{
         schema: 'public',
         table: 'widget',
         column: 'name',
-        defaultSql: "'unnamed'",
+        type: 'text',
+        default: lit('unnamed'),
       }),
   },
   {

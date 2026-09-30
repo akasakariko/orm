@@ -50,9 +50,9 @@ import type { PostgresNativeEnumSchemaNode } from '../schema-ir/postgres-native-
 import type { PostgresTableSchemaNode } from '../schema-ir/postgres-table-schema-node';
 import { PostgresSchemaNodeKind } from '../schema-ir/schema-node-kinds';
 import {
+  columnDefaultSetting,
   renderColumnAlterType,
   renderColumnDdl,
-  renderColumnDefaultSql,
 } from './column-ddl-rendering';
 import { resolveNamespaceIdForDdlSchema } from './control-policy';
 import {
@@ -713,14 +713,13 @@ function mapColumnDefaultNodeIssue(
     SqlColumnDefaultIR,
     'a not-found/not-equal column-default issue always carries the expected default node'
   >(issue.expected);
-  const defaultSql = renderColumnDefaultSql(columnName, defaultNode, codecHooks);
-  if (!defaultSql) return ok([]);
+  const setting = columnDefaultSetting(columnName, defaultNode, codecHooks);
+  if (setting === undefined) return ok([]);
   return ok([
     new SetDefaultCall(
       schemaName,
       tableName,
-      columnName,
-      defaultSql,
+      setting,
       issueOutcome(issue) === 'not-equal' ? 'widening' : 'additive',
     ),
   ]);

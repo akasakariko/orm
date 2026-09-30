@@ -359,7 +359,7 @@ On Postgres the operations are **methods on the `Migration` base class**, each t
 **Postgres** operations (representative set, all `this.<name>({...})`):
 
 - Tables: `createTable`, `dropTable`.
-- Columns: `addColumn` (`column: col(name, nativeType, { codecRef })`), `dropColumn`, `alterColumnType`, `setNotNull`, `dropNotNull`, `setDefault`, `dropDefault`.
+- Columns: `addColumn` (`column: col(name, nativeType, { codecRef })`), `dropColumn`, `alterColumnType`, `setNotNull`, `dropNotNull`, `setDefault` (`column`, `type`, `default: lit(value)` or `fn(expression)`, `codecRef`), `dropDefault`.
 - Constraints: `addPrimaryKey`, `addForeignKey`, `addUnique`, `addCheckConstraint`, `renameCheckConstraint`, `dropCheckConstraint`, `dropConstraint`.
 - Indexes: `createIndex`, `renameIndex`, `dropIndex`.
 - Enums: `createNativeEnumType`, `addNativeEnumValue`, `dropNativeEnumType`.

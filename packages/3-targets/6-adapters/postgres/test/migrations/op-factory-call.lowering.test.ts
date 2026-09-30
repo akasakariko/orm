@@ -21,7 +21,7 @@ import type { CodecControlHooks } from '@internal/family-sql/control';
 import { APP_SPACE_ID } from '@internal/framework-components/control';
 import { keepInternalSpecifiers } from '@internal/framework-components/emission';
 import type { StorageColumn } from '@internal/sql-contract/types';
-import { col } from '@internal/sql-relational-core/contract-free';
+import { col, fn, lit } from '@internal/sql-relational-core/contract-free';
 import { createPostgresBuiltinCodecLookup } from '@internal/target-postgres/codecs';
 import {
   AddColumnCall,
@@ -82,7 +82,11 @@ describe('renderOps', () => {
       }),
       new SetNotNullCall('public', 'user', 'email'),
       new DropNotNullCall('public', 'user', 'nickname'),
-      new SetDefaultCall('public', 'user', 'created_at', 'DEFAULT now()'),
+      new SetDefaultCall('public', 'user', {
+        column: 'created_at',
+        type: 'timestamptz',
+        default: fn('now()'),
+      }),
       new DropDefaultCall('public', 'user', 'updated_at'),
       new AddPrimaryKeyCall('public', 'user', 'user_pkey', ['id']),
       new AddUniqueCall('public', 'user', 'user_email_key', ['email']),
@@ -307,5 +311,48 @@ describe('AddNotNullColumnWithTempDefaultCall', () => {
     expect(op.execute[0]?.sql).toBe(
       `ALTER TABLE "public"."doc" ADD COLUMN "embedding" vector(3) DEFAULT ('[0,0,0]') NOT NULL`,
     );
+  });
+});
+
+describe('SetDefaultCall', () => {
+  async function setDefaultSql(call: SetDefaultCall): Promise<string | undefined> {
+    const op = await call.toOp(testAdapter);
+    return op.execute[0]?.sql;
+  }
+
+  it('writes a literal default through the column codec, as CREATE TABLE does', async () => {
+    expect({
+      scalar: await setDefaultSql(
+        new SetDefaultCall('public', 'user', {
+          column: 'avatar',
+          type: 'bytea',
+          default: lit('aGVsbG8='),
+          codecRef: { codecId: 'pg/bytea@1' },
+        }),
+      ),
+      list: await setDefaultSql(
+        new SetDefaultCall('public', 'user', {
+          column: 'documents',
+          type: 'jsonb[]',
+          default: lit([{ a: 1 }, 'x']),
+          codecRef: { codecId: 'pg/jsonb@1', many: true },
+        }),
+      ),
+    }).toEqual({
+      scalar: `ALTER TABLE "public"."user" ALTER COLUMN "avatar" SET DEFAULT '\\x68656c6c6f'::bytea`,
+      list: `ALTER TABLE "public"."user" ALTER COLUMN "documents" SET DEFAULT ARRAY['{"a":1}'::jsonb, '"x"'::jsonb]::jsonb[]`,
+    });
+  });
+
+  it('writes a function default as authored', async () => {
+    expect(
+      await setDefaultSql(
+        new SetDefaultCall('public', 'user', {
+          column: 'created_at',
+          type: 'timestamptz',
+          default: fn('now()'),
+        }),
+      ),
+    ).toBe(`ALTER TABLE "public"."user" ALTER COLUMN "created_at" SET DEFAULT (now())`);
   });
 });

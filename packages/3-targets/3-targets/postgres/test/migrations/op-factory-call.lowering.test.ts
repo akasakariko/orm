@@ -1,6 +1,6 @@
 import type { ExecuteRequestLowerer } from '@internal/family-sql/control-adapter';
 import { UNBOUND_NAMESPACE_ID } from '@internal/framework-components/ir';
-import { col, lit } from '@internal/sql-relational-core/contract-free';
+import { col, fn, lit } from '@internal/sql-relational-core/contract-free';
 import { parseNaming } from '@internal/sql-schema-ir/naming';
 import { describe, expect, it } from 'vitest';
 import {
@@ -12,6 +12,7 @@ import {
   rlsPolicyExistsAst,
   tableExistsAst,
 } from '../../src/contract-free/checks';
+import * as contractFreeDdl from '../../src/contract-free/ddl';
 import {
   PostgresAlterIndexRename,
   PostgresCreateIndex,
@@ -312,56 +313,69 @@ describe('DropNotNullCall', () => {
 });
 
 describe('SetDefaultCall', () => {
-  it('lowers typed checks and sets the default clause verbatim', async () => {
+  const setting = {
+    column: 'avatar',
+    type: 'bytea',
+    default: lit('aGVsbG8='),
+    codecRef: { codecId: 'pg/bytea@1' },
+  };
+
+  it('lowers a typed AlterTable DDL node carrying the default, type and codec', async () => {
     const { lowerer, received } = recordingCheckLowerer();
-    const call = new SetDefaultCall('public', 'user', 'status', "DEFAULT 'pending'");
+    const call = new SetDefaultCall('public', 'user', setting);
     const op = await call.toOp(lowerer);
 
-    expect(received).toHaveLength(3);
+    expect(received).toHaveLength(4);
+    expect(received[2]).toEqual(
+      contractFreeDdl.alterTable({
+        schema: 'public',
+        table: 'user',
+        actions: [contractFreeDdl.setDefaultAction(setting)],
+      }),
+    );
     expect(op.operationClass).toBe('additive');
-    expect(op.execute).toEqual([
-      {
-        description: 'set default on "status"',
-        sql: `ALTER TABLE "public"."user" ALTER COLUMN "status" SET DEFAULT 'pending'`,
-      },
-    ]);
+    expect(op.execute).toEqual([{ description: 'set default on "avatar"', sql: 'LOWERED 3' }]);
     expect(op.precheck).toEqual([
-      { description: 'ensure column "status" exists', sql: 'LOWERED 1', params: ['p1'] },
+      { description: 'ensure column "avatar" exists', sql: 'LOWERED 1', params: ['p1'] },
     ]);
     expect(op.postcheck).toEqual([
-      { description: 'verify column "status" has a default', sql: 'LOWERED 3', params: ['p3'] },
+      { description: 'verify column "avatar" has a default', sql: 'LOWERED 4', params: ['p4'] },
     ]);
-    expect(call.label).toBe('Set default on "user"."status"');
+    expect(call.label).toBe('Set default on "user"."avatar"');
   });
 
   it('honors an explicit widening operationClass', async () => {
     const { lowerer } = recordingCheckLowerer();
-    const call = new SetDefaultCall('public', 'user', 'status', "DEFAULT 'pending'", 'widening');
+    const call = new SetDefaultCall('public', 'user', setting, 'widening');
     const op = await call.toOp(lowerer);
     expect(op.operationClass).toBe('widening');
   });
 
   it('toOp() throws when no lowerer is provided', async () => {
-    const call = new SetDefaultCall('public', 'user', 'status', "DEFAULT 'pending'");
+    const call = new SetDefaultCall('public', 'user', setting);
     await expect(async () => call.toOp()).rejects.toThrow('createPostgresMigrationPlanner');
   });
 
-  it('renders this.setDefault, including operationClass only when non-additive', () => {
-    const additive = new SetDefaultCall('public', 'user', 'status', "DEFAULT 'pending'");
+  it('renders this.setDefault with the default, type and codec, and operationClass only when non-additive', () => {
+    const additive = new SetDefaultCall('public', 'user', setting);
     expect(additive.renderTypeScript()).toBe(
-      'this.setDefault({ schema: "public", table: "user", column: "status", defaultSql: "DEFAULT \'pending\'" })',
+      'this.setDefault({ schema: "public", table: "user", column: "avatar", type: "bytea", default: lit("aGVsbG8="), codecRef: { codecId: "pg/bytea@1" } })',
     );
+    expect(additive.importRequirements()).toEqual([
+      { moduleSpecifier: '@internal/postgres/migration', symbol: 'lit' },
+    ]);
     const widening = new SetDefaultCall(
-      'public',
+      UNBOUND_NAMESPACE_ID,
       'user',
-      'status',
-      "DEFAULT 'pending'",
+      { column: 'seen', type: 'timestamptz', default: fn('now()') },
       'widening',
     );
     expect(widening.renderTypeScript()).toBe(
-      'this.setDefault({ schema: "public", table: "user", column: "status", defaultSql: "DEFAULT \'pending\'", operationClass: "widening" })',
+      'this.setDefault({ table: "user", column: "seen", type: "timestamptz", default: fn("now()"), operationClass: "widening" })',
     );
-    expect(additive.importRequirements()).toEqual([]);
+    expect(widening.importRequirements()).toEqual([
+      { moduleSpecifier: '@internal/postgres/migration', symbol: 'fn' },
+    ]);
   });
 });
 

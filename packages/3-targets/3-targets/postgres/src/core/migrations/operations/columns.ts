@@ -10,6 +10,7 @@ import {
   tableIsEmptyAst,
 } from '../../../contract-free/checks';
 import * as contractFreeDdl from '../../../contract-free/ddl';
+import type { ColumnDefaultSetting } from '../../ddl/nodes';
 import { quoteIdentifier } from '../../sql-utils';
 import { boundSchema } from '../bound-schema';
 import { qualifyTableName } from '../planner-sql-checks';
@@ -196,9 +197,8 @@ export async function dropNotNull(
 }
 
 /**
- * `defaultSql` is the full `DEFAULT …` clause as produced by
- * `buildColumnDefaultSql` — e.g. `"DEFAULT 42"`,
- * `"DEFAULT (CURRENT_TIMESTAMP)"`, or `"DEFAULT nextval('seq'::regclass)"`.
+ * `setting.type` is the column type as DDL writes it, and a literal default is written through the
+ * codec `setting.codecRef` names, by the adapter that lowers the statement.
  *
  * `operationClass` defaults to `'additive'` (setting a default on a column
  * that currently has none). The reconciliation planner passes `'widening'`
@@ -208,17 +208,23 @@ export async function dropNotNull(
 export async function setDefault(
   schemaName: string,
   tableName: string,
-  columnName: string,
-  defaultSql: string,
+  setting: ColumnDefaultSetting,
   lowerer: ExecuteRequestLowerer,
   operationClass: 'additive' | 'widening' = 'additive',
 ): Promise<Op> {
-  const qualified = qualifyTableName(schemaName, tableName);
+  const columnName = setting.column;
   const { present } = await columnExistsSteps(lowerer, {
     schema: schemaName,
     table: tableName,
     column: columnName,
   });
+  const setDefaultExec = await lowerer.lowerToExecuteRequest(
+    contractFreeDdl.alterTable({
+      ...ifDefined('schema', boundSchema(schemaName)),
+      table: tableName,
+      actions: [contractFreeDdl.setDefaultAction(setting)],
+    }),
+  );
   const hasDefault = await lowerer.lowerToExecuteRequest(
     columnDefaultAst({ schema: schemaName, table: tableName, column: columnName }).defaultPresent(),
   );
@@ -228,12 +234,7 @@ export async function setDefault(
     operationClass,
     target: targetDetails('column', columnName, schemaName, tableName),
     precheck: [step(`ensure column "${columnName}" exists`, present.sql, present.params)],
-    execute: [
-      step(
-        `set default on "${columnName}"`,
-        `ALTER TABLE ${qualified} ALTER COLUMN ${quoteIdentifier(columnName)} SET ${defaultSql}`,
-      ),
-    ],
+    execute: [step(`set default on "${columnName}"`, setDefaultExec.sql)],
     postcheck: [
       step(`verify column "${columnName}" has a default`, hasDefault.sql, hasDefault.params),
     ],

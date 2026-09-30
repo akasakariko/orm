@@ -14,7 +14,7 @@
  * op-factory-call.lowering.test.ts.
  */
 
-import { col, lit, primaryKey } from '@internal/sql-relational-core/contract-free';
+import { col, fn, lit, primaryKey } from '@internal/sql-relational-core/contract-free';
 import {
   AddColumnCall,
   AddForeignKeyCall,
@@ -55,22 +55,28 @@ describe('Postgres call classes - renderTypeScript + importRequirements', () => 
     expect(call.importRequirements()).toEqual([]);
   });
 
-  it('SetDefaultCall emits this.setDefault({...}), omits operationClass when additive', () => {
-    const additive = new SetDefaultCall('public', 'user', 'created_at', "DEFAULT 'now'");
+  it('SetDefaultCall emits this.setDefault({...}) with the default, type and codec, and omits operationClass when additive', () => {
+    const additive = new SetDefaultCall('public', 'user', {
+      column: 'status',
+      type: 'text',
+      default: lit('open'),
+      codecRef: { codecId: 'pg/text@1' },
+    });
     expect(additive.renderTypeScript()).toBe(
-      `this.setDefault({ schema: "public", table: "user", column: "created_at", defaultSql: "DEFAULT 'now'" })`,
+      `this.setDefault({ schema: "public", table: "user", column: "status", type: "text", default: lit("open"), codecRef: { codecId: "pg/text@1" } })`,
     );
-    expect(additive.importRequirements()).toEqual([]);
+    expect(additive.importRequirements()).toEqual([
+      { moduleSpecifier: '@internal/postgres/migration', symbol: 'lit' },
+    ]);
 
     const widening = new SetDefaultCall(
       'public',
       'user',
-      'created_at',
-      "DEFAULT 'now'",
+      { column: 'created_at', type: 'timestamptz', default: fn('now()') },
       'widening',
     );
     expect(widening.renderTypeScript()).toBe(
-      `this.setDefault({ schema: "public", table: "user", column: "created_at", defaultSql: "DEFAULT 'now'", operationClass: "widening" })`,
+      `this.setDefault({ schema: "public", table: "user", column: "created_at", type: "timestamptz", default: fn("now()"), operationClass: "widening" })`,
     );
   });
 

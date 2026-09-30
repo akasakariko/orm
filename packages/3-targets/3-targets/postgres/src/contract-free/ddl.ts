@@ -2,6 +2,7 @@ import type { DdlColumn, DdlTableConstraint } from '@internal/sql-relational-cor
 import {
   AddColumnAction,
   type AnyAlterTableAction,
+  type ColumnDefaultSetting,
   type DdlIndexElements,
   DropDefaultAction,
   PostgresAlterIndexRename,
@@ -17,6 +18,7 @@ import {
   PostgresDropPolicy,
   PostgresDropType,
   type RlsPolicyOperation,
+  SetDefaultAction,
 } from '../core/ddl/nodes';
 
 /**
@@ -89,6 +91,15 @@ export function addColumnAction(column: DdlColumn): AddColumnAction {
 }
 
 /**
+ * Build a `SET DEFAULT` action (`ALTER COLUMN "<name>" SET DEFAULT …`) for use
+ * inside {@link alterTable}. A literal default flows through the adapter's
+ * `pgRenderDdlColumnDefault` path, as it does for {@link addColumnAction}.
+ */
+export function setDefaultAction(setting: ColumnDefaultSetting): SetDefaultAction {
+  return new SetDefaultAction(setting);
+}
+
+/**
  * Build a `DROP DEFAULT` action (`ALTER COLUMN "<name>" DROP DEFAULT`) for
  * use inside {@link alterTable}. The renderer quotes the column name.
  */
@@ -98,7 +109,8 @@ export function dropDefaultAction(columnName: string): DropDefaultAction {
 
 /**
  * Build a Postgres `ALTER TABLE` query node carrying one or more actions.
- * See {@link addColumnAction} / {@link dropDefaultAction} for building actions.
+ * See {@link addColumnAction} / {@link setDefaultAction} / {@link dropDefaultAction} for
+ * building actions.
  */
 export function alterTable(options: {
   readonly table: string;

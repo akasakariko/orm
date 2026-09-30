@@ -5,8 +5,8 @@ import { applicationDomainOf } from '@repo/test-utils';
 import { describe, expect, it } from 'vitest';
 import { postgresResolveDefault } from '../../src/core/default-normalizer';
 import {
+  columnDefaultSetting,
   renderColumnDdl,
-  renderColumnDefaultSql,
 } from '../../src/core/migrations/column-ddl-rendering';
 import { buildPostgresPlanDiff } from '../../src/core/migrations/diff-database-schema';
 import { renderDefaultLiteral } from '../../src/core/migrations/planner-ddl-builders';
@@ -78,19 +78,20 @@ describe('a sql`...` default on Postgres renders as authored', () => {
     ['CURRENT_TIMESTAMP', 'timestamptz', 'pg/timestamptz@1'],
     ["'{}'::jsonb", 'jsonb', 'pg/jsonb@1'],
   ])(
-    'writes DEFAULT (%s) on a %s column in CREATE TABLE and SET DEFAULT',
+    'writes %s as authored on a %s column in CREATE TABLE and SET DEFAULT',
     (expression, nativeType, codecId) => {
       const column = expectedColumn(nativeType, codecId, expression);
 
       const ddl = renderColumnDdl('value', column, new Map());
+      const setting = columnDefaultSetting('value', defaultNodeOf(column), new Map());
 
-      expect({ type: ddl.type, default: ddl.default }).toEqual({
-        type: nativeType,
-        default: { kind: 'function', expression },
+      expect({
+        createTable: { type: ddl.type, default: ddl.default },
+        setDefault: { type: setting?.type, default: setting?.default },
+      }).toEqual({
+        createTable: { type: nativeType, default: { kind: 'function', expression } },
+        setDefault: { type: nativeType, default: { kind: 'function', expression } },
       });
-      expect(renderColumnDefaultSql('v', defaultNodeOf(column), new Map())).toBe(
-        `DEFAULT (${expression})`,
-      );
     },
   );
 

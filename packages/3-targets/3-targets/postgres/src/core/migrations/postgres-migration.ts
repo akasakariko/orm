@@ -8,6 +8,8 @@ import { MigrationContractViews } from '@internal/migration-tools/migration';
 import type { SqlStorage } from '@internal/sql-contract/types';
 import type { DdlColumn, DdlTableConstraint } from '@internal/sql-relational-core/ast';
 import { blindCast } from '@internal/utils/casts';
+import { ifDefined } from '@internal/utils/defined';
+import type { ColumnDefaultSetting } from '../ddl/nodes';
 import { errorPostgresMigrationStackMissing } from '../errors';
 import { PostgresContractView } from '../postgres-contract-view';
 import { PostgresRlsPolicy, type RenderedRlsPolicyLiteral } from '../postgres-rls-policy';
@@ -385,18 +387,22 @@ export abstract class PostgresMigration<
     );
   }
 
-  protected setDefault(options: {
-    readonly schema: string;
-    readonly table: string;
-    readonly column: string;
-    readonly defaultSql: string;
-    readonly operationClass?: 'additive' | 'widening';
-  }): Promise<SqlMigrationPlanOperation<PostgresPlanTargetDetails>> {
+  protected setDefault(
+    options: ColumnDefaultSetting & {
+      readonly schema: string;
+      readonly table: string;
+      readonly operationClass?: 'additive' | 'widening';
+    },
+  ): Promise<SqlMigrationPlanOperation<PostgresPlanTargetDetails>> {
     return new SetDefaultCall(
       options.schema,
       options.table,
-      options.column,
-      options.defaultSql,
+      {
+        column: options.column,
+        type: options.type,
+        default: options.default,
+        ...ifDefined('codecRef', options.codecRef),
+      },
       options.operationClass,
     ).toOp(this.controlAdapterFor('setDefault'));
   }

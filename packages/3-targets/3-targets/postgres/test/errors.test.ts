@@ -8,7 +8,7 @@ import { renderLength } from '../src/core/codec-helpers';
 import { pgNumericDescriptor } from '../src/core/codecs';
 import { errorPostgresMigrationStackMissing } from '../src/core/errors';
 import {
-  buildColumnDefaultSql,
+  assertSafeDefaultExpression,
   buildColumnTypeSql,
 } from '../src/core/migrations/planner-ddl-builders';
 import { createPostgresMigrationRunner } from '../src/core/migrations/runner';
@@ -95,10 +95,8 @@ describe('postgresError sites', () => {
     expect(error).toMatchObject({ code: 'CONTRACT.PACK_CONTRIBUTION_INVALID' });
   });
 
-  it('buildColumnDefaultSql rejects an unsafe default expression as CONTRACT.DEFAULT_INVALID', () => {
-    const error = catchError(() =>
-      buildColumnDefaultSql({ kind: 'function', expression: 'now(); DROP TABLE users' }),
-    );
+  it('assertSafeDefaultExpression rejects an unsafe default expression as CONTRACT.DEFAULT_INVALID', () => {
+    const error = catchError(() => assertSafeDefaultExpression('now(); DROP TABLE users'));
     expect(isStructuredError(error)).toBe(true);
     expect(error).toMatchObject({ code: 'CONTRACT.DEFAULT_INVALID' });
   });

@@ -1,7 +1,6 @@
 import type { CodecControlHooks } from '@internal/family-sql/control';
 import type { StorageColumn } from '@internal/sql-contract/types';
 import {
-  buildColumnDefaultSql,
   buildColumnTypeSql,
   renderDefaultLiteral,
 } from '@internal/target-postgres/planner-ddl-builders';
@@ -122,50 +121,6 @@ describe('buildColumnTypeSql', () => {
 });
 
 // ---------------------------------------------------------------------------
-// buildColumnDefaultSql
-// ---------------------------------------------------------------------------
-
-describe('buildColumnDefaultSql', () => {
-  it('returns empty string for undefined default', () => {
-    expect(buildColumnDefaultSql(undefined)).toBe('');
-  });
-
-  it('renders literal string default', () => {
-    expect(buildColumnDefaultSql({ kind: 'literal', value: 'hello' })).toBe("DEFAULT 'hello'");
-  });
-
-  it('renders literal number default', () => {
-    expect(buildColumnDefaultSql({ kind: 'literal', value: 42 })).toBe('DEFAULT 42');
-  });
-
-  it('renders literal boolean default', () => {
-    expect(buildColumnDefaultSql({ kind: 'literal', value: true })).toBe('DEFAULT true');
-  });
-
-  it('returns empty string for autoincrement function', () => {
-    expect(buildColumnDefaultSql({ kind: 'function', expression: 'autoincrement()' })).toBe('');
-  });
-
-  it('renders non-autoincrement function default', () => {
-    expect(buildColumnDefaultSql({ kind: 'function', expression: 'now()' })).toBe(
-      'DEFAULT (now())',
-    );
-  });
-
-  it('renders sequence default', () => {
-    expect(buildColumnDefaultSql({ kind: 'sequence', name: 'user_id_seq' })).toBe(
-      `DEFAULT nextval('"user_id_seq"'::regclass)`,
-    );
-  });
-
-  it('rejects unsafe function expressions', () => {
-    expect(() =>
-      buildColumnDefaultSql({ kind: 'function', expression: 'now(); DROP TABLE users' }),
-    ).toThrow('Unsafe default expression');
-  });
-});
-
-// ---------------------------------------------------------------------------
 // renderDefaultLiteral
 // ---------------------------------------------------------------------------
 
@@ -209,31 +164,5 @@ describe('renderDefaultLiteral', () => {
   it('renders a mixed-type array literal element-by-element', () => {
     const result = renderDefaultLiteral([1, true, null], col({ nativeType: 'int4', many: true }));
     expect(result).toBe('ARRAY[1, true, NULL]::int4[]');
-  });
-});
-
-describe('buildColumnDefaultSql with a list column', () => {
-  it('renders DEFAULT with an empty array literal', () => {
-    const result = buildColumnDefaultSql(
-      { kind: 'literal', value: [] },
-      col({ nativeType: 'text', many: true }),
-    );
-    expect(result).toBe("DEFAULT '{}'");
-  });
-
-  it('renders DEFAULT with a populated array literal', () => {
-    const result = buildColumnDefaultSql(
-      { kind: 'literal', value: ['a', 'b'] },
-      col({ nativeType: 'text', many: true }),
-    );
-    expect(result).toBe(`DEFAULT ARRAY['a', 'b']::text[]`);
-  });
-
-  it('renders DEFAULT with int8 text elements cast to the list type', () => {
-    const result = buildColumnDefaultSql(
-      { kind: 'literal', value: ['1', '9007199254740993'] },
-      col({ nativeType: 'int8[]', many: true }),
-    );
-    expect(result).toBe(`DEFAULT ARRAY['1', '9007199254740993']::int8[]`);
   });
 });

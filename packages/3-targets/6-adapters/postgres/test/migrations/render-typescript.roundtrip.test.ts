@@ -18,7 +18,7 @@ import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { APP_SPACE_ID, storageHashHex } from '@internal/framework-components/control';
 import { keepInternalSpecifiers } from '@internal/framework-components/emission';
-import { col, primaryKey } from '@internal/sql-relational-core/contract-free';
+import { col, fn, lit, primaryKey } from '@internal/sql-relational-core/contract-free';
 import { createPostgresBuiltinCodecLookup } from '@internal/target-postgres/codecs';
 import {
   AddColumnCall,
@@ -34,6 +34,7 @@ import {
   RawSqlCall,
   RenameIndexCall,
   RenamePostgresRlsPolicyCall,
+  SetDefaultCall,
 } from '@internal/target-postgres/op-factory-call';
 import { TypeScriptRenderablePostgresMigration } from '@internal/target-postgres/planner-produced-postgres-migration';
 import { renderOps } from '@internal/target-postgres/render-ops';
@@ -232,6 +233,19 @@ describe('TypeScriptRenderablePostgresMigration round-trip', () => {
         [primaryKey(['id'])],
       ),
       new AddColumnCall('public', 'user', col('nickname', 'text')),
+      new AddColumnCall('public', 'user', col('avatar', 'bytea')),
+      new SetDefaultCall('public', 'user', {
+        column: 'avatar',
+        type: 'bytea',
+        default: lit('aGVsbG8='),
+        codecRef: { codecId: 'pg/bytea@1' },
+      }),
+      new SetDefaultCall(
+        'public',
+        'user',
+        { column: 'nickname', type: 'text', default: fn("'anonymous'") },
+        'widening',
+      ),
       new CreateIndexCall('public', 'user', 'user_email_idx', { columns: ['email'] }),
       new CreateIndexCall(
         'public',
@@ -356,6 +370,34 @@ describe('TypeScriptRenderablePostgresMigration round-trip', () => {
 
     await writeTypecheckDir(tmpDir, migration.renderTypeScript(keepInternalSpecifiers));
     // Non-zero exit (a type error in the rendered source) rejects.
+    await execFileAsync(tscPath, ['--project', tmpDir]);
+  });
+
+  it('rendered SET DEFAULT migration source typechecks against the live migration surface', {
+    timeout: timeouts.typeScriptCompilation,
+  }, async () => {
+    const migration = new TypeScriptRenderablePostgresMigration(
+      [
+        new SetDefaultCall('public', 'user', {
+          column: 'avatar',
+          type: 'bytea',
+          default: lit('aGVsbG8='),
+          codecRef: { codecId: 'pg/bytea@1' },
+        }),
+        new SetDefaultCall(
+          'public',
+          'user',
+          { column: 'seen', type: 'timestamptz', default: fn('now()') },
+          'widening',
+        ),
+      ],
+      META,
+      APP_SPACE_ID,
+      SNAPSHOTS_IMPORT_PATH,
+      testAdapter,
+    );
+
+    await writeTypecheckDir(tmpDir, migration.renderTypeScript(keepInternalSpecifiers));
     await execFileAsync(tscPath, ['--project', tmpDir]);
   });
 

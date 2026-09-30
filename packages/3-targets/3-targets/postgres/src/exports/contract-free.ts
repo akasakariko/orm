@@ -43,5 +43,6 @@ export {
   createSchema,
   createTable,
   dropDefaultAction,
+  setDefaultAction,
 } from '../contract-free/ddl';
 export { PostgresTableSource } from '../core/ast/table-source';

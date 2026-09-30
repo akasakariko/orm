@@ -3,6 +3,7 @@ export {
   type AlterTableActionVisitor,
   type AnyAlterTableAction,
   type AnyPostgresDdlNode,
+  type ColumnDefaultSetting,
   type DdlIndexElements,
   DropDefaultAction,
   PostgresAlterIndexRename,
@@ -20,4 +21,5 @@ export {
   PostgresDropPolicy,
   PostgresDropType,
   type RlsPolicyOperation,
+  SetDefaultAction,
 } from '../core/ddl/nodes';

@@ -13,9 +13,10 @@ import {
 import { blindCast } from '@internal/utils/casts';
 import { ifDefined } from '@internal/utils/defined';
 import { InternalError } from '@internal/utils/internal-error';
+import type { ColumnDefaultSetting } from '../ddl/nodes';
 import { postgresError } from '../errors';
 import { postgresDefaultToDdlColumnDefault } from './op-factory-call';
-import { buildColumnDefaultSql, buildColumnTypeSql } from './planner-ddl-builders';
+import { assertSafeDefaultExpression, buildColumnTypeSql } from './planner-ddl-builders';
 import { resolveIdentityValue } from './planner-identity-values';
 import { buildExpectedFormatType } from './planner-sql-checks';
 
@@ -154,15 +155,17 @@ export function resolveColumnTemporaryDefault(
 }
 
 /**
- * The column's `SET DEFAULT` clause SQL, from a column-default diff node's authored default, or its resolved one when nothing was authored. `''` when the node carries neither. A list default is cast to the column type as the column's DDL writes it.
+ * The default a `SET DEFAULT` writes, from a column-default diff node's authored default, or its
+ * resolved one when nothing was authored. `undefined` when the node carries neither, and for an
+ * `autoincrement()` default, which the column type carries instead.
  */
-export function renderColumnDefaultSql(
+export function columnDefaultSetting(
   columnName: string,
   defaultNode: SqlColumnDefaultIR,
   codecHooks: ReadonlyMap<string, CodecControlHooks>,
-): string {
+): ColumnDefaultSetting | undefined {
   const authored = defaultNode.authored ?? defaultNode.resolved;
-  if (authored === undefined) return '';
+  if (authored === undefined) return undefined;
   const typeLike = columnTypeLike('column default', defaultNode);
   const columnDefault = inCanonicalForm(
     columnName,
@@ -170,9 +173,13 @@ export function renderColumnDefaultSql(
     defaultNode.dataType,
     typeLike.many === true,
   );
-  return buildColumnDefaultSql(columnDefault, {
-    nativeType: buildColumnTypeSql(typeLike, codecHooks, {}, false),
-    ...ifDefined('dataTypeId', defaultNode.dataType?.id),
-    ...ifDefined('many', typeLike.many),
-  });
+  if (columnDefault?.kind === 'function') assertSafeDefaultExpression(columnDefault.expression);
+  const ddlDefault = postgresDefaultToDdlColumnDefault(columnDefault);
+  if (ddlDefault === undefined) return undefined;
+  return {
+    column: columnName,
+    type: buildColumnTypeSql(typeLike, codecHooks, {}, false),
+    default: ddlDefault,
+    ...ifDefined('codecRef', defaultNode.codecRef),
+  };
 }

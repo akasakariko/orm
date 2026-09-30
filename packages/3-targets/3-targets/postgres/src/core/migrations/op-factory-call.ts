@@ -47,6 +47,7 @@ import {
   tableExistsAst,
 } from '../../contract-free/checks';
 import * as contractFreeDdl from '../../contract-free/ddl';
+import type { ColumnDefaultSetting } from '../ddl/nodes';
 import { postgresError } from '../errors';
 import type { PostgresRlsPolicy, RenderedRlsPolicyLiteral } from '../postgres-rls-policy';
 import {
@@ -629,23 +630,22 @@ export class SetDefaultCall extends PostgresOpFactoryCallNode {
   readonly schemaName: string;
   readonly tableName: string;
   readonly columnName: string;
-  readonly defaultSql: string;
+  readonly setting: ColumnDefaultSetting;
   readonly label: string;
 
   constructor(
     schemaName: string,
     tableName: string,
-    columnName: string,
-    defaultSql: string,
+    setting: ColumnDefaultSetting,
     operationClass: 'additive' | 'widening' = 'additive',
   ) {
     super();
     this.schemaName = schemaName;
     this.tableName = tableName;
-    this.columnName = columnName;
-    this.defaultSql = defaultSql;
+    this.columnName = setting.column;
+    this.setting = Object.freeze({ ...setting });
     this.operationClass = operationClass;
-    this.label = `Set default on "${tableName}"."${columnName}"`;
+    this.label = `Set default on "${tableName}"."${setting.column}"`;
     this.freeze();
   }
 
@@ -657,14 +657,7 @@ export class SetDefaultCall extends PostgresOpFactoryCallNode {
         { meta: { factory: 'SetDefaultCall' } },
       );
     }
-    return setDefault(
-      this.schemaName,
-      this.tableName,
-      this.columnName,
-      this.defaultSql,
-      lowerer,
-      this.operationClass,
-    );
+    return setDefault(this.schemaName, this.tableName, this.setting, lowerer, this.operationClass);
   }
 
   renderTypeScript(): string {
@@ -673,8 +666,10 @@ export class SetDefaultCall extends PostgresOpFactoryCallNode {
       opts.push(`schema: ${jsonToTsSource(this.schemaName)}`);
     }
     opts.push(`table: ${jsonToTsSource(this.tableName)}`);
-    opts.push(`column: ${jsonToTsSource(this.columnName)}`);
-    opts.push(`defaultSql: ${jsonToTsSource(this.defaultSql)}`);
+    opts.push(`column: ${jsonToTsSource(this.setting.column)}`);
+    opts.push(`type: ${jsonToTsSource(this.setting.type)}`);
+    opts.push(`default: ${renderDdlColumnDefault(this.setting.default)}`);
+    if (this.setting.codecRef) opts.push(`codecRef: ${jsonToTsSource(this.setting.codecRef)}`);
     if (this.operationClass !== 'additive') {
       opts.push(`operationClass: ${jsonToTsSource(this.operationClass)}`);
     }
@@ -682,7 +677,12 @@ export class SetDefaultCall extends PostgresOpFactoryCallNode {
   }
 
   override importRequirements(): readonly ImportRequirement[] {
-    return [];
+    return [
+      {
+        moduleSpecifier: POSTGRES_MIGRATION_FACADE,
+        symbol: this.setting.default.kind === 'literal' ? 'lit' : 'fn',
+      },
+    ];
   }
 }
 

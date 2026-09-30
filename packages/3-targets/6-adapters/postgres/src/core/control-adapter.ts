@@ -70,6 +70,7 @@ import type {
   PostgresDropPolicy,
   PostgresDropType,
   RlsPolicyOperation,
+  SetDefaultAction,
 } from '@internal/target-postgres/ddl';
 import { parsePostgresDefault } from '@internal/target-postgres/default-normalizer';
 import { postgresError } from '@internal/target-postgres/errors';
@@ -1811,6 +1812,15 @@ async function pgRenderAlterTable(
     async addColumn(action: AddColumnAction): Promise<string> {
       const colFragment = await pgRenderDdlColumn(action.column, codecLookup);
       return `ADD COLUMN ${colFragment}`;
+    },
+    async setDefault(action: SetDefaultAction): Promise<string> {
+      const clause = await pgRenderDdlColumnDefault(
+        action.default,
+        action.type,
+        codecLookup,
+        action.codecRef,
+      );
+      return `ALTER COLUMN ${quoteIdentifier(action.columnName)} SET ${clause}`;
     },
     dropDefault(action: DropDefaultAction): Promise<string> {
       return Promise.resolve(`ALTER COLUMN ${quoteIdentifier(action.columnName)} DROP DEFAULT`);
