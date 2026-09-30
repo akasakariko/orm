@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { withTransaction } from '../src/sql-runtime';
 import {
   affectedCountPlan,
+  afterRefusalBegins,
   closedError,
   rowsPlan,
   setup,
@@ -59,22 +60,23 @@ describe('withTransaction when close() is called inside the callback', () => {
     expect(readMarker).toHaveBeenCalledWith(transaction);
     expect(calls).toEqual([
       'acquire',
-      'close',
       'transaction.execute',
       'commit',
       'release',
+      'close',
       'closed',
     ]);
   });
 });
 
-describe('a runtime-scope query inside a transaction callback after close()', () => {
+describe('a runtime-scope query inside a transaction callback a tick after close()', () => {
   it('is refused at once, the transaction rolls back, and the close settles', async () => {
     const { runtime, calls, driver } = setup();
     let closing: Promise<void> | undefined;
 
     const pending = withTransaction(runtime, async () => {
       closing = runtime.close();
+      await afterRefusalBegins();
       await runtime.execute(affectedCountPlan());
     });
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   affectedCountPlan,
+  afterRefusalBegins,
   closedError,
   createMiddlewareSpy,
   deferred,
@@ -162,6 +163,23 @@ describe('runtime-scope work that fails while close() waits for it', () => {
   });
 });
 
+describe('runtime-scope work that enters in the same tick as close()', () => {
+  it('is admitted, and the driver closes after it', async () => {
+    const { runtime, calls } = setup();
+    const settled: string[] = [];
+
+    const closing = runtime.close().finally(() => settled.push('close'));
+    const pending = Promise.resolve()
+      .then(() => runtime.execute(affectedCountPlan()))
+      .finally(() => settled.push('execute'));
+
+    await expect(pending).resolves.toEqual({ affectedRows: 1 });
+    await closing;
+    expect(calls).toEqual(['driver.execute', 'close', 'closed']);
+    expect(settled).toEqual(['execute', 'close']);
+  });
+});
+
 describe('runtime-scope work started after close()', () => {
   function closedWithSlowDriverClose() {
     const spy = createMiddlewareSpy();
@@ -172,8 +190,21 @@ describe('runtime-scope work started after close()', () => {
     return { ...stub, ...spy, closing, closeGate };
   }
 
+  it('execute() with a scope option is still refused, because it runs on the driver', async () => {
+    const { runtime, driver, closeGate, closing } = closedWithSlowDriverClose();
+    await afterRefusalBegins();
+
+    expect(
+      await outcomeWithin(runtime.execute(affectedCountPlan(), { scope: 'transaction' })),
+    ).toMatchObject(closedError);
+    expect(driver.execute).not.toHaveBeenCalled();
+    closeGate.resolve();
+    await closing;
+  });
+
   it('execute() is refused at once, without driver calls or middleware', async () => {
     const { runtime, driver, beforeExecute, closeGate, closing } = closedWithSlowDriverClose();
+    await afterRefusalBegins();
 
     expect(await outcomeWithin(runtime.execute(affectedCountPlan()))).toMatchObject(closedError);
     expect(driver.execute).not.toHaveBeenCalled();
@@ -184,6 +215,7 @@ describe('runtime-scope work started after close()', () => {
 
   it('query().toArray() is refused at once, without driver calls or middleware', async () => {
     const { runtime, driver, beforeQuery, closeGate, closing } = closedWithSlowDriverClose();
+    await afterRefusalBegins();
 
     expect(await outcomeWithin(runtime.query(rowsPlan()).toArray())).toMatchObject(closedError);
     expect(driver.query).not.toHaveBeenCalled();
@@ -200,6 +232,7 @@ describe('runtime-scope work started after close()', () => {
     const closeGate = deferred();
     hooks.close = () => closeGate.promise;
     const closing = runtime.close();
+    await afterRefusalBegins();
 
     expect(await outcomeWithin(preparedQuery.query(runtime, {}).toArray())).toMatchObject(
       closedError,
@@ -215,6 +248,7 @@ describe('runtime-scope work started after close()', () => {
 
   it('connection() is refused at once and acquires nothing', async () => {
     const { runtime, driver, closeGate, closing } = closedWithSlowDriverClose();
+    await afterRefusalBegins();
 
     expect(await outcomeWithin(runtime.connection())).toMatchObject(closedError);
     expect(driver.acquireConnection).not.toHaveBeenCalled();

@@ -47,6 +47,11 @@ export function delay(ms: number): Promise<void> {
   return new Promise((settle) => setTimeout(settle, ms));
 }
 
+// close() starts refusing on a timer it schedules; a timer scheduled after close() fires after it.
+export function afterRefusalBegins(): Promise<void> {
+  return delay(0);
+}
+
 // Resolves to the settled outcome of `operation`, or 'pending' if it has not settled within `ms`.
 export function outcomeWithin(operation: Promise<unknown>, ms = 50): Promise<unknown> {
   return Promise.race([

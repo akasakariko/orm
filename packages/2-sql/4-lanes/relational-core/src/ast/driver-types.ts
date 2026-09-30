@@ -35,6 +35,9 @@ export interface SqlDriver<TBinding = void> extends SqlQueryable {
   readonly state?: SqlDriverState;
   connect(binding: TBinding): Promise<void>;
   acquireConnection(): Promise<SqlConnection>;
+  /**
+   * Waits for every connection this driver has handed out to be released, and for every query stream it has started to finish or be returned, then releases its resources. The SQL runtime stops waiting for a query once the driver has answered its first row, and never waits for held connections, so it relies on this.
+   */
   close(): Promise<void>;
 }
 

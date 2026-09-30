@@ -109,10 +109,7 @@ export interface Runtime extends RuntimeQueryable {
   connection(): Promise<RuntimeConnection>;
   telemetry(): RuntimeTelemetryEvent | null;
   /**
-   * Waits for runtime-scope work that started before it, then closes the driver. Runtime-scope
-   * work that starts after it is refused with `DRIVER.NOT_CONNECTED`. Work on a held connection
-   * or transaction is not refused; the driver's close waits for its release. Every call returns
-   * the same promise.
+   * Waits for runtime-scope work that started before it or in the same tick, then closes the driver. Runtime-scope work that starts a tick later is refused with `DRIVER.NOT_CONNECTED`. Work on a held connection or transaction is not refused; the driver's close waits for its release. Every call returns the same promise.
    */
   close(): Promise<void>;
 
@@ -193,7 +190,8 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
   private verifyMarkerPromise: Promise<void> | null;
   private closePromise: Promise<void> | null;
   readonly #inFlight = new InFlightOperations();
-  // Connections and transactions this runtime handed out. Their marker read runs on themselves, so it works while close() waits for their release. Other queryables, such as a subclass's raw connection, read the marker through the driver.
+  #refusing = false;
+  // Connections and transactions this runtime handed out. When the first query of the runtime runs on one of them, the runtime-wide marker read runs on it too, so it works while close() waits for their release, and concurrent first queries share its result. Other queryables, such as a subclass's raw connection, read the marker through the driver.
   readonly #heldQueryables = new WeakSet<SqlQueryable>();
   readonly #preparedStatementHandles = new WeakMap<object, unknown>();
   private codecRegistryValidated: boolean;
@@ -405,12 +403,12 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
     await this.verifyMarkerPromise;
   }
 
-  // Called synchronously when an operation enters the runtime. Throws once close() has been called for runtime-scope work, otherwise returns the callback that ends its in-flight record. Work on a held connection or transaction is neither refused nor tracked: the driver's close waits for its release.
-  private beginOperation(scope: RuntimeExecuteOptions['scope']): () => void {
-    if (scope !== undefined && scope !== 'runtime') {
+  // Called synchronously when an operation enters the runtime. Work on the driver is runtime-scope work: it throws once refusal has begun, otherwise it returns the callback that ends its in-flight record. Work on any other queryable holds a connection, so it is neither refused nor tracked: the driver's close waits for its release.
+  private beginOperation(queryable: SqlQueryable): () => void {
+    if (queryable !== this.driver) {
       return noopEnd;
     }
-    if (this.closePromise !== null) {
+    if (this.#refusing) {
       throw runtimeClosedError();
     }
     return this.#inFlight.begin();
@@ -448,10 +446,14 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
       // first, leaving a window where one extra row is pulled through
       // the driver after the signal aborted.
       const iterator = stream[Symbol.asyncIterator]();
+      let answered = false;
       try {
         while (true) {
           checkAborted(codecCtx, 'stream');
-          const next = await iterator.next().finally(onDriverAnswered);
+          const next = answered
+            ? await iterator.next()
+            : await iterator.next().finally(onDriverAnswered);
+          answered = true;
           if (next.done) {
             break;
           }
@@ -561,7 +563,7 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
     const self = this;
     const { codecCtx, middlewareCtx } = this.createQueryContexts(options);
     const generator = async function* (): AsyncGenerator<Row, void, unknown> {
-      const endOperation = self.beginOperation(options?.scope);
+      const endOperation = self.beginOperation(queryable);
       try {
         const exec = await self.prepareQueryExecution(plan, codecCtx, middlewareCtx);
         const decodeContext = buildDecodeContext(exec.ast, self.contractCodecs);
@@ -588,7 +590,7 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
     queryable: SqlQueryable,
     options?: RuntimeExecuteOptions,
   ): Promise<SqlStatementStats> {
-    const endOperation = this.beginOperation(options?.scope);
+    const endOperation = this.beginOperation(queryable);
     try {
       return await this.executeStatisticsInFlight(plan, queryable, options);
     } finally {
@@ -694,7 +696,7 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
     const { codecCtx, middlewareCtx: execMiddlewareCtx } = this.createQueryContexts(options);
 
     const generator = async function* (): AsyncGenerator<Row, void, unknown> {
-      const endOperation = self.beginOperation(options?.scope);
+      const endOperation = self.beginOperation(queryable);
       try {
         yield* self.streamPreparedRows<P, Row>(
           ps,
@@ -784,7 +786,7 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
     queryable: SqlQueryable,
     options?: RuntimeExecuteOptions,
   ): Promise<SqlStatementStats> {
-    const endOperation = this.beginOperation(options?.scope);
+    const endOperation = this.beginOperation(queryable);
     try {
       return await this.runPreparedExecuteInFlight(ps, userParams, queryable, options);
     } finally {
@@ -863,7 +865,7 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
   }
 
   async connection(): Promise<RuntimeConnection> {
-    const endOperation = this.beginOperation('runtime');
+    const endOperation = this.beginOperation(this.driver);
     let driverConn: SqlConnection;
     try {
       driverConn = await this.driver.acquireConnection();
@@ -1012,7 +1014,14 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
     return this.closePromise;
   }
 
+  // Refusal begins one timer tick after close(), so work that enters in the same tick, such as the queries of an ORM create() or of an async helper returned without await, is admitted and waited for.
   private async drainThenCloseDriver(): Promise<void> {
+    await new Promise<void>((resolve) =>
+      setTimeout(() => {
+        this.#refusing = true;
+        resolve();
+      }, 0),
+    );
     await this.#inFlight.drained();
     await this.driver.close();
   }
