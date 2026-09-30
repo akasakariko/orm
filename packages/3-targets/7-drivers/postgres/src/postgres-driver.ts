@@ -728,7 +728,7 @@ class PostgresDirectDriverImpl
         // cannot leave the mutex permanently held.
         async () => {
           try {
-            await this.#closeWhileHoldingLease();
+            await this.#closeWhileHoldingLease({ waitForStatement: false });
           } finally {
             releaseLease();
           }
@@ -744,18 +744,21 @@ class PostgresDirectDriverImpl
   async close(): Promise<void> {
     const releaseLease = await this.#connectionMutex.lock();
     try {
-      await this.#closeWhileHoldingLease();
+      await this.#closeWhileHoldingLease({ waitForStatement: true });
     } finally {
       releaseLease();
     }
   }
 
-  async #closeWhileHoldingLease(): Promise<void> {
+  // close() waits for the statement or cursor stream in flight to finish; destroy() is for a connection in an indeterminate state, so it ends the socket at once.
+  async #closeWhileHoldingLease(options: { readonly waitForStatement: boolean }): Promise<void> {
     if (this.#closed) {
       return;
     }
     this.#closed = true;
-    const releaseQueryLock = await acquireClientQueryLock(this.directClient);
+    const releaseQueryLock = options.waitForStatement
+      ? await acquireClientQueryLock(this.directClient)
+      : () => {};
     try {
       await this.directClient.end();
     } finally {

@@ -230,6 +230,44 @@ describe('pinned-client serialization', { timeout: timeouts.databaseOperation },
     expect(state.completed).toEqual(['select in-flight', 'end']);
   });
 
+  it('destroy() on a direct driver connection ends the client without waiting for the statement in flight', async () => {
+    const calls: string[] = [];
+    let finishQuery: () => void = () => {};
+    const queryGate = new Promise<void>((resolve) => {
+      finishQuery = resolve;
+    });
+    const client = {
+      connect: async () => undefined,
+      on: () => undefined,
+      end: async () => {
+        calls.push('end');
+      },
+      query: async () => {
+        calls.push('query');
+        await queryGate;
+        return { rows: [], rowCount: 0 };
+      },
+    };
+    const driver = createBoundDriverFromBinding(
+      { kind: 'pgClient', client: client as unknown as Client },
+      { disabled: true },
+    );
+
+    const rows = queryRows(driver, 'select in-flight');
+    await expect.poll(() => calls).toEqual(['query']);
+    const connection = await driver.acquireConnection();
+    const destroyed = connection.destroy(new Error('indeterminate state'));
+    const outcome = await Promise.race([
+      destroyed.then(() => 'destroyed'),
+      new Promise((resolve) => setTimeout(() => resolve('pending'), 50)),
+    ]);
+
+    expect(outcome).toBe('destroyed');
+    expect(calls).toEqual(['query', 'end']);
+    finishQuery();
+    await Promise.all([destroyed, rows]);
+  });
+
   it('does not serialize pool-level queries across distinct pool clients', async () => {
     const state = createConcurrencyState();
     const pool = {

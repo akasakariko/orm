@@ -40,18 +40,20 @@ function unboundQuery<Row>(notConnected: () => Error): AsyncIterable<Row> {
   };
 }
 
-const notConnectedMessages = {
+type DisconnectedState = 'unbound' | 'closed' | 'connectionLost';
+
+const notConnectedMessages: Record<DisconnectedState, string> = {
   unbound: USE_BEFORE_CONNECT_MESSAGE,
-  close: CLOSED_MESSAGE,
-  'lost-connection': CONNECTION_LOST_MESSAGE,
-} as const;
+  closed: CLOSED_MESSAGE,
+  connectionLost: CONNECTION_LOST_MESSAGE,
+};
 
 class PostgresUnboundDriverImpl implements PostgresRuntimeDriver {
   readonly familyId = 'sql' as const;
   readonly targetId = 'postgres' as const;
 
   #delegate: SqlDriver<PostgresBinding> | null = null;
-  #closedBy: 'close' | 'lost-connection' | null = null;
+  #disconnectedState: DisconnectedState = 'unbound';
   #cursorOpts: PostgresDriverCreateOptions['cursor'];
   #preparedStatements: PostgresDriverCreateOptions['preparedStatements'];
 
@@ -64,14 +66,11 @@ class PostgresUnboundDriverImpl implements PostgresRuntimeDriver {
     if (this.#delegate !== null) {
       return 'connected';
     }
-    if (this.#closedBy !== null) {
-      return 'closed';
-    }
-    return 'unbound';
+    return this.#disconnectedState === 'unbound' ? 'unbound' : 'closed';
   }
 
   #notConnectedError(): Error {
-    return driverError('DRIVER.NOT_CONNECTED', notConnectedMessages[this.#closedBy ?? 'unbound']);
+    return driverError('DRIVER.NOT_CONNECTED', notConnectedMessages[this.#disconnectedState]);
   }
 
   #requireDelegate(): SqlDriver<PostgresBinding> {
@@ -91,7 +90,7 @@ class PostgresUnboundDriverImpl implements PostgresRuntimeDriver {
     this.#delegate = createBoundDriverFromBinding(binding, this.#cursorOpts, {
       preparedStatements: this.#preparedStatements,
     });
-    this.#closedBy = null;
+    this.#disconnectedState = 'unbound';
   }
 
   async acquireConnection(): Promise<SqlConnection> {
@@ -112,7 +111,7 @@ class PostgresUnboundDriverImpl implements PostgresRuntimeDriver {
     const syncDelegateState = (): void => {
       if (this.#delegate === delegate && delegate.state === 'closed') {
         this.#delegate = null;
-        this.#closedBy = 'lost-connection';
+        this.#disconnectedState = 'connectionLost';
       }
     };
     const wrapped: SqlConnection = {
@@ -143,7 +142,7 @@ class PostgresUnboundDriverImpl implements PostgresRuntimeDriver {
   async close(): Promise<void> {
     const delegate = this.#delegate;
     this.#delegate = null;
-    this.#closedBy = 'close';
+    this.#disconnectedState = 'closed';
     await delegate?.close();
   }
 
