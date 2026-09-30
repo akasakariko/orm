@@ -1,6 +1,10 @@
 import type { ContractSourceDiagnostic } from '@internal/config/config-types';
 import {
+  assembleAttributeSpecs,
+  type Binder,
+  type BinderResult,
   buildSymbolTable,
+  createBinder,
   isPrismaNextSchema,
   type PslDiagnostic,
   type SymbolTable,
@@ -16,6 +20,7 @@ import {
   ParseDiagnosticSeverity,
 } from './diagnostic-mapping';
 import type { DocumentSnapshot } from './document-snapshot';
+import type { LspControlStack } from './lsp-control-stack';
 import { canonicalFileIdentity, type SchemaInputSet } from './schema-inputs';
 
 function schemaInputIdentities(inputs: SchemaInputSet): ReadonlySet<string> {
@@ -23,6 +28,7 @@ function schemaInputIdentities(inputs: SchemaInputSet): ReadonlySet<string> {
 }
 
 export interface ProjectArtifactsOptions {
+  readonly controlStack: LspControlStack;
   readonly inputs: SchemaInputSet;
   readonly readSnapshot: (uri: string) => DocumentSnapshot | undefined;
   readonly interpretation?: ProjectInterpretation;
@@ -36,6 +42,7 @@ export class ProjectArtifacts {
   #inputs: SchemaInputSet;
   readonly #documents = new Map<string, DocumentSnapshot>();
   #symbolTableResult: SymbolTableResult | undefined;
+  #binderResult: BinderResult | undefined;
   #sources: PslSources | undefined;
   #interpretMemo: ReadonlyMap<string, readonly LspDiagnostic[]> | undefined;
 
@@ -78,6 +85,29 @@ export class ProjectArtifacts {
 
   symbolDiagnostics = (): readonly PslDiagnostic[] => this.#readSymbolTableResult().diagnostics;
 
+  binder = (): Binder => this.#readBinderResult().binder;
+
+  #readBinderResult(): BinderResult {
+    const symbolTable = this.#readSymbolTable();
+    const stack = this.#options.controlStack;
+    this.#binderResult ??= createBinder({
+      sources: this.sources,
+      symbolTable,
+      typeConstructors: stack.authoringContributions?.type ?? {},
+      attributeSpecs:
+        stack.authoringContributions === undefined
+          ? { model: {}, field: {} }
+          : assembleAttributeSpecs(stack.authoringContributions),
+      pslBlockDescriptors: stack.pslBlockDescriptors,
+      controlMutationDefaults: {
+        defaultFunctionRegistry:
+          stack.controlMutationDefaults?.defaultFunctionRegistry ?? new Map(),
+        dataTypeEntries: stack.authoringContributions?.dataTypes ?? {},
+      },
+    });
+    return this.#binderResult;
+  }
+
   documentChanged = (uri: string): void => this.#drop(uri);
 
   documentClosed = this.documentChanged;
@@ -100,12 +130,19 @@ export class ProjectArtifacts {
   #refreshSources(): void {
     this.#sources = undefined;
     this.#symbolTableResult = undefined;
+    this.#binderResult = undefined;
     this.#interpretMemo = undefined;
   }
 
   #projectInterpretDiagnostics(): ReadonlyMap<string, readonly LspDiagnostic[]> {
     if (this.#interpretation === undefined) {
-      return new Map();
+      const bySourceId = new Map<string, LspDiagnostic[]>();
+      for (const diagnostic of this.#readBinderResult().diagnostics) {
+        const group = bySourceId.get(diagnostic.filename) ?? [];
+        group.push(...mapParseDiagnostics([diagnostic]));
+        bySourceId.set(diagnostic.filename, group);
+      }
+      return bySourceId;
     }
     this.#interpretMemo ??= this.#computeInterpretDistribution(this.#interpretation);
     return this.#interpretMemo;
