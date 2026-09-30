@@ -116,7 +116,7 @@ export function renderColumnDdl(
   const like = columnLike(column);
   const typeSql = buildColumnTypeSql(like, codecHooks, {});
   const ddlDefault = postgresDefaultToDdlColumnDefault(
-    inCanonicalForm(name, like.default, column.dataType, like.many === true),
+    inCanonicalForm(name, like.default, column.dataType, like.many !== false),
   );
   return contractFree.col(name, typeSql, {
     ...(!column.nullable ? { notNull: true } : {}),
@@ -168,12 +168,11 @@ export function renderColumnDefaultSql(
     columnName,
     authored,
     defaultNode.dataType,
-    typeLike.many === true,
+    typeLike.many !== false,
   );
   return buildColumnDefaultSql(columnDefault, {
     nativeType: buildColumnTypeSql(typeLike, codecHooks, {}, false),
     ...ifDefined('dataTypeId', defaultNode.dataType?.id),
-    ...ifDefined('many', typeLike.many),
     many: typeLike.many,
   });
 }

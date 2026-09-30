@@ -20,7 +20,7 @@ function column(
   nativeType: string,
   codecId: string,
   dataType: DataType,
-  value: string | readonly string[],
+  value: string | readonly (string | null)[],
 ): SqlColumnIR {
   const many = Array.isArray(value);
   return new SqlColumnIR({
@@ -120,9 +120,10 @@ describe('a date or time default written by the planner', () => {
     },
   );
 
-  it('writes each element of a list default in canonical form', () => {
+  it('canonicalizes list defaults while preserving null elements', () => {
     const node = column('timestamptz', 'pg/timestamptz-temporal@1', pgTimestamptz, [
       '2024-01-01T00:00:00.000Z',
+      null,
       '0044-03-15 00:00:00+00 BC',
     ]);
     expect({
@@ -131,9 +132,10 @@ describe('a date or time default written by the planner', () => {
     }).toEqual({
       createTable: {
         kind: 'literal',
-        value: ['2024-01-01T00:00:00Z', '-000043-03-15T00:00:00Z'],
+        value: ['2024-01-01T00:00:00Z', null, '-000043-03-15T00:00:00Z'],
       },
-      setDefault: "DEFAULT ARRAY['2024-01-01T00:00:00Z', '0044-03-15T00:00:00Z BC']::timestamptz[]",
+      setDefault:
+        "DEFAULT ARRAY['2024-01-01T00:00:00Z', NULL, '0044-03-15T00:00:00Z BC']::timestamptz[]",
     });
   });
 
