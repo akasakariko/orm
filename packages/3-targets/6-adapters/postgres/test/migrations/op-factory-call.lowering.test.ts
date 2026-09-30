@@ -344,6 +344,24 @@ describe('SetDefaultCall', () => {
     });
   });
 
+  it.each(['serial', 'int4'])(
+    'refuses an autoincrement() default on a %s column, which SET DEFAULT cannot write',
+    async (type) => {
+      await expect(
+        setDefaultSql(
+          new SetDefaultCall('public', 'user', {
+            column: 'id',
+            type,
+            default: fn('autoincrement()'),
+          }),
+        ),
+      ).rejects.toMatchObject({
+        code: 'CONTRACT.DEFAULT_INVALID',
+        message: `SET DEFAULT cannot give the existing column "id" an autoincrement() default, because autoincrement() is written as the column's SERIAL type when the column is created. Set a sequence default instead, as in fn("nextval('<sequence>'::regclass)").`,
+      });
+    },
+  );
+
   it('writes a function default as authored', async () => {
     expect(
       await setDefaultSql(

@@ -1814,6 +1814,13 @@ async function pgRenderAlterTable(
       return `ADD COLUMN ${colFragment}`;
     },
     async setDefault(action: SetDefaultAction): Promise<string> {
+      if (action.default.kind === 'function' && action.default.expression === 'autoincrement()') {
+        throw postgresError(
+          'CONTRACT.DEFAULT_INVALID',
+          `SET DEFAULT cannot give the existing column "${action.columnName}" an autoincrement() default, because autoincrement() is written as the column's SERIAL type when the column is created. Set a sequence default instead, as in fn("nextval('<sequence>'::regclass)").`,
+          { meta: { column: action.columnName, nativeType: action.type } },
+        );
+      }
       const clause = await pgRenderDdlColumnDefault(
         action.default,
         action.type,
