@@ -236,12 +236,17 @@ For the full option surface, read the source: `packages/2-sql/5-runtime/src/midd
 
 ## Workflow — Cache middleware
 
-The concept: `@prisma/orm-extension-middleware-cache` ships an opt-in read cache built on the `interceptQuery` hook. On a hit the driver is never called; on a miss the rows are buffered and committed to the store when the query completes. Caching is strictly opt-in per query: only a plan annotated with `cacheAnnotation({ ttl })` is ever cached. Cache keys default to the runtime's content hash of the plan (`key` overrides), queries inside a transaction or pinned connection bypass the cache, and the default store is an in-memory LRU with TTL (`CacheStore` is the interface for a Redis-style backend). The cache never sees writes: tag reads with `cacheAnnotation({ tags })` and call `cache.invalidate({ tags })` (or `{ keys }` for `key` overrides) after the write commits.
+The concept: `@prisma/orm-extension-middleware-cache` ships an opt-in read cache built on the `interceptQuery` hook. On a hit the driver is never called; on a miss the rows are buffered and committed to the store when the query completes. Caching is strictly opt-in per query: only a plan annotated with `cacheAnnotation({ ttl })` is ever cached. Cache keys default to the runtime's content hash of the plan (`key` overrides), queries inside a transaction or pinned connection bypass the cache, and the default store is an in-memory LRU with TTL (`CacheStore` is the interface for a Redis-style backend). The cache never sees writes: after the write commits, call `cache.invalidate({ keys })` for reads annotated with a `key`, or `cache.invalidate(() => store.deleteWhere(predicate))` to remove entries by the `attributes` you attached with `cacheAnnotation({ attributes })`. `deleteWhere` exists on the default store only, so create it with `createInMemoryCacheStore` and pass it in.
 
 ```typescript
-import { cacheAnnotation, createCacheMiddleware } from '@prisma/orm-extension-middleware-cache';
+import {
+  cacheAnnotation,
+  createCacheMiddleware,
+  createInMemoryCacheStore,
+} from '@prisma/orm-extension-middleware-cache';
 
-export const cache = createCacheMiddleware({ maxEntries: 1_000 });
+const store = createInMemoryCacheStore({ maxEntries: 1_000 });
+export const cache = createCacheMiddleware({ store });
 export const db = postgres<Contract>({
   contractJson,
   url: process.env['DATABASE_URL']!,
@@ -250,15 +255,18 @@ export const db = postgres<Contract>({
 
 // Cached for 60s; an identical plan within the TTL is served without a driver call.
 const user = await db.orm.public.User.first({ id: 1 }, (meta) =>
-  meta.annotate(cacheAnnotation({ ttl: 60_000, tags: ['users'] })),
+  meta.annotate(cacheAnnotation({ ttl: 60_000, attributes: { model: 'User' } })),
 );
 // Un-annotated queries always hit the database.
 
 // After a write to users has committed (outside the transaction, never inside it):
-await cache.invalidate({ tags: ['users'] });
+const isUserEntry = (attributes: unknown) =>
+  typeof attributes === 'object' && attributes !== null &&
+  'model' in attributes && attributes.model === 'User';
+await cache.invalidate(() => store.deleteWhere((entry) => isUserEntry(entry.attributes)));
 ```
 
-**Invalidate after the commit, not inside the transaction.** A read from another request can refill the cache with the old rows before the commit lands. `invalidate` throws `RUNTIME.CACHE_STORE_CANNOT_INVALIDATE` when a custom `CacheStore` lacks `delete` (for keys) or `deleteByTag` (for tags).
+**Invalidate after the commit, not inside the transaction.** A read from another request can refill the cache with the old rows before the commit lands. Delete through `invalidate`, not by calling the store directly, so reads in flight do not store the old rows. `invalidate({ keys })` throws `RUNTIME.CACHE_STORE_CANNOT_INVALIDATE` when a custom `CacheStore` lacks `delete`.
 
 **The cache key carries no identity.** The default key is the runtime's content hash of the plan — contract hash, SQL text, and bound parameters — so two callers issuing the same statement share one entry regardless of who they are. Never annotate a read whose rows depend on the caller (per-user, per-tenant, or RLS-filtered data) on the plain `postgres()` façade unless the identity is part of the key: `cacheAnnotation({ ttl, key: `user:${userId}:profile` })`, or a `where` clause that binds the identity as a parameter (the parameter is in the hash). Queries that run on a pinned connection or inside a transaction bypass the cache entirely (`ctx.scope !== 'runtime'`), which is why a Supabase `RoleBoundDb` read — executed on a connection with the role bound via `set_config` — is never served from cache; the plain façade has no such protection.
 

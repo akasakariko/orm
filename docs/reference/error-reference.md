@@ -999,7 +999,7 @@ A client (`postgres()`, `sqlite()`, `mongo()`) was asked to connect with no bind
 
 ### RUNTIME.CACHE_STORE_CANNOT_INVALIDATE
 
-The cache middleware's `invalidate({ keys, tags })` was asked to remove entries in a way its `CacheStore` does not support: `keys` need the store's optional `delete` method, and `tags` need its optional `deleteByTag` method. Both checks run before anything is deleted, so a refused call leaves the store unchanged. Supply a store that implements the missing method, or invalidate the other way. Payload: `missingMethod` (`delete` or `deleteByTag`).
+The cache middleware's `invalidate({ keys })` was called with a `CacheStore` that has no `delete` method. The check runs before anything is deleted, so a refused call leaves the store unchanged, and reads in flight still store their rows. Supply a store that implements `delete`, or call `invalidate(run)` with a function that deletes through the store's own methods. Payload: `missingMethod` (`delete`).
 
 ### RUNTIME.CODEC_DESCRIPTOR_ARRAY_UNSUPPORTED
 

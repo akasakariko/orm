@@ -4,17 +4,17 @@ A family-agnostic, opt-in caching middleware for Prisma 8 runtimes.
 
 Built on the `interceptQuery` hook on `RuntimeMiddleware`: on a cache hit, the middleware short-circuits the query and returns the cached rows; the driver is never invoked. On a cache miss, the middleware buffers rows from the driver and commits them to the store on successful completion.
 
-The package depends on no SQL or Mongo package: its runtime dependencies are `@internal/framework-components` and `@internal/utils`. Cache keys come from `RuntimeMiddlewareContext.contentHash(exec)`, which the family runtime populates, so SQL and Mongo runtimes both work out of the box.
+The package depends on no SQL or Mongo package: its runtime dependencies are `@internal/framework-components` and `@internal/utils`. The default cache key is `RuntimeMiddlewareContext.contentHash(exec)`, which the family runtime populates, so SQL and Mongo runtimes both work out of the box.
 
 ## Responsibilities
 
 - Provide an opt-in caching `RuntimeMiddleware` that short-circuits repeated reads via the `interceptQuery` hook.
-- Define the `cacheAnnotation` handle (read-only) that lane terminals (SQL DSL `.annotate(...)`, ORM read terminals) use to attach per-query cache parameters (`ttl`, `skip`, `key`, `tags`).
-- Resolve the cache key per execution: per-query `cacheAnnotation({ key })` override, otherwise `RuntimeMiddlewareContext.contentHash(exec)` from the family runtime.
+- Define the `cacheAnnotation` handle (read-only) that lane terminals (SQL DSL `.annotate(...)`, ORM read terminals) use to attach per-query cache parameters (`ttl`, `skip`, `key`, `attributes`).
+- Resolve the cache key per execution: per-query `cacheAnnotation({ key })` override, otherwise the `deriveKey` option, which defaults to `RuntimeMiddlewareContext.contentHash(exec)` from the family runtime.
 - Buffer driver rows on a miss and commit to the `CacheStore` only on successful completion (`completed: true && source: 'driver'`).
 - Bypass the cache when `RuntimeMiddlewareContext.scope` is `'connection'` or `'transaction'`.
-- Remove entries on request by key or by tag through `invalidate`, and stop a read that overlapped an `invalidate` from storing its rows.
-- Ship a default in-memory LRU-with-TTL `CacheStore` and expose the `CacheStore` interface for pluggable backends (Redis, Memcached, etc.).
+- Remove entries on request through `invalidate`, by key or by a function the caller supplies, and stop a read that overlapped an `invalidate` from storing its rows.
+- Ship a default in-memory LRU-with-TTL store with `deleteWhere`, and expose the `CacheStore` interface for pluggable backends (Redis, Memcached, etc.).
 
 ## Quick start
 
@@ -60,7 +60,7 @@ The cache middleware acts only on plans that carry a `cacheAnnotation` payload w
 | `cacheAnnotation({ skip: true })` | Pass through; never cached. |
 | `cacheAnnotation({ ttl })` | Cache lookup; commit on miss + success. |
 | `cacheAnnotation({ ttl, key })` | As above, but use the supplied key verbatim. |
-| `cacheAnnotation({ ttl, tags })` | As above; the stored entry carries the tags for `invalidate({ tags })`. |
+| `cacheAnnotation({ ttl, attributes })` | As above; the stored entry carries `attributes` (see [Attributes](#attributes)). |
 
 ```typescript
 const middleware = createCacheMiddleware({ defaultTtlMs: 30_000 });
@@ -93,15 +93,33 @@ const plan = db.sql
 
 ## Cache key composition
 
-Two-tier resolution:
+Three-tier resolution:
 
-1. **Per-query override.** `cacheAnnotation({ key })` — the supplied string is used verbatim. The cache middleware does **not** rehash user-supplied keys; the caller is responsible for keeping the string bounded in size and free of sensitive data they do not want flowing into debug logs, Redis `KEYS` output, persistence dumps, or any user-supplied `CacheStore`. User-supplied keys also bypass the storage-hash discrimination below — if you fix a key, prefix it with something tied to your schema version (e.g. `` `${storageHash}:my-key` ``) to avoid serving stale-schema entries after a migration.
-2. **Default.** `RuntimeMiddlewareContext.contentHash(exec)` — the family runtime owns this. The SQL and Mongo runtimes today compose `meta.storageHash + '|' + …` and pipe the result through `hashContent` (SHA-512), producing a bounded, opaque digest of the form `sha512:HEXDIGEST`. The cache middleware uses the returned string directly as the `Map<string, …>` key.
+1. **Per-query override.** `cacheAnnotation({ key })` — the supplied string is used verbatim, and `deriveKey` is not called. The cache middleware does **not** rehash user-supplied keys; the caller is responsible for keeping the string bounded in size and free of sensitive data they do not want flowing into debug logs, Redis `KEYS` output, persistence dumps, or any user-supplied `CacheStore`. User-supplied keys also bypass the storage-hash discrimination below — if you fix a key, prefix it with something tied to your schema version (e.g. `` `${storageHash}:my-key` ``) to avoid serving stale-schema entries after a migration.
+2. **`deriveKey`.** `createCacheMiddleware({ deriveKey })` computes the key of every cached read whose annotation has no `key` (see [Deriving keys](#deriving-keys)).
+3. **Default.** `deriveKeyFromContentHash(exec, ctx)`, which returns `RuntimeMiddlewareContext.contentHash(exec)` — the family runtime owns this. The SQL and Mongo runtimes today compose `meta.storageHash + '|' + …` and pipe the result through `hashContent` (SHA-512), producing a bounded, opaque digest of the form `sha512:HEXDIGEST`. The cache middleware uses the returned string directly as the store key.
 
-Two consequences worth pinning (both properties of the **default** key path — user-supplied keys above opt out of both):
+Two consequences worth pinning (both properties of the **default** key path — user-supplied keys above opt out of both, and a `deriveKey` keeps them only if it builds on the content hash):
 
 - **Storage-hash discrimination.** A schema migration changes `meta.storageHash`, which changes `contentHash`, which invalidates cached entries automatically. Stale-schema reads cannot leak across migrations.
 - **AST rewrites are part of the key.** Middleware that rewrite the plan via `beforeCompile` (e.g. soft-delete) run **upstream** of the cache. The cache sees the post-lowering plan, so the rewritten SQL is part of the content hash. Adding or removing a `beforeCompile` middleware changes which entries hit.
+
+### Deriving keys
+
+`deriveKey(exec, ctx)` returns the key (or a promise of it) for a read that is being cached and has no annotation `key`. It runs on every such read, hit or miss, and never on a read the cache bypasses. Compose it with the exported default to add a prefix:
+
+```typescript
+import { createCacheMiddleware, deriveKeyFromContentHash } from '@internal/middleware-cache';
+
+const cache = createCacheMiddleware({
+  deriveKey: async (exec, ctx) => `users:${await deriveKeyFromContentHash(exec, ctx)}`,
+});
+```
+
+- **An explicit annotation `key` bypasses `deriveKey`.** It is used literally, so a tenant or namespace prefix that `deriveKey` adds must also be part of every explicit key.
+- **Keys must differ whenever the rows can differ.** A derivation that returns the same key for two different plans serves one plan's rows to the other.
+- **Keep the content hash.** A derivation that drops it loses the storage-hash discrimination above, so a migration no longer invalidates cached entries.
+- **Errors fail the read.** If `deriveKey` throws or rejects, the read fails; the cache does not fall back to the database. Its latency is added to every cached read, including hits.
 
 ## `CacheStore` pluggability
 
@@ -123,34 +141,85 @@ const redis: CacheStore = {
 const middleware = createCacheMiddleware({ store: redis });
 ```
 
-`delete(key)` and `deleteByTag(tags)` are optional. A store needs them only to support `invalidate` by key and by tag respectively (see [Invalidation](#invalidation)); a tag-capable store must remember each entry's `tags` so `deleteByTag` can find it. The default in-memory store implements both. The middleware calls these methods from `invalidate`; application code and extensions call `invalidate` instead, because calling the store directly skips the guard for overlapping reads.
+`delete(key)` is optional. A store needs it only to support `invalidate({ keys })` (see [Invalidation](#invalidation)). Group deletion is not part of the interface: each store exposes whatever fits its backend, as the default store does with `deleteWhere`. Delete through `invalidate`, not by calling the store on its own, because only `invalidate` runs the guard for overlapping reads. A store's deletions must take effect after any `set` it has already accepted for the same key, for example by sending both on one connection.
 
 The interface is intentionally minimal — `get` returns the entry if present and not expired (implementations gating on TTL should treat expired as absent), `set` writes the entry under the key with the per-call `ttlMs`. Every method is async to leave room for I/O-backed stores; the default in-memory store completes synchronously and wraps results in `Promise.resolve` for type conformance.
 
+## Attributes
+
+`cacheAnnotation({ attributes })` attaches any value to the stored entry. The middleware never reads it; it copies it onto `CachedEntry.attributes` for policies built on top, such as the tags example below. An annotation without `attributes` stores an entry without that property.
+
+- **Stored by reference.** The entry holds the value you passed. Do not mutate it after the read, and keep it small: it lives as long as the entry.
+- **Serialisable for serialising stores.** A store that serialises entries (Redis) needs `attributes` to survive that serialisation. The default store has no such requirement.
+
 ## Invalidation
 
-Tag a read so it can be removed later, then call `invalidate` on the middleware:
+`invalidate` has two forms. Both make every read that missed the cache before the call skip storing its rows, then remove entries.
+
+### By key
 
 ```typescript
 const cache = createCacheMiddleware();
 const db = postgres<Contract>({ contractJson, url, middleware: [cache] });
 
 await db.orm.public.User.first({ id: 1 }, (meta) =>
-  meta.annotate(cacheAnnotation({ ttl: 60_000, key: 'user-1', tags: ['users'] })),
+  meta.annotate(cacheAnnotation({ ttl: 60_000, key: 'user-1' })),
 );
 
 await db.orm.public.User.where({ id: 1 }).update({ name: 'Alicia' });
 
-await cache.invalidate({ tags: ['users'] }); // every entry tagged 'users'
-await cache.invalidate({ keys: ['user-1'] }); // the entry stored under 'user-1'
+await cache.invalidate({ keys: ['user-1'] });
 ```
 
-- **Keys** are compared literally with the strings passed to `cacheAnnotation({ key })`. Entries stored under the default content-hash key can only be removed by tag.
-- **Tags** remove every entry that carries at least one of the given tags. `invalidate({ keys, tags })` does both.
-- **Store support.** Invalidating by key needs `CacheStore.delete`; by tag needs `CacheStore.deleteByTag`. If the store lacks a method the target needs, `invalidate` throws `RUNTIME.CACHE_STORE_CANNOT_INVALIDATE` (with `meta.missingMethod`) before deleting anything. An empty target does nothing.
-- **Store errors.** If the store's `delete` or `deleteByTag` rejects partway, `invalidate` rejects with that error; entries already removed stay removed, and calling `invalidate` again with the same target is safe.
+Keys are compared literally with the strings passed to `cacheAnnotation({ key })`. The keys form is a convenience built on the same guard as the function form: it calls the store's `delete` for each key, in order. It is the only form that checks the store: when the store has no `delete`, it throws `RUNTIME.CACHE_STORE_CANNOT_INVALIDATE` (with `meta.missingMethod: 'delete'`) before anything else. Empty `keys` do nothing.
+
+### By a function
+
+`invalidate(run)` makes in-flight misses skip their store, then awaits `run`. `run` receives no argument: it deletes through a store reference you hold. To use the default store's `deleteWhere`, create the store yourself and pass it in:
+
+```typescript
+import { createCacheMiddleware, createInMemoryCacheStore } from '@internal/middleware-cache';
+
+const store = createInMemoryCacheStore({ maxEntries: 1_000 });
+const cache = createCacheMiddleware({ store });
+
+await cache.invalidate(() => store.deleteWhere((entry) => entry.key.startsWith('users:')));
+```
+
+The function form performs no capability check; `run` is responsible for what the store supports. In-flight misses skip their store even when `run` removes nothing.
+
+### Tags: a policy built on attributes
+
+Tags are not built in. Store them in `attributes` and delete by predicate:
+
+```typescript
+function hasTags(attributes: unknown): attributes is { readonly tags: readonly unknown[] } {
+  return (
+    typeof attributes === 'object' &&
+    attributes !== null &&
+    'tags' in attributes &&
+    Array.isArray(attributes.tags)
+  );
+}
+
+await db.orm.public.User.first({ id: 1 }, (meta) =>
+  meta.annotate(cacheAnnotation({ ttl: 60_000, attributes: { tags: ['users'] } })),
+);
+
+await cache.invalidate(() =>
+  store.deleteWhere((entry) => hasTags(entry.attributes) && entry.attributes.tags.includes('users')),
+);
+```
+
+A custom store can support the same policy by reading `entry.attributes` in `set`, keeping its own index, and exposing a group delete that `run` calls.
+
+### Rules for both forms
+
+- **Delete through `invalidate`.** Calling `store.delete` or `store.deleteWhere` on its own skips the guard for overlapping reads.
 - **Call it after the write has committed.** `invalidate` works from any scope, but if you call it inside a transaction, another request can read the old rows before the commit and put them back in the cache. Invalidate once the transaction has returned.
-- **Overlapping reads.** A read that missed the cache before an `invalidate` and finishes after it does not store its rows, because they may predate the write. This guard is per middleware instance and so per process: with a shared store such as Redis, a read in another process is not protected, and can store rows that predate the write. Any `invalidate` with at least one key or tag that does not throw `RUNTIME.CACHE_STORE_CANNOT_INVALIDATE` makes every in-flight miss skip its store, whatever keys or tags it names, so frequent invalidation lowers the hit rate.
+- **Overlapping reads.** A read that missed the cache before an `invalidate` and finishes after it does not store its rows, because they may predate the write. This guard is per middleware instance and so per process: with a shared store such as Redis, a read in another process is not protected, and can store rows that predate the write. Every `invalidate` call makes every in-flight miss skip its store, whatever it removes, including a function that removes nothing; the only exceptions are a refused keys call and empty `keys`. Frequent invalidation therefore lowers the hit rate.
+- **Until `invalidate` resolves,** reads can still return entries it has not removed yet.
+- **Store errors.** If the store's `delete`, or `run`, rejects partway, `invalidate` rejects with that error; entries already removed stay removed, and calling `invalidate` again is safe. In-flight misses still skip their store.
 
 ## Transaction-scope guard
 
@@ -166,7 +235,7 @@ This avoids two surprises:
 The default `createInMemoryCacheStore({ maxEntries, clock? })`:
 
 - **TTL.** Each entry is committed with the per-query `ttl`, or the middleware's `defaultTtlMs` when the annotation has none (in milliseconds). The store evaluates expiry against its injected clock (defaults to `Date.now`); reads of expired entries return `undefined` and drop the entry as a side effect.
-- **Tags.** The store keeps an index from tag to keys. A key leaves the index whenever its entry leaves the store (delete, deleteByTag, expiry, eviction, overwrite), so a tag never removes a later entry stored under the same key. The index does not count toward `maxEntries`.
+- **`deleteWhere(predicate)`.** Removes every live entry for which `predicate({ key, attributes })` returns `true`, and every expired entry without offering it to `predicate`. It scans all entries synchronously, so its cost grows with `maxEntries`, and it does not change LRU order. A throwing `predicate` rejects the returned promise; entries removed before the throw stay removed. `createInMemoryCacheStore` returns `InMemoryCacheStore`, whose `delete` and `deleteWhere` are both required.
 - **LRU.** Iteration order is the LRU order. Reads and writes both bump recency. When the live count would exceed `maxEntries`, the oldest entry is evicted.
 - **Failure handling.** The middleware commits to the store only when `afterQuery` reports `completed: true && source: 'driver'`. Driver errors mid-stream and middleware-served queries never populate the cache.
 
@@ -179,7 +248,20 @@ The default `createInMemoryCacheStore({ maxEntries, clock? })`:
 
 ## Scope
 
-This package is a read-through cache with a control surface: annotations to opt in, tags, `invalidate`, and the `CacheStore` interface. It does not decide when to invalidate. Write-driven invalidation, invalidation strategies, request coalescing, and routing between several stores are policy, and belong in separate extensions built on `invalidate` and tags. Such extensions invalidate through `invalidate`, not by calling the store's `delete` or `deleteByTag` directly, because only `invalidate` stops overlapping reads from storing rows that predate the write. The `CacheStore` interface is the extension point for backends, not for invalidation.
+This package is a read-through cache with a control surface. Its primitives are:
+
+- keys: the annotation `key`, and the `deriveKey` option with its default `deriveKeyFromContentHash`;
+- `attributes` on the annotation and the stored entry;
+- `invalidate`, by keys or by a function;
+- `defaultTtlMs`;
+- the `CacheStore` interface, and `deleteWhere` on the default store.
+
+It never decides when to remove an entry. Tagging schemes, deletion strategies, request coalescing and routing between several stores are policy, and belong in separate extensions built on these primitives. Such extensions delete through `invalidate`, because only `invalidate` stops overlapping reads from storing rows that predate the write. The `CacheStore` interface is the extension point for backends, not for invalidation.
+
+The primitives do not cover two things:
+
+- **Write-driven invalidation from inside a transaction.** An extension that invalidates on writes must wait for the commit, and an `afterExecute` hook inside a transaction runs before it. The runtime has no post-commit hook today; adding one is separate framework work.
+- **Serve-stale strategies** such as stale-while-revalidate. Only the middleware decides hit or miss, so nothing outside it can serve an expired entry while it re-runs the query.
 
 ## See also
 
