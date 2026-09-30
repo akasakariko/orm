@@ -70,7 +70,7 @@ describe('withTransaction when close() is called inside the callback', () => {
   });
 });
 
-describe('a transaction and a reload on the runtime that follow each other from the tick of close()', () => {
+describe('a transaction and a reload on the runtime that follow each other from the turn of close()', () => {
   it('both complete, because the runtime is busy with database work until the reload ends', async () => {
     const { runtime, calls, hooks } = setup();
     hooks.execute = () => delay(5);
@@ -100,7 +100,7 @@ describe('a transaction and a reload on the runtime that follow each other from 
   });
 });
 
-describe('a runtime-scope query inside a transaction callback after the runtime was idle for a tick', () => {
+describe('a runtime-scope query inside a transaction callback after the runtime was idle for a turn of the event loop', () => {
   it('is refused at once, the transaction rolls back, and the close settles', async () => {
     const { runtime, calls, driver } = setup();
     let closing: Promise<void> | undefined;

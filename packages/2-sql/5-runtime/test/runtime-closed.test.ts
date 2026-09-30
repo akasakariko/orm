@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   affectedCountPlan,
   afterRefusalBegins,
@@ -163,7 +163,7 @@ describe('runtime-scope work that fails while close() waits for it', () => {
   });
 });
 
-describe('runtime-scope work that enters in the same tick as close()', () => {
+describe('runtime-scope work that enters in the same turn of the event loop as close()', () => {
   it('is admitted, and the driver closes after it', async () => {
     const { runtime, calls } = setup();
     const settled: string[] = [];
@@ -180,7 +180,7 @@ describe('runtime-scope work that enters in the same tick as close()', () => {
   });
 });
 
-describe('runtime-scope work that starts in the tick in which the previous one settled', () => {
+describe('runtime-scope work that starts in the turn of the event loop in which the previous one settled', () => {
   it('is admitted, so a chain of dependent queries completes before the driver closes', async () => {
     const { runtime, calls, hooks } = setup();
     hooks.execute = () => delay(5);
@@ -199,7 +199,7 @@ describe('runtime-scope work that starts in the tick in which the previous one s
 });
 
 describe('runtime-scope work that started and ended since close() set its timer', () => {
-  it('keeps the close waiting another tick, so work one tick later is still admitted', async () => {
+  it('keeps the close waiting another turn, so work one turn later is still admitted', async () => {
     const { runtime, calls } = setup();
 
     const closing = runtime.close();
@@ -290,4 +290,19 @@ describe('runtime-scope work started after close()', () => {
     closeGate.resolve();
     await closing;
   });
+});
+
+describe('close() under fake timers installed after the runtime module loaded', () => {
+  it('settles without advancing the fake clock', async () => {
+    const { runtime, driver, hooks } = setup();
+    hooks.close = async () => {};
+    vi.useFakeTimers();
+    try {
+      await runtime.close();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(driver.close).toHaveBeenCalledOnce();
+  }, 2000);
 });

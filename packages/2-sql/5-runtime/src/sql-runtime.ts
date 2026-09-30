@@ -109,7 +109,7 @@ export interface Runtime extends RuntimeQueryable {
   connection(): Promise<RuntimeConnection>;
   telemetry(): RuntimeTelemetryEvent | null;
   /**
-   * Waits until the runtime has been idle for one tick, with no database work in flight and none started since, then closes the driver. Runtime-scope work that starts after that is refused with `DRIVER.NOT_CONNECTED`. Work on a held connection or transaction is never refused; the driver's close waits for its release. Every call returns the same promise.
+   * Waits until the runtime has been idle for one turn of the event loop, with no database work in flight and none started since, then closes the driver. Runtime-scope work that starts after that is refused with `DRIVER.NOT_CONNECTED`. Work on a held connection or transaction is never refused; the driver's close waits for its release. Every call returns the same promise.
    */
   close(): Promise<void>;
 
@@ -160,6 +160,8 @@ function isExecutionPlan(plan: SqlExecutionPlan | SqlQueryPlan): plan is SqlExec
 // v8 ignore next 2
 const noopLogSink = (): void => {};
 const noopLog: Log = { info: noopLogSink, warn: noopLogSink, error: noopLogSink };
+// Taken when the module loads, so close() still settles when a test installs fake timers later.
+const scheduleTimer = globalThis.setTimeout;
 
 function runtimeClosedError(): StructuredError {
   return structuredError('DRIVER.NOT_CONNECTED', 'Runtime is closed', {
@@ -1006,15 +1008,15 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
   }
 
   close(): Promise<void> {
-    this.closePromise ??= this.drainThenCloseDriver();
+    this.closePromise ??= this.closeDriverWhenIdle();
     return this.closePromise;
   }
 
-  // Refusal begins once the runtime has been idle for one tick: no database work in flight, and none started since the timer was set. A chain of dependent queries that keeps the runtime busy from the close onward, such as an ORM write and its reload, is admitted to its end.
-  private async drainThenCloseDriver(): Promise<void> {
+  // Refusal begins once the runtime has been idle for one turn of the event loop (a setTimeout(0)): no database work in flight, and none started since the timer was set. A chain of dependent queries that keeps the runtime busy from the close onward, such as an ORM write and its reload, is admitted to its end.
+  private async closeDriverWhenIdle(): Promise<void> {
     for (;;) {
       const startedBefore = this.#inFlight.started;
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      await new Promise<void>((resolve) => scheduleTimer(resolve, 0));
       if (!this.#inFlight.active && this.#inFlight.started === startedBefore) {
         break;
       }

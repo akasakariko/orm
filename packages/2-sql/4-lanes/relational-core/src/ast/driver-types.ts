@@ -36,7 +36,7 @@ export interface SqlDriver<TBinding = void> extends SqlQueryable {
   connect(binding: TBinding): Promise<void>;
   acquireConnection(): Promise<SqlConnection>;
   /**
-   * Waits for every connection this driver has handed out to be released, and for every query stream it has started to finish or be returned, then releases its resources. The SQL runtime stops waiting for a query once the driver has answered its first row, and never waits for held connections, so it relies on this.
+   * The SQL runtime stops waiting for a query once the driver has answered its first row, so it relies on `close()` waiting for every connection the driver has handed out to be released, and for every query stream it has started to finish or be returned, before it releases its resources. The Postgres drivers do this; the SQLite driver does not yet.
    */
   close(): Promise<void>;
 }
