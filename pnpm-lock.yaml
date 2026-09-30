@@ -3084,12 +3084,6 @@ importers:
       '@internal/contract':
         specifier: workspace:8.0.0-rc.13
         version: link:../../1-framework/0-foundation/contract
-      '@internal/mongo-runtime':
-        specifier: workspace:8.0.0-rc.13
-        version: link:../../2-mongo-family/7-runtime
-      '@internal/sql-runtime':
-        specifier: workspace:8.0.0-rc.13
-        version: link:../../2-sql/5-runtime
       '@repo/tsconfig':
         specifier: workspace:8.0.0-rc.13
         version: link:../../0-config/tsconfig

@@ -34,23 +34,30 @@ describe('createCacheMiddleware — tags', () => {
 describe('createCacheMiddleware — defaultTtlMs', () => {
   it('caches an annotation without ttl for the default TTL', async () => {
     const store = spyStore();
-    const mw = createCacheMiddleware({ store, defaultTtlMs: 5_000 });
+    const mw = createCacheMiddleware({ store, defaultTtlMs: 5_000, clock: () => 5 });
     const exec = makeExec('select 1', { cache: cacheAnnotation({}) });
 
     await runMiss(mw, exec, makeCtx(), [{ id: 1 }]);
 
-    expect(store.setSpy).toHaveBeenCalledTimes(1);
-    expect(store.setSpy.mock.calls[0]?.[2]).toBe(5_000);
+    expect(store.setSpy).toHaveBeenCalledWith(
+      'key:select 1',
+      { rows: [{ id: 1 }], storedAt: 5 },
+      5_000,
+    );
   });
 
   it('keeps the annotation ttl over the default', async () => {
     const store = spyStore();
-    const mw = createCacheMiddleware({ store, defaultTtlMs: 5_000 });
+    const mw = createCacheMiddleware({ store, defaultTtlMs: 5_000, clock: () => 5 });
     const exec = makeExec('select 1', { cache: cacheAnnotation({ ttl: 60_000 }) });
 
     await runMiss(mw, exec, makeCtx(), [{ id: 1 }]);
 
-    expect(store.setSpy.mock.calls[0]?.[2]).toBe(60_000);
+    expect(store.setSpy).toHaveBeenCalledWith(
+      'key:select 1',
+      { rows: [{ id: 1 }], storedAt: 5 },
+      60_000,
+    );
   });
 
   it('passes through an annotation without ttl when there is no default', async () => {

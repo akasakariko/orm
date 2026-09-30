@@ -11,8 +11,8 @@
  *   telemetry) and is **not** used by the in-memory store itself for
  *   expiry — TTL is driven by the store's own clock plus the `ttlMs`
  *   passed to `set`. Custom stores may use it differently.
- * - `tags` label the entry so `deleteByTag` can remove it. An entry
- *   stored without tags has no `tags` property.
+ * - `tags` label the entry so `deleteByTag` can remove it. An entry stored without tags has no
+ *   `tags` property.
  */
 export interface CachedEntry {
   readonly rows: readonly Record<string, unknown>[];
@@ -39,16 +39,15 @@ export interface CachedEntry {
  *   forget at scale; the cache middleware does not rely on `set`
  *   completing before subsequent `get`s.
  * - `delete` (optional) removes the entry under the key, if any.
- * - `deleteByTag` (optional) removes every entry carrying at least one
- *   of the given tags.
+ * - `deleteByTag` (optional) removes every entry carrying at least one of the given tags.
  *
- * Stores that omit `delete` or `deleteByTag` cannot be invalidated by
- * key or by tag respectively.
+ * Stores that omit `delete` or `deleteByTag` cannot be invalidated by key or by tag respectively.
+ * The middleware calls them from its `invalidate`; application code calls `invalidate`, not these
+ * methods, so that reads in flight skip storing their rows.
  *
- * Both methods are async to leave the door open for I/O-backed stores
- * (Redis, S3, etc.). The default in-memory store completes
- * synchronously and wraps the result in `Promise.resolve` for type
- * conformance.
+ * Every method is async to leave the door open for I/O-backed stores (Redis, S3, etc.). The
+ * default in-memory store completes synchronously and wraps the result in `Promise.resolve` for
+ * type conformance.
  */
 export interface CacheStore {
   get(key: string): Promise<CachedEntry | undefined>;
@@ -75,6 +74,7 @@ export interface InMemoryCacheStoreOptions {
 interface StoredRecord {
   readonly entry: CachedEntry;
   readonly expiresAt: number;
+  readonly tags: readonly string[];
 }
 
 /**
@@ -96,11 +96,10 @@ interface StoredRecord {
  * candidate; the last key is the most recently used. Bumping recency is
  * a delete-then-set on the underlying map.
  *
- * Tags are indexed in a separate tag-to-keys map. A key leaves the
- * index whenever its entry leaves the store (delete, deleteByTag,
- * expiry, eviction, overwrite), so a tag never reaches a later entry
- * stored under the same key. The index does not count toward
- * `maxEntries`.
+ * Tags are indexed in a separate tag-to-keys map, from a copy of the entry's tags taken at `set`.
+ * A key leaves the index whenever its entry leaves the store (delete, deleteByTag, expiry,
+ * eviction, overwrite), so a tag never reaches a later entry stored under the same key. The index
+ * does not count toward `maxEntries`.
  *
  * The default store is **not** coherent across processes or replicas —
  * each process holds its own Map. Users who need a shared cache supply
@@ -129,7 +128,7 @@ export function createInMemoryCacheStore(options: InMemoryCacheStoreOptions): Re
       return;
     }
     map.delete(key);
-    for (const tag of record.entry.tags ?? []) {
+    for (const tag of record.tags) {
       const keys = keysByTag.get(tag);
       keys?.delete(key);
       if (keys?.size === 0) {
@@ -158,8 +157,9 @@ export function createInMemoryCacheStore(options: InMemoryCacheStoreOptions): Re
     // Removing first ensures the new value lands at the end of the
     // iteration order (most recently used) and drops the old entry's tags.
     remove(key);
-    map.set(key, { entry, expiresAt });
-    indexTags(key, entry.tags ?? []);
+    const tags = [...(entry.tags ?? [])];
+    map.set(key, { entry, expiresAt, tags });
+    indexTags(key, tags);
 
     // Evict LRU entries until the live count is within bounds. The
     // iterator yields keys in insertion order; the first one is the

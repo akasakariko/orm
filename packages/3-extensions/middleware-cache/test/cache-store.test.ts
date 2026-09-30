@@ -313,6 +313,19 @@ describe('createInMemoryCacheStore', () => {
   });
 
   describe('tag index cleanup', () => {
+    it('indexes the tags as they were at set, not as the caller later changes them', async () => {
+      const store = createInMemoryCacheStore({ maxEntries: 10 });
+      const tags = ['users'];
+      await store.set('k', tagged([{ v: 'old' }], tags), 60_000);
+      tags.length = 0;
+      await store.delete('k');
+      await store.set('k', entry([{ v: 'new' }]), 60_000);
+
+      await store.deleteByTag(['users']);
+
+      expect((await store.get('k'))?.rows).toEqual([{ v: 'new' }]);
+    });
+
     it('forgets the tags of a deleted key', async () => {
       const store = createInMemoryCacheStore({ maxEntries: 10 });
       await store.set('k', tagged([{ v: 'old' }], ['old-tag']), 60_000);

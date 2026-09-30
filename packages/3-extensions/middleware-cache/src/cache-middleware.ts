@@ -23,8 +23,8 @@ import { type CacheStore, createInMemoryCacheStore } from './cache-store';
  *   clock to make commit-time observable. Note: TTL math lives inside
  *   the store, not the middleware — supplying a clock here only affects
  *   the `storedAt` field on committed `CachedEntry` values.
- * - `defaultTtlMs` — TTL for annotated reads whose annotation has no
- *   `ttl`. When unset, such reads pass through uncached.
+ * - `defaultTtlMs` — TTL for annotated reads whose annotation has no `ttl`. When unset, such reads
+ *   pass through uncached.
  */
 export interface CacheMiddlewareOptions {
   readonly store?: CacheStore;
@@ -34,9 +34,8 @@ export interface CacheMiddlewareOptions {
 }
 
 /**
- * Entries to remove from the cache store. `keys` are matched literally
- * against `cacheAnnotation({ key })` strings; `tags` remove every entry
- * carrying at least one of them.
+ * Entries to remove from the cache store. `keys` are matched literally against
+ * `cacheAnnotation({ key })` strings; `tags` remove every entry carrying at least one of them.
  */
 export interface CacheInvalidation {
   readonly keys?: readonly string[];
@@ -44,11 +43,9 @@ export interface CacheInvalidation {
 }
 
 /**
- * The cache middleware. `invalidate` removes entries by key and by tag,
- * and makes any read that was in flight when it ran skip storing its rows.
- * It throws `RUNTIME.CACHE_STORE_CANNOT_INVALIDATE` before deleting
- * anything when the store lacks `delete` (for keys) or `deleteByTag` (for
- * tags).
+ * The cache middleware. `invalidate` removes entries by key and by tag, and makes any read that
+ * was in flight when it ran skip storing its rows. It throws `RUNTIME.CACHE_STORE_CANNOT_INVALIDATE`
+ * before deleting anything when the store lacks `delete` (for keys) or `deleteByTag` (for tags).
  */
 export type CacheMiddleware = CrossFamilyMiddleware & {
   readonly invalidate: (target: CacheInvalidation) => Promise<void>;
@@ -160,11 +157,10 @@ function cannotInvalidate(missingMethod: 'delete' | 'deleteByTag', by: 'key' | '
  * - the annotation has no `ttl` and no `defaultTtlMs` is set, or
  * - `ctx.scope !== 'runtime'` (connection / transaction scopes opt out).
  *
- * Returns a cross-family `RuntimeMiddleware` (no `familyId` /
- * `targetId`). The package depends only on
- * `@internal/framework-components/runtime`; cache keys come from
- * `ctx.contentHash(exec)`, populated by the family runtime, so SQL and
- * Mongo runtimes both work out of the box.
+ * Returns a cross-family `RuntimeMiddleware` (no `familyId` / `targetId`) with an `invalidate`
+ * method. The package depends on no SQL or Mongo package; cache keys come from
+ * `ctx.contentHash(exec)`, populated by the family runtime, so SQL and Mongo runtimes both work
+ * out of the box.
  *
  * @example
  * ```typescript
@@ -283,24 +279,32 @@ export function createCacheMiddleware(options?: CacheMiddlewareOptions): CacheMi
   }
 
   async function invalidate(target: CacheInvalidation): Promise<void> {
+    const deletions: (() => Promise<void>)[] = [];
     const keys = target.keys ?? [];
+    if (keys.length > 0) {
+      const deleteKey = store.delete;
+      if (deleteKey === undefined) {
+        throw cannotInvalidate('delete', 'key');
+      }
+      for (const key of keys) {
+        deletions.push(() => deleteKey.call(store, key));
+      }
+    }
     const tags = target.tags ?? [];
-    if (keys.length > 0 && store.delete === undefined) {
-      throw cannotInvalidate('delete', 'key');
+    if (tags.length > 0) {
+      const deleteByTag = store.deleteByTag;
+      if (deleteByTag === undefined) {
+        throw cannotInvalidate('deleteByTag', 'tag');
+      }
+      deletions.push(() => deleteByTag.call(store, tags));
     }
-    if (tags.length > 0 && store.deleteByTag === undefined) {
-      throw cannotInvalidate('deleteByTag', 'tag');
-    }
-    if (keys.length === 0 && tags.length === 0) {
+    if (deletions.length === 0) {
       return;
     }
 
     invalidations += 1;
-    for (const key of keys) {
-      await store.delete?.(key);
-    }
-    if (tags.length > 0) {
-      await store.deleteByTag?.(tags);
+    for (const deletion of deletions) {
+      await deletion();
     }
   }
 

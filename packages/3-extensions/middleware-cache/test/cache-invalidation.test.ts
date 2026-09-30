@@ -108,6 +108,40 @@ describe('createCacheMiddleware — invalidate', () => {
       expect(store.deleteSpy).not.toHaveBeenCalled();
     });
 
+    it('deletes no tags when the store has no delete', async () => {
+      const store = spyStore();
+      const mw = createCacheMiddleware({
+        store: { get: store.get, set: store.set, deleteByTag: store.deleteByTag },
+      });
+
+      await expect(mw.invalidate({ keys: ['user-1'], tags: ['users'] })).rejects.toMatchObject({
+        code: 'RUNTIME.CACHE_STORE_CANNOT_INVALIDATE',
+        meta: { missingMethod: 'delete' },
+      });
+      expect(store.deleteByTagSpy).not.toHaveBeenCalled();
+    });
+
+    it('lets an in-flight miss store its rows after a refused invalidate', async () => {
+      const store = spyStore();
+      const mw = createCacheMiddleware({
+        store: { get: store.get, set: store.set, delete: store.delete },
+      });
+      const exec = makeExec('select 1', { cache: cacheAnnotation({ ttl: 60_000 }) });
+      const ctx = makeCtx();
+
+      await mw.interceptQuery?.(exec, ctx);
+      await expect(mw.invalidate({ tags: ['users'] })).rejects.toMatchObject({
+        code: 'RUNTIME.CACHE_STORE_CANNOT_INVALIDATE',
+      });
+      await mw.afterQuery?.(
+        exec,
+        { rowCount: 0, latencyMs: 0, completed: true, source: 'driver' },
+        ctx,
+      );
+
+      expect(store.setSpy).toHaveBeenCalledTimes(1);
+    });
+
     it('accepts an empty target', async () => {
       const store: CacheStore = spyStore();
       const mw = createCacheMiddleware({ store: { get: store.get, set: store.set } });

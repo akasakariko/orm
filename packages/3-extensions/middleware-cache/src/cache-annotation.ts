@@ -3,11 +3,10 @@ import { defineAnnotation } from '@internal/framework-components/runtime';
 /**
  * Payload accepted when calling the `cacheAnnotation` handle.
  *
- * - `ttl` — Time-to-live for the cached entry, in milliseconds. When
- *   omitted, the middleware's `defaultTtlMs` applies; when that is also
- *   unset, the cache middleware passes the query through untouched —
- *   presence of the annotation alone is not sufficient to enable caching.
- *   This makes the cache strictly opt-in per query.
+ * - `ttl` — Time-to-live for the cached entry, in milliseconds. When omitted, the middleware's
+ *   `defaultTtlMs` applies; when that is also unset, the cache middleware passes the query through
+ *   untouched — presence of the annotation alone is not sufficient to enable caching. This makes
+ *   the cache strictly opt-in per query.
  * - `skip` — When `true`, the cache middleware passes the query through
  *   untouched even if a `ttl` is set. Useful for selectively bypassing
  *   the cache on a per-call basis without removing the annotation
@@ -18,8 +17,8 @@ import { defineAnnotation } from '@internal/framework-components/runtime';
  *   **not** rehash it, so the caller is responsible for ensuring the
  *   string is bounded in size and free of sensitive data they do not
  *   want flowing into logs / Redis `KEYS` / persistence dumps.
- * - `tags` — Labels copied onto the stored entry so the middleware's
- *   `invalidate({ tags })` can remove it.
+ * - `tags` — Labels copied onto the stored entry so the middleware's `invalidate({ tags })` can
+ *   remove it.
  */
 export interface CachePayload {
   readonly ttl?: number;

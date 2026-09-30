@@ -21,8 +21,6 @@
   },
   "devDependencies": {
     "@internal/contract": "workspace:8.0.0-rc.13",
-    "@internal/mongo-runtime": "workspace:8.0.0-rc.13",
-    "@internal/sql-runtime": "workspace:8.0.0-rc.13",
     "@repo/tsconfig": "workspace:8.0.0-rc.13",
     "@repo/tsdown": "workspace:8.0.0-rc.13",
     "tsdown": "catalog:",
