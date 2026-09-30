@@ -127,13 +127,15 @@ interface CachedEntry {
 
 - `get` returns the live entry under `key`, or `undefined`.
 - `set` stores one entry: this key, this `meta`, these rows. `meta` is the read annotation's `meta`, or `undefined`.
-- `unset` removes entries in the same terms: these keys, whatever matches this `meta`, or both in one call so the store can batch them. The middleware passes `keys: undefined` when it has none.
+- `unset` removes every entry named in `keys` and every entry that matches `meta`, in one call so the store can batch them. `keys` is either `undefined` or non-empty.
 
 The rules a store must follow:
 
 - **The store interprets `meta`; the middleware never does.** A store that does not index `meta` must throw when `unset` receives a `meta` it cannot act on. An invalidation is never silently ignored.
+- **An `unset` by key also drops that key from any `meta` index the store keeps.**
 - **Lifetime and eviction are the store's policy.** A store that wants per-entry lifetimes reads them from `meta`.
 - **A `set` must be visible to any later `unset` of the same key.** When `set` resolves, the entry must be in place, so that an `unset` issued afterwards removes it. The middleware's guard against overlapping reads relies on this.
+- **The middleware's `unset` after a stale `set` may remove a fresher entry** that a later read stored under the same key. That costs one miss, never wrong rows.
 - **`unset` must not run a query through the runtime that uses the middleware.**
 - **Compare `meta` by value.** The `meta` passed to `unset` is a different object from the one passed to `set`. A store shared between processes must serialise `meta` itself.
 
@@ -154,7 +156,7 @@ const redis: CacheStore = {
     if (meta !== undefined) {
       throw new Error('This store does not index meta');
     }
-    if (keys !== undefined && keys.length > 0) {
+    if (keys !== undefined) {
       await redisClient.del(...keys);
     }
   },
@@ -167,8 +169,8 @@ const cache = createCacheMiddleware({ store: redis });
 
 `createInMemoryCacheStore({ maxEntries?, ttlMs?, clock? })` is what `createCacheMiddleware()` uses when no `store` is given.
 
-- **Size.** At most `maxEntries` entries (default 1000). Reads and writes both count as a use; the least recently used entry is evicted first.
-- **Lifetime.** Every entry lives `ttlMs` after its `set` (default 60 000). `ttlMs: Infinity` never expires. Expiry is measured with `clock` (default `Date.now`); an expired entry reads as absent and is dropped.
+- **Size.** At most `maxEntries` entries, a positive integer (default 1000). Reads and writes both count as a use; the least recently used entry is evicted first.
+- **Lifetime.** Every entry lives `ttlMs` after its `set`, a positive number of milliseconds (default 60 000). `ttlMs: Infinity` never expires. Any other `maxEntries` or `ttlMs`, such as `0` or `NaN`, throws `RUNTIME.ARGUMENT_INVALID`. Expiry is measured with `clock` (default `Date.now`); an expired entry reads as absent and is dropped.
 - **`meta`.** `set` ignores it. `unset({ keys })` removes those keys; `unset` with any `meta` other than `undefined`, including `null`, throws `RUNTIME.CACHE_STORE_META_UNSUPPORTED` and removes nothing.
 
 To change the defaults, create the store yourself:
@@ -211,6 +213,7 @@ Rules:
 - **Delete through `invalidate`.** Calling the store's `unset` on its own skips the guard for overlapping reads.
 - **Overlapping reads.** A read that missed the cache before an `invalidate` and finishes after it does not store its rows, because they may predate the write. `invalidate({ keys })` stops only the reads for those keys. `invalidate({ meta })` stops every read in flight, because only the store knows which entries `meta` matches, so frequent invalidation by `meta` lowers the hit rate. If an `invalidate` runs while a read's `store.set` is in flight, the middleware calls `store.unset({ keys: [key] })` once the `set` resolves. Each skipped store is logged at debug level as `middleware.cache.store-skipped` with the key.
 - **One process only.** The guard is per middleware instance. With a shared store such as Redis, a read in another process is not stopped, and can store rows that predate the write.
+- **Abandoned reads leave a small counter.** The guard keeps a counter per key while a miss for it is pending. A miss whose `afterQuery` never runs, because the consumer stopped reading the rows early or an earlier middleware's `afterQuery` threw, leaves that key's counter in memory. The growth is bounded by distinct keys, not by reads.
 - **Until `invalidate` resolves,** reads can still return entries it has not removed yet.
 - **Store errors propagate.** If `unset` rejects, `invalidate` rejects with that error. Overlapping reads still skip their store, which costs one extra miss.
 

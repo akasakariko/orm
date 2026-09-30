@@ -51,7 +51,12 @@ export function deriveKeyFromContentHash(
   return ctx.contentHash(exec);
 }
 
-interface KeyGeneration {
+/**
+ * The generation of one key, kept while misses for it are pending. A miss whose `afterQuery` never
+ * runs (an abandoned row stream, or an earlier middleware's `afterQuery` throwing) leaves its key's
+ * entry behind: one small counter per such key, bounded by distinct keys rather than by reads.
+ */
+interface KeyState {
   generation: number;
   pendingMisses: number;
 }
@@ -66,7 +71,7 @@ interface PendingMiss {
   readonly buffer: Record<string, unknown>[];
   readonly globalGeneration: number;
   readonly keyGeneration: number;
-  readonly keyState: KeyGeneration;
+  readonly keyState: KeyState;
 }
 
 /**
@@ -100,12 +105,12 @@ export function createCacheMiddleware(options?: CacheMiddlewareOptions): CacheMi
   const store = options?.store ?? createInMemoryCacheStore();
   const deriveKey = options?.deriveKey ?? deriveKeyFromContentHash;
   let globalGeneration = 0;
-  const keyGenerations = new Map<string, KeyGeneration>();
+  const keyStates = new Map<string, KeyState>();
   const pending = new WeakMap<object, PendingMiss>();
 
   function startMiss(key: string, meta: unknown): PendingMiss {
-    const keyState = keyGenerations.get(key) ?? { generation: 0, pendingMisses: 0 };
-    keyGenerations.set(key, keyState);
+    const keyState = keyStates.get(key) ?? { generation: 0, pendingMisses: 0 };
+    keyStates.set(key, keyState);
     keyState.pendingMisses += 1;
     return {
       key,
@@ -120,7 +125,7 @@ export function createCacheMiddleware(options?: CacheMiddlewareOptions): CacheMi
   function releaseMiss(miss: PendingMiss): void {
     miss.keyState.pendingMisses -= 1;
     if (miss.keyState.pendingMisses === 0) {
-      keyGenerations.delete(miss.key);
+      keyStates.delete(miss.key);
     }
   }
 
@@ -211,12 +216,12 @@ export function createCacheMiddleware(options?: CacheMiddlewareOptions): CacheMi
     readonly keys?: readonly string[];
     readonly meta?: unknown;
   }): Promise<void> {
-    const keys = target.keys ?? [];
-    if (keys.length === 0 && target.meta === undefined) {
+    const keys = target.keys !== undefined && target.keys.length > 0 ? target.keys : undefined;
+    if (keys === undefined && target.meta === undefined) {
       return;
     }
-    for (const key of keys) {
-      const keyState = keyGenerations.get(key);
+    for (const key of keys ?? []) {
+      const keyState = keyStates.get(key);
       if (keyState !== undefined) {
         keyState.generation += 1;
       }
@@ -224,7 +229,7 @@ export function createCacheMiddleware(options?: CacheMiddlewareOptions): CacheMi
     if (target.meta !== undefined) {
       globalGeneration += 1;
     }
-    await store.unset({ keys: target.keys, meta: target.meta });
+    await store.unset({ keys, meta: target.meta });
   }
 
   return { name: 'cache', interceptQuery, onRow, afterQuery, invalidate };

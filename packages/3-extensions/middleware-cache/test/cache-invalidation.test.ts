@@ -68,6 +68,15 @@ describe('createCacheMiddleware — invalidate', () => {
     expect(store.unsetSpy.mock.calls).toEqual([[{ keys: ['user-1'], meta: { tags: ['users'] } }]]);
   });
 
+  it('passes keys: undefined when keys are empty and meta is given', async () => {
+    const store = spyStore();
+    const mw = createCacheMiddleware({ store });
+
+    await mw.invalidate({ keys: [], meta: { tags: ['users'] } });
+
+    expect(store.unsetSpy.mock.calls).toEqual([[{ keys: undefined, meta: { tags: ['users'] } }]]);
+  });
+
   it('treats meta: null as a meta to unset', async () => {
     const store = spyStore();
     const mw = createCacheMiddleware({ store });
