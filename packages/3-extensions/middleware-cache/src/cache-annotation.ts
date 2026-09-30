@@ -17,14 +17,11 @@ import { defineAnnotation } from '@internal/framework-components/runtime';
  *   **not** rehash it, so the caller is responsible for ensuring the
  *   string is bounded in size and free of sensitive data they do not
  *   want flowing into logs / Redis `KEYS` / persistence dumps.
- * - `tags` — Labels copied onto the stored entry so the middleware's `invalidate({ tags })` can
- *   remove it.
  */
 export interface CachePayload {
   readonly ttl?: number;
   readonly skip?: boolean;
   readonly key?: string;
-  readonly tags?: readonly string[];
 }
 
 /**

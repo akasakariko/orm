@@ -42,7 +42,6 @@ export function spyStore(): Required<CacheStore> & {
   readonly getSpy: ReturnType<typeof vi.fn>;
   readonly setSpy: ReturnType<typeof vi.fn>;
   readonly deleteSpy: ReturnType<typeof vi.fn>;
-  readonly deleteByTagSpy: ReturnType<typeof vi.fn>;
   readonly inner: Map<string, CachedEntry>;
 } {
   const inner = new Map<string, CachedEntry>();
@@ -53,22 +52,13 @@ export function spyStore(): Required<CacheStore> & {
   const deleteSpy = vi.fn(async (key: string) => {
     inner.delete(key);
   });
-  const deleteByTagSpy = vi.fn(async (tags: readonly string[]) => {
-    for (const [key, entry] of inner) {
-      if (entry.tags?.some((tag) => tags.includes(tag))) {
-        inner.delete(key);
-      }
-    }
-  });
   return {
     get: getSpy,
     set: setSpy,
     delete: deleteSpy,
-    deleteByTag: deleteByTagSpy,
     getSpy,
     setSpy,
     deleteSpy,
-    deleteByTagSpy,
     inner,
   };
 }

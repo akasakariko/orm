@@ -1,15 +1,20 @@
 import { describe, expect, it } from 'vitest';
-import { type CachedEntry, type CacheStore, createInMemoryCacheStore } from '../src/cache-store';
+import {
+  type CachedEntry,
+  type CacheStore,
+  createInMemoryCacheStore,
+  type InMemoryCacheStore,
+} from '../src/cache-store';
 
 function entry(rows: ReadonlyArray<Record<string, unknown>>, storedAt = 0): CachedEntry {
   return { rows, storedAt };
 }
 
-function tagged(
+function withAttributes(
   rows: ReadonlyArray<Record<string, unknown>>,
-  tags: readonly string[],
+  attributes: unknown,
 ): CachedEntry {
-  return { rows, storedAt: 0, tags };
+  return { rows, storedAt: 0, attributes };
 }
 
 describe('createInMemoryCacheStore', () => {
@@ -254,34 +259,43 @@ describe('createInMemoryCacheStore', () => {
     });
   });
 
-  describe('tags', () => {
-    it('stores an entry without tags with no tags property', async () => {
+  describe('attributes', () => {
+    it('stores an entry without attributes with no attributes property', async () => {
       const store = createInMemoryCacheStore({ maxEntries: 10 });
       await store.set('k', entry([{ v: 1 }]), 60_000);
 
       const got = await store.get('k');
 
       expect(got).toBeDefined();
-      expect(got).not.toHaveProperty('tags');
+      expect(got).not.toHaveProperty('attributes');
     });
 
-    it('round-trips the tags of an entry', async () => {
+    it('round-trips the attributes of an entry', async () => {
       const store = createInMemoryCacheStore({ maxEntries: 10 });
-      await store.set('k', tagged([{ v: 1 }], ['users']), 60_000);
+      await store.set('k', withAttributes([{ v: 1 }], { tags: ['users'] }), 60_000);
 
-      expect(await store.get('k')).toEqual({ rows: [{ v: 1 }], storedAt: 0, tags: ['users'] });
+      expect(await store.get('k')).toEqual({
+        rows: [{ v: 1 }],
+        storedAt: 0,
+        attributes: { tags: ['users'] },
+      });
     });
   });
 
-  describe('deleteByTag', () => {
-    it('removes every entry carrying the tag and leaves the others', async () => {
+  describe('deleteWhere', () => {
+    it('is part of the InMemoryCacheStore returned by the factory', () => {
+      const store: InMemoryCacheStore = createInMemoryCacheStore({ maxEntries: 10 });
+      expect(typeof store.deleteWhere).toBe('function');
+    });
+
+    it('removes the entries the predicate matches and keeps the rest', async () => {
       const store = createInMemoryCacheStore({ maxEntries: 10 });
-      await store.set('u1', tagged([{ v: 'u1' }], ['users']), 60_000);
-      await store.set('u2', tagged([{ v: 'u2' }], ['users', 'admins']), 60_000);
-      await store.set('p1', tagged([{ v: 'p1' }], ['posts']), 60_000);
+      await store.set('u1', withAttributes([{ v: 'u1' }], 'users'), 60_000);
+      await store.set('u2', withAttributes([{ v: 'u2' }], 'users'), 60_000);
+      await store.set('p1', withAttributes([{ v: 'p1' }], 'posts'), 60_000);
       await store.set('plain', entry([{ v: 'plain' }]), 60_000);
 
-      await store.deleteByTag(['users']);
+      await store.deleteWhere((e) => e.attributes === 'users');
 
       expect(await store.get('u1')).toBeUndefined();
       expect(await store.get('u2')).toBeUndefined();
@@ -289,99 +303,76 @@ describe('createInMemoryCacheStore', () => {
       expect((await store.get('plain'))?.rows).toEqual([{ v: 'plain' }]);
     });
 
-    it('removes entries carrying any of several tags', async () => {
+    it('offers each live entry to the predicate as its key and attributes', async () => {
       const store = createInMemoryCacheStore({ maxEntries: 10 });
-      await store.set('u1', tagged([{ v: 'u1' }], ['users']), 60_000);
-      await store.set('p1', tagged([{ v: 'p1' }], ['posts']), 60_000);
-      await store.set('c1', tagged([{ v: 'c1' }], ['comments']), 60_000);
+      await store.set('a', withAttributes([{ v: 'a' }], { n: 1 }), 60_000);
+      await store.set('b', entry([{ v: 'b' }]), 60_000);
+      const offered: unknown[] = [];
 
-      await store.deleteByTag(['users', 'posts']);
+      await store.deleteWhere((e) => {
+        offered.push(e);
+        return false;
+      });
 
-      expect(await store.get('u1')).toBeUndefined();
-      expect(await store.get('p1')).toBeUndefined();
-      expect((await store.get('c1'))?.rows).toEqual([{ v: 'c1' }]);
+      expect(offered).toEqual([
+        { key: 'a', attributes: { n: 1 } },
+        { key: 'b', attributes: undefined },
+      ]);
     });
 
-    it('does nothing for a tag no entry carries', async () => {
-      const store = createInMemoryCacheStore({ maxEntries: 10 });
-      await store.set('u1', tagged([{ v: 'u1' }], ['users']), 60_000);
-
-      await store.deleteByTag(['unknown']);
-
-      expect((await store.get('u1'))?.rows).toEqual([{ v: 'u1' }]);
-    });
-  });
-
-  describe('tag index cleanup', () => {
-    it('indexes the tags as they were at set, not as the caller later changes them', async () => {
-      const store = createInMemoryCacheStore({ maxEntries: 10 });
-      const tags = ['users'];
-      await store.set('k', tagged([{ v: 'old' }], tags), 60_000);
-      tags.length = 0;
-      await store.delete('k');
-      await store.set('k', entry([{ v: 'new' }]), 60_000);
-
-      await store.deleteByTag(['users']);
-
-      expect((await store.get('k'))?.rows).toEqual([{ v: 'new' }]);
-    });
-
-    it('forgets the tags of a deleted key', async () => {
-      const store = createInMemoryCacheStore({ maxEntries: 10 });
-      await store.set('k', tagged([{ v: 'old' }], ['old-tag']), 60_000);
-      await store.delete('k');
-      await store.set('k', entry([{ v: 'new' }]), 60_000);
-
-      await store.deleteByTag(['old-tag']);
-
-      expect((await store.get('k'))?.rows).toEqual([{ v: 'new' }]);
-    });
-
-    it('forgets the tags of a key removed by deleteByTag', async () => {
-      const store = createInMemoryCacheStore({ maxEntries: 10 });
-      await store.set('k', tagged([{ v: 'old' }], ['a', 'b']), 60_000);
-      await store.deleteByTag(['a']);
-      await store.set('k', entry([{ v: 'new' }]), 60_000);
-
-      await store.deleteByTag(['b']);
-
-      expect((await store.get('k'))?.rows).toEqual([{ v: 'new' }]);
-    });
-
-    it('forgets the tags of an expired entry dropped by get', async () => {
+    it('removes an expired entry without offering it to the predicate', async () => {
       let now = 0;
       const store = createInMemoryCacheStore({ maxEntries: 10, clock: () => now });
-      await store.set('k', tagged([{ v: 'old' }], ['users']), 1_000);
-      now = 2_000;
-      expect(await store.get('k')).toBeUndefined();
-      await store.set('k', entry([{ v: 'new' }]), 1_000);
+      await store.set('short', entry([{ v: 'short' }]), 100);
+      await store.set('long', entry([{ v: 'long' }]), 10_000);
+      now = 500;
+      const offered: string[] = [];
 
-      await store.deleteByTag(['users']);
+      await store.deleteWhere((e) => {
+        offered.push(e.key);
+        return false;
+      });
 
-      expect((await store.get('k'))?.rows).toEqual([{ v: 'new' }]);
+      expect(offered).toEqual(['long']);
+      now = 0;
+      expect(await store.get('short')).toBeUndefined();
+      expect((await store.get('long'))?.rows).toEqual([{ v: 'long' }]);
     });
 
-    it('forgets the tags of an entry evicted by LRU', async () => {
-      const store = createInMemoryCacheStore({ maxEntries: 1 });
-      await store.set('k', tagged([{ v: 'old' }], ['users']), 60_000);
-      await store.set('other', entry([{ v: 'other' }]), 60_000);
-      await store.set('k', entry([{ v: 'new' }]), 60_000);
-
-      await store.deleteByTag(['users']);
-
-      expect((await store.get('k'))?.rows).toEqual([{ v: 'new' }]);
-    });
-
-    it('forgets the old tags when set overwrites a key', async () => {
+    it('rejects when the predicate throws, and keeps the removals made before the throw', async () => {
       const store = createInMemoryCacheStore({ maxEntries: 10 });
-      await store.set('k', tagged([{ v: 'old' }], ['old-tag']), 60_000);
-      await store.set('k', tagged([{ v: 'new' }], ['new-tag']), 60_000);
+      await store.set('a', entry([{ v: 'a' }]), 60_000);
+      await store.set('b', entry([{ v: 'b' }]), 60_000);
+      await store.set('c', entry([{ v: 'c' }]), 60_000);
+      const failure = new Error('predicate failed');
 
-      await store.deleteByTag(['old-tag']);
-      expect((await store.get('k'))?.rows).toEqual([{ v: 'new' }]);
+      const result = store.deleteWhere((e) => {
+        if (e.key === 'b') {
+          throw failure;
+        }
+        return true;
+      });
 
-      await store.deleteByTag(['new-tag']);
-      expect(await store.get('k')).toBeUndefined();
+      await expect(result).rejects.toBe(failure);
+      expect(await store.get('a')).toBeUndefined();
+      expect((await store.get('b'))?.rows).toEqual([{ v: 'b' }]);
+      expect((await store.get('c'))?.rows).toEqual([{ v: 'c' }]);
+    });
+
+    it('does not change LRU order', async () => {
+      const store = createInMemoryCacheStore({ maxEntries: 3 });
+      await store.set('a', entry([{ v: 'a' }]), 60_000);
+      await store.set('b', entry([{ v: 'b' }]), 60_000);
+      await store.set('drop', entry([{ v: 'drop' }]), 60_000);
+
+      await store.deleteWhere((e) => e.key === 'drop');
+      await store.set('c', entry([{ v: 'c' }]), 60_000);
+      await store.set('d', entry([{ v: 'd' }]), 60_000);
+
+      expect(await store.get('a')).toBeUndefined();
+      expect((await store.get('b'))?.rows).toEqual([{ v: 'b' }]);
+      expect((await store.get('c'))?.rows).toEqual([{ v: 'c' }]);
+      expect((await store.get('d'))?.rows).toEqual([{ v: 'd' }]);
     });
   });
 });

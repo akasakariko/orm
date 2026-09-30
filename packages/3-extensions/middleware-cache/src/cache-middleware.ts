@@ -4,7 +4,6 @@ import type {
   ExecutionPlan,
   RuntimeMiddlewareContext,
 } from '@internal/framework-components/runtime';
-import { ifDefined } from '@internal/utils/defined';
 import { structuredError } from '@internal/utils/structured-error';
 import { type CachePayload, cacheAnnotation } from './cache-annotation';
 import { type CacheStore, createInMemoryCacheStore } from './cache-store';
@@ -35,18 +34,16 @@ export interface CacheMiddlewareOptions {
 
 /**
  * Entries to remove from the cache store. `keys` are matched literally against
- * `cacheAnnotation({ key })` strings; `tags` remove every entry carrying at least one of them.
+ * `cacheAnnotation({ key })` strings.
  */
 export interface CacheInvalidation {
   readonly keys?: readonly string[];
-  readonly tags?: readonly string[];
 }
 
 /**
- * The cache middleware. `invalidate` removes entries by key and by tag, and makes any read that
- * was in flight when it ran skip storing its rows. It throws
- * `RUNTIME.CACHE_STORE_CANNOT_INVALIDATE` before deleting anything when the store lacks `delete`
- * (for keys) or `deleteByTag` (for tags).
+ * The cache middleware. `invalidate` removes entries by key, and makes any read that was in
+ * flight when it ran skip storing its rows. It throws `RUNTIME.CACHE_STORE_CANNOT_INVALIDATE`
+ * before deleting anything when the store lacks `delete`.
  */
 export type CacheMiddleware = CrossFamilyMiddleware & {
   readonly invalidate: (target: CacheInvalidation) => Promise<void>;
@@ -68,7 +65,6 @@ export type CacheMiddleware = CrossFamilyMiddleware & {
 interface PendingMiss {
   readonly key: string;
   readonly ttlMs: number;
-  readonly tags: readonly string[] | undefined;
   readonly invalidations: number;
   readonly buffer: Record<string, unknown>[];
 }
@@ -120,10 +116,10 @@ async function resolveCacheKey(
   return ctx.contentHash(exec);
 }
 
-function cannotInvalidate(missingMethod: 'delete' | 'deleteByTag', by: 'key' | 'tag') {
+function cannotInvalidate(missingMethod: 'delete') {
   return structuredError(
     'RUNTIME.CACHE_STORE_CANNOT_INVALIDATE',
-    `The cache store cannot invalidate entries by ${by} because it has no ${missingMethod} method`,
+    `The cache store cannot invalidate entries by key because it has no ${missingMethod} method`,
     {
       fix: `Supply a CacheStore that implements ${missingMethod}.`,
       meta: { missingMethod },
@@ -228,7 +224,7 @@ export function createCacheMiddleware(options?: CacheMiddlewareOptions): CacheMi
     // Miss: record the pending buffer so onRow / afterExecute can
     // commit on success. The TTL is captured here so a later mutation
     // of the annotation (defensive) cannot change the commit window.
-    pending.set(exec, { key, ttlMs, tags: payload.tags, invalidations, buffer: [] });
+    pending.set(exec, { key, ttlMs, invalidations, buffer: [] });
     ctx.log.debug?.({ event: 'middleware.cache.miss', middleware: 'cache', key });
     return undefined;
   }
@@ -271,41 +267,23 @@ export function createCacheMiddleware(options?: CacheMiddlewareOptions): CacheMi
       return;
     }
 
-    await store.set(
-      slot.key,
-      { rows: slot.buffer, storedAt: clock(), ...ifDefined('tags', slot.tags) },
-      slot.ttlMs,
-    );
+    await store.set(slot.key, { rows: slot.buffer, storedAt: clock() }, slot.ttlMs);
     ctx.log.debug?.({ event: 'middleware.cache.store', middleware: 'cache', key: slot.key });
   }
 
   async function invalidate(target: CacheInvalidation): Promise<void> {
-    const deletions: (() => Promise<void>)[] = [];
     const keys = target.keys ?? [];
-    if (keys.length > 0) {
-      const deleteKey = store.delete;
-      if (deleteKey === undefined) {
-        throw cannotInvalidate('delete', 'key');
-      }
-      for (const key of keys) {
-        deletions.push(() => deleteKey.call(store, key));
-      }
-    }
-    const tags = target.tags ?? [];
-    if (tags.length > 0) {
-      const deleteByTag = store.deleteByTag;
-      if (deleteByTag === undefined) {
-        throw cannotInvalidate('deleteByTag', 'tag');
-      }
-      deletions.push(() => deleteByTag.call(store, tags));
-    }
-    if (deletions.length === 0) {
+    if (keys.length === 0) {
       return;
+    }
+    const deleteKey = store.delete;
+    if (deleteKey === undefined) {
+      throw cannotInvalidate('delete');
     }
 
     invalidations += 1;
-    for (const deletion of deletions) {
-      await deletion();
+    for (const key of keys) {
+      await deleteKey.call(store, key);
     }
   }
 

@@ -12,45 +12,24 @@ describe('createCacheMiddleware — invalidate', () => {
     await mw.invalidate({ keys: ['user-1', 'user-2'] });
 
     expect(store.deleteSpy.mock.calls).toEqual([['user-1'], ['user-2']]);
-    expect(store.deleteByTagSpy).not.toHaveBeenCalled();
-  });
-
-  it('deletes by tag with one store call carrying every tag', async () => {
-    const store = spyStore();
-    const mw = createCacheMiddleware({ store });
-
-    await mw.invalidate({ tags: ['users', 'posts'] });
-
-    expect(store.deleteByTagSpy.mock.calls).toEqual([[['users', 'posts']]]);
-    expect(store.deleteSpy).not.toHaveBeenCalled();
-  });
-
-  it('deletes by keys and by tags when given both', async () => {
-    const store = spyStore();
-    const mw = createCacheMiddleware({ store });
-
-    await mw.invalidate({ keys: ['user-1'], tags: ['users', 'posts'] });
-
-    expect(store.deleteSpy.mock.calls).toEqual([['user-1']]);
-    expect(store.deleteByTagSpy.mock.calls).toEqual([[['users', 'posts']]]);
   });
 
   it('removes a cached entry so the next read misses', async () => {
     const store = spyStore();
     const mw = createCacheMiddleware({ store });
     const exec = makeExec('select 1', {
-      cache: cacheAnnotation({ ttl: 60_000, key: 'user-1', tags: ['users'] }),
+      cache: cacheAnnotation({ ttl: 60_000, key: 'user-1' }),
     });
     const ctx = makeCtx();
     await runMiss(mw, exec, ctx, [{ id: 1 }]);
     expect(await mw.interceptQuery?.(exec, ctx)).toBeDefined();
 
-    await mw.invalidate({ tags: ['users'] });
+    await mw.invalidate({ keys: ['user-1'] });
 
     expect(await mw.interceptQuery?.(exec, ctx)).toBeUndefined();
   });
 
-  it('calls the store methods with the store as this', async () => {
+  it('calls delete with the store as this', async () => {
     class MapStore implements CacheStore {
       readonly entries = new Map<string, CachedEntry>();
       async get(key: string) {
@@ -62,50 +41,32 @@ describe('createCacheMiddleware — invalidate', () => {
       async delete(key: string) {
         this.entries.delete(key);
       }
-      async deleteByTag(tags: readonly string[]) {
-        for (const [key, entry] of this.entries) {
-          if (entry.tags?.some((tag) => tags.includes(tag))) {
-            this.entries.delete(key);
-          }
-        }
-      }
     }
     const store = new MapStore();
     store.entries.set('user-1', { rows: [], storedAt: 0 });
-    store.entries.set('user-2', { rows: [], storedAt: 0, tags: ['users'] });
-    store.entries.set('post-1', { rows: [], storedAt: 0, tags: ['posts'] });
+    store.entries.set('user-2', { rows: [], storedAt: 0 });
+    store.entries.set('post-1', { rows: [], storedAt: 0 });
     const mw = createCacheMiddleware({ store });
 
-    await mw.invalidate({ keys: ['user-1'], tags: ['users'] });
+    await mw.invalidate({ keys: ['user-1', 'user-2'] });
 
     expect([...store.entries.keys()]).toEqual(['post-1']);
   });
 
-  it('does not call the store when keys and tags are missing', async () => {
+  it('does not call the store when keys are empty', async () => {
     const store = spyStore();
     const mw = createCacheMiddleware({ store });
 
-    await mw.invalidate({});
+    await mw.invalidate({ keys: [] });
 
     expect(store.deleteSpy).not.toHaveBeenCalled();
-    expect(store.deleteByTagSpy).not.toHaveBeenCalled();
-  });
-
-  it('does not call the store when keys and tags are empty', async () => {
-    const store = spyStore();
-    const mw = createCacheMiddleware({ store });
-
-    await mw.invalidate({ keys: [], tags: [] });
-
-    expect(store.deleteSpy).not.toHaveBeenCalled();
-    expect(store.deleteByTagSpy).not.toHaveBeenCalled();
   });
 
   describe('against a store that cannot delete', () => {
     it('refuses keys when the store has no delete', async () => {
       const store = spyStore();
       const mw = createCacheMiddleware({
-        store: { get: store.get, set: store.set, deleteByTag: store.deleteByTag },
+        store: { get: store.get, set: store.set },
       });
 
       await expect(mw.invalidate({ keys: ['user-1'] })).rejects.toMatchObject({
@@ -114,54 +75,16 @@ describe('createCacheMiddleware — invalidate', () => {
       });
     });
 
-    it('refuses tags when the store has no deleteByTag', async () => {
-      const store = spyStore();
-      const mw = createCacheMiddleware({
-        store: { get: store.get, set: store.set, delete: store.delete },
-      });
-
-      await expect(mw.invalidate({ tags: ['users'] })).rejects.toMatchObject({
-        code: 'RUNTIME.CACHE_STORE_CANNOT_INVALIDATE',
-        meta: { missingMethod: 'deleteByTag' },
-      });
-    });
-
-    it('deletes nothing when one of the two methods is missing', async () => {
-      const store = spyStore();
-      const mw = createCacheMiddleware({
-        store: { get: store.get, set: store.set, delete: store.delete },
-      });
-
-      await expect(mw.invalidate({ keys: ['user-1'], tags: ['users'] })).rejects.toMatchObject({
-        code: 'RUNTIME.CACHE_STORE_CANNOT_INVALIDATE',
-        meta: { missingMethod: 'deleteByTag' },
-      });
-      expect(store.deleteSpy).not.toHaveBeenCalled();
-    });
-
-    it('deletes no tags when the store has no delete', async () => {
-      const store = spyStore();
-      const mw = createCacheMiddleware({
-        store: { get: store.get, set: store.set, deleteByTag: store.deleteByTag },
-      });
-
-      await expect(mw.invalidate({ keys: ['user-1'], tags: ['users'] })).rejects.toMatchObject({
-        code: 'RUNTIME.CACHE_STORE_CANNOT_INVALIDATE',
-        meta: { missingMethod: 'delete' },
-      });
-      expect(store.deleteByTagSpy).not.toHaveBeenCalled();
-    });
-
     it('lets an in-flight miss store its rows after a refused invalidate', async () => {
       const store = spyStore();
       const mw = createCacheMiddleware({
-        store: { get: store.get, set: store.set, delete: store.delete },
+        store: { get: store.get, set: store.set },
       });
       const exec = makeExec('select 1', { cache: cacheAnnotation({ ttl: 60_000 }) });
       const ctx = makeCtx();
 
       await mw.interceptQuery?.(exec, ctx);
-      await expect(mw.invalidate({ tags: ['users'] })).rejects.toMatchObject({
+      await expect(mw.invalidate({ keys: ['user-1'] })).rejects.toMatchObject({
         code: 'RUNTIME.CACHE_STORE_CANNOT_INVALIDATE',
       });
       await mw.afterQuery?.(
@@ -177,7 +100,7 @@ describe('createCacheMiddleware — invalidate', () => {
       const store: CacheStore = spyStore();
       const mw = createCacheMiddleware({ store: { get: store.get, set: store.set } });
 
-      await expect(mw.invalidate({ keys: [], tags: [] })).resolves.toBeUndefined();
+      await expect(mw.invalidate({ keys: [] })).resolves.toBeUndefined();
     });
   });
 });
@@ -194,7 +117,7 @@ describe('createCacheMiddleware — reads overlapping invalidate', () => {
 
     await mw.interceptQuery?.(exec, ctx);
     await mw.onRow?.({ id: 1 }, exec, ctx);
-    await mw.invalidate({ tags: ['users'] });
+    await mw.invalidate({ keys: ['user-1'] });
     await mw.afterQuery?.(
       exec,
       { rowCount: 1, latencyMs: 0, completed: true, source: 'driver' },
@@ -215,7 +138,7 @@ describe('createCacheMiddleware — reads overlapping invalidate', () => {
     const exec = makeExec('select 1', { cache: cacheAnnotation({ ttl: 60_000 }) });
     const ctx = makeCtx();
 
-    await mw.invalidate({ tags: ['users'] });
+    await mw.invalidate({ keys: ['user-1'] });
     await runMiss(mw, exec, ctx, [{ id: 1 }]);
 
     expect(store.setSpy).toHaveBeenCalledTimes(1);
@@ -228,7 +151,7 @@ describe('createCacheMiddleware — reads overlapping invalidate', () => {
     const ctx = makeCtx();
 
     await mw.interceptQuery?.(exec, ctx);
-    await mw.invalidate({});
+    await mw.invalidate({ keys: [] });
     await mw.afterQuery?.(
       exec,
       { rowCount: 0, latencyMs: 0, completed: true, source: 'driver' },
