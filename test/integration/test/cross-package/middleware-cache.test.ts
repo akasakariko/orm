@@ -52,6 +52,8 @@ import { setupTestDatabase } from '../utils';
  *   on `afterQuery` round-trips driver vs middleware fetches.
  * - Concurrency: two parallel calls of the same plan don't cross-talk
  *   through the per-exec WeakMap buffer.
+ * - Invalidation: `invalidate` by tag or key makes the next read see a
+ *   write that happened after the rows were cached.
  */
 
 const sqlContract = new PostgresContractSerializer().deserializeContract(contract) as Contract;
@@ -95,11 +97,12 @@ describe('integration: middleware-cache against real Postgres', {
   let driver: SqlRuntimeDriverInstance<'postgres'>;
   let stackInstance: TestStackInstance;
   let driverQuerySpy: ReturnType<typeof vi.spyOn>;
+  let client: Client;
   const closeFns: Array<() => Promise<void>> = [];
 
   beforeAll(async () => {
     const database = await createDevDatabase();
-    const client = new Client({ connectionString: database.connectionString });
+    client = new Client({ connectionString: database.connectionString });
     await client.connect();
 
     await setupTestDatabase(client, sqlContract, async (c) => {
@@ -533,6 +536,46 @@ describe('integration: middleware-cache against real Postgres', {
         )
         .toArray();
       expect(driverQuerySpy.mock.calls.length).toBe(callsAfterParallel);
+    });
+  });
+
+  describe('invalidation', () => {
+    function readUserOneName(runtime: Runtime) {
+      const db = sql({ context, rawCodecInferer: { inferCodec: () => 'pg/text' } });
+      return runtime
+        .query(
+          db.public.users
+            .select('name')
+            .where((f, fns) => fns.eq(f.id, 1))
+            .annotate(cacheAnnotation({ ttl: 60_000, key: 'user-1', tags: ['users'] }))
+            .build(),
+        )
+        .toArray();
+    }
+
+    it.each([
+      { by: 'tag', target: { tags: ['users'] } },
+      { by: 'key', target: { keys: ['user-1'] } },
+    ])('a read after invalidating by $by sees the committed write', async ({ target }) => {
+      const cache = createCacheMiddleware({ maxEntries: 100 });
+      const runtime = buildRuntime([cache]);
+
+      try {
+        expect(await readUserOneName(runtime)).toEqual([{ name: 'Alice' }]);
+
+        await client.query(`UPDATE users SET name = 'Alicia' WHERE id = 1`);
+        driverQuerySpy.mockClear();
+
+        expect(await readUserOneName(runtime)).toEqual([{ name: 'Alice' }]);
+        expect(driverQuerySpy).not.toHaveBeenCalled();
+
+        await cache.invalidate(target);
+
+        expect(await readUserOneName(runtime)).toEqual([{ name: 'Alicia' }]);
+        expect(driverQuerySpy).toHaveBeenCalledTimes(1);
+      } finally {
+        await client.query(`UPDATE users SET name = 'Alice' WHERE id = 1`);
+      }
     });
   });
 });
