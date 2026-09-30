@@ -12,6 +12,7 @@ import { UNBOUND_NAMESPACE_ID } from '@internal/framework-components/ir';
 import {
   buildMongoNamespace,
   MongoCollection,
+  MongoIndex,
   MongoStorage,
   MongoValidator,
 } from '@internal/mongo-contract';
@@ -580,30 +581,35 @@ model Item {
     it('emits one syntax diagnostic for a malformed target field @map', () => {
       const result = interpret(`
         model Parent {
-          id       ObjectId @id @map(42)
+          id       ObjectId @id @map("_id")
+          key      ObjectId @map(42)
           children Child[]
         }
 
         model Child {
           id       ObjectId @id @map("_id")
           parentId ObjectId
-          parent   Parent @relation(fields: [parentId], references: [id])
+          parent   Parent @relation(fields: [parentId], references: [key])
         }
       `);
 
-      expectInvalidAttributeSyntax(result, /Expected a string literal/);
+      const diagnostic = expectInvalidAttributeSyntax(result, /Expected a string literal/);
+      if (result.ok) throw new Error('Expected interpretation to fail');
+      expect(result.failure.diagnostics).toEqual([diagnostic]);
     });
 
-    it('uses mapped field names in forward relation on-clauses', () => {
+    it('uses mapped names in forward relations, unique constraints, and indexes', () => {
       const ir = interpretOk(`
         model Child {
           id       ObjectId @id @map("_id")
           parentId ObjectId @map("parent_id")
           parent   Parent @relation(fields: [parentId], references: [id])
+          @@index([parentId])
         }
 
         model Parent {
           id       ObjectId @id @map("_id")
+          code     String @unique @map("code_value")
           children Child[]
           @@map("parents")
         }
@@ -621,6 +627,12 @@ model Item {
         },
       });
       expect(model(ir, 'Parent').storage).toEqual({ collection: 'parents' });
+      expect(getIndexes(ir, 'Child')).toEqual([
+        new MongoIndex({ keys: [{ field: 'parent_id', direction: 1 }] }),
+      ]);
+      expect(getIndexes(ir, 'parents')).toEqual([
+        new MongoIndex({ keys: [{ field: 'code_value', direction: 1 }], unique: true }),
+      ]);
     });
 
     it('excludes FK-side relation fields from the fields record', () => {
@@ -2292,13 +2304,18 @@ model Item {
   });
 
   describe('namespace block rejection', () => {
-    it('rejects explicit namespace blocks with a Mongo-flavoured diagnostic', () => {
+    it('rejects explicit namespaces even when a top-level relation targets a namespaced model', () => {
       const result = interpretPslDocumentToMongoContract({
         ...buildSymbolTableInput(
           `namespace auth {
   model User {
-    id String @id
+    id ObjectId @id @map("_id")
   }
+}
+model Post {
+  id ObjectId @id @map("_id")
+  userId ObjectId
+  user auth.User @relation(fields: [userId], references: [id])
 }
 `,
           'schema.prisma',
@@ -2312,18 +2329,14 @@ model Item {
 
       expect(result.ok).toBe(false);
       if (result.ok) return;
-      expect(result.failure.diagnostics).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            code: 'PSL_UNSUPPORTED_NAMESPACE_BLOCK',
-            message: expect.stringMatching(/[Mm]ongo/),
-          }),
-        ]),
-      );
-      const offending = result.failure.diagnostics.find(
-        (d) => d.code === 'PSL_UNSUPPORTED_NAMESPACE_BLOCK',
-      );
-      expect(offending?.message).toContain('auth');
+      expect(result.failure.diagnostics).toEqual([
+        expect.objectContaining({
+          code: 'PSL_UNSUPPORTED_NAMESPACE_BLOCK',
+          message:
+            'Mongo does not support `namespace auth { … }` blocks (the database is bound by the connection string; declare models at the document top level instead).',
+          sourceId: 'schema.prisma',
+        }),
+      ]);
     });
 
     it('rejects `namespace unbound { … }` (Mongo has no late-binding namespace)', () => {

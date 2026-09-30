@@ -82,8 +82,6 @@ import { deriveJsonSchema, derivePolymorphicJsonSchema } from './derive-json-sch
 import { type FieldPresetContext, resolveFieldPreset } from './field-presets';
 import {
   createMongoBinder,
-  findFieldAttributeNode,
-  findModelAttributeNode,
   interpretFieldAttribute,
   interpretModelAttribute,
   mongoAttributeSpecs,
@@ -167,15 +165,6 @@ function validateNamespaceBlocksForMongoTarget(input: {
   }
 }
 
-interface FieldMappings {
-  readonly pslNameToMapped: Map<string, string>;
-}
-
-interface MongoModelMetadata {
-  readonly collectionName: string;
-  readonly fieldMappings: FieldMappings;
-}
-
 function relationNullabilityMismatchDiagnostic(
   modelName: string,
   field: FieldSymbol,
@@ -192,48 +181,20 @@ function relationNullabilityMismatchDiagnostic(
   };
 }
 
-function resolveFieldMappings(input: {
+function resolvePhysicalNames(input: {
   readonly model: ModelSymbol;
+  readonly physicalNames: Map<ModelSymbol | FieldSymbol, string>;
   readonly specContext: AttributeSpecContext;
   readonly sources: PslSources;
   readonly binder: Binder;
   readonly diagnostics: PslDiagnosticCollector;
-}): FieldMappings {
-  const { model, specContext, sources, binder, diagnostics } = input;
-  const pslNameToMapped = new Map<string, string>();
-  for (const field of Object.values(model.fields)) {
-    const mapNode = findFieldAttributeNode(field, 'map');
-    const mapped =
-      (mapNode
-        ? interpretFieldAttribute({
-            symbols: specContext.symbols,
-            node: mapNode,
-            spec: mongoAttributeSpecs.field.map({ ...specContext, field }),
-            model,
-            field,
-            sources,
-            binder,
-            diagnostics,
-          })?.name
-        : undefined) ?? field.name;
-    pslNameToMapped.set(field.name, mapped);
-  }
-  return { pslNameToMapped };
-}
-
-function resolveCollectionName(input: {
-  readonly model: ModelSymbol;
-  readonly specContext: AttributeSpecContext;
-  readonly sources: PslSources;
-  readonly binder: Binder;
-  readonly diagnostics: PslDiagnosticCollector;
-}): string {
-  const { model, specContext, sources, binder, diagnostics } = input;
-  const mapNode = findModelAttributeNode(model, 'map');
-  const name = mapNode
+}): void {
+  const { model, physicalNames, specContext, sources, binder, diagnostics } = input;
+  const modelMap = model.attributes.find((attr) => attr.name === 'map');
+  const collectionName = modelMap
     ? interpretModelAttribute({
         symbols: specContext.symbols,
-        node: mapNode,
+        node: modelMap.node,
         spec: mongoAttributeSpecs.model.map(specContext),
         model,
         sources,
@@ -241,7 +202,33 @@ function resolveCollectionName(input: {
         diagnostics,
       })?.name
     : undefined;
-  return name ?? defaultCollectionName(model.name);
+  physicalNames.set(model, collectionName ?? defaultCollectionName(model.name));
+  for (const field of Object.values(model.fields)) {
+    const fieldMap = field.attributes.find((attr) => attr.name === 'map');
+    const mapped = fieldMap
+      ? interpretFieldAttribute({
+          symbols: specContext.symbols,
+          node: fieldMap.node,
+          spec: mongoAttributeSpecs.field.map({ ...specContext, field }),
+          model,
+          field,
+          sources,
+          binder,
+          diagnostics,
+        })?.name
+      : undefined;
+    physicalNames.set(field, mapped ?? field.name);
+  }
+}
+
+function physicalName(
+  physicalNames: ReadonlyMap<ModelSymbol | FieldSymbol, string>,
+  symbol: ModelSymbol | FieldSymbol | undefined,
+): string {
+  assertDefined(symbol, 'Physical names require a bound declaration');
+  const name = physicalNames.get(symbol);
+  assertDefined(name, 'Physical names must be populated before lowering');
+  return name;
 }
 
 interface MongoModelEntry {
@@ -273,7 +260,7 @@ function mongoCrossRef(modelName: string): CrossReference {
 function collectPolymorphismDeclarations(
   models: readonly ModelSymbol[],
   specContextFor: (model: ModelSymbol) => AttributeSpecContext,
-  modelMetadata: ReadonlyMap<ModelSymbol, MongoModelMetadata>,
+  physicalNames: ReadonlyMap<ModelSymbol | FieldSymbol, string>,
   sources: PslSources,
   binder: Binder,
   diagnostics: PslDiagnosticCollector,
@@ -286,7 +273,7 @@ function collectPolymorphismDeclarations(
 
   for (const model of models) {
     const specContext = specContextFor(model);
-    const discNode = findModelAttributeNode(model, 'discriminator');
+    const discNode = model.attributes.find((attr) => attr.name === 'discriminator')?.node;
     if (discNode) {
       const parsed = interpretModelAttribute({
         symbols: specContext.symbols,
@@ -316,7 +303,7 @@ function collectPolymorphismDeclarations(
         }
       }
     }
-    const baseNode = findModelAttributeNode(model, 'base');
+    const baseNode = model.attributes.find((attr) => attr.name === 'base')?.node;
     if (baseNode) {
       const parsed = interpretModelAttribute({
         symbols: specContext.symbols,
@@ -328,8 +315,7 @@ function collectPolymorphismDeclarations(
         diagnostics,
       });
       if (parsed) {
-        const collectionName =
-          modelMetadata.get(model)?.collectionName ?? defaultCollectionName(model.name);
+        const collectionName = physicalName(physicalNames, model);
         baseDeclarations.set(model, {
           base: parsed.base.declaration,
           value: parsed.value,
@@ -352,7 +338,7 @@ function resolvePolymorphism(input: {
   baseDeclarations: Map<ModelSymbol, BaseDeclaration>;
   indexSpans: Map<MongoIndex, PslSpan>;
   modelIndexesByName: Map<string, readonly MongoIndex[]>;
-  modelMetadata: ReadonlyMap<ModelSymbol, MongoModelMetadata>;
+  physicalNames: ReadonlyMap<ModelSymbol | FieldSymbol, string>;
   indexSources: ReadonlyMap<MongoIndex, DiagnosticSource>;
   sources: PslSources;
 }): {
@@ -364,7 +350,7 @@ function resolvePolymorphism(input: {
   const {
     discriminatorDeclarations,
     baseDeclarations,
-    modelMetadata,
+    physicalNames,
     indexSpans,
     modelIndexesByName,
     indexSources,
@@ -388,9 +374,10 @@ function resolvePolymorphism(input: {
     const model = patched[modelName];
     if (!model) continue;
 
-    const mappedDiscriminatorField =
-      modelMetadata.get(declaration)?.fieldMappings.pslNameToMapped.get(decl.fieldName) ??
-      decl.fieldName;
+    const mappedDiscriminatorField = physicalName(
+      physicalNames,
+      declaration.fields[decl.fieldName],
+    );
 
     if (!Object.hasOwn(model.fields, mappedDiscriminatorField)) {
       diagnostics.push({
@@ -463,8 +450,7 @@ function resolvePolymorphism(input: {
       };
     }
 
-    const variantCollectionName =
-      modelMetadata.get(variant)?.collectionName ?? defaultCollectionName(variantName);
+    const variantCollectionName = physicalName(physicalNames, variant);
     if (roots[variantCollectionName]?.model === variantName) {
       if (variantCollectionName === baseCollection && baseModel) {
         roots = { ...roots, [variantCollectionName]: mongoCrossRef(baseName) };
@@ -647,7 +633,7 @@ type TextIndexArgs = InferAttr<ReturnType<typeof mongoAttributeSpecs.model.textI
 
 interface IndexBuildContext {
   readonly pslModel: ModelSymbol;
-  readonly fieldMappings: FieldMappings;
+  readonly physicalNames: ReadonlyMap<ModelSymbol | FieldSymbol, string>;
   readonly indexableFieldNames: ReadonlySet<string>;
   readonly source: DiagnosticSource;
   readonly span: PslSpan;
@@ -689,10 +675,10 @@ function resolveIndexKeys(
   const keys = parsedFields.map((field) => {
     if (field.kind === 'wildcard') {
       if (field.scope === undefined) return { field: '$**', direction: defaultDirection };
-      const mappedScope = ctx.fieldMappings.pslNameToMapped.get(field.scope) ?? field.scope;
+      const mappedScope = physicalName(ctx.physicalNames, ctx.pslModel.fields[field.scope]);
       return { field: `${mappedScope}.$**`, direction: defaultDirection };
     }
-    const mappedName = ctx.fieldMappings.pslNameToMapped.get(field.name) ?? field.name;
+    const mappedName = physicalName(ctx.physicalNames, ctx.pslModel.fields[field.name]);
     return { field: mappedName, direction: field.direction ?? defaultDirection };
   });
   return { keys, hasWildcard: wildcardCount === 1 };
@@ -846,7 +832,7 @@ function buildTextIndex(parsed: TextIndexArgs, ctx: IndexBuildContext): MongoInd
 function collectIndexes(
   pslModel: ModelSymbol,
   specContext: AttributeSpecContext,
-  fieldMappings: FieldMappings,
+  physicalNames: ReadonlyMap<ModelSymbol | FieldSymbol, string>,
   sources: PslSources,
   binder: Binder,
   diagnostics: PslDiagnosticCollector,
@@ -862,7 +848,7 @@ function collectIndexes(
 
   for (const field of Object.values(pslModel.fields)) {
     if (fieldTypeResolution(field, binder)?.kind === 'model') continue;
-    const uniqueNode = findFieldAttributeNode(field, 'unique');
+    const uniqueNode = field.attributes.find((attr) => attr.name === 'unique')?.node;
     if (!uniqueNode) continue;
     const unique = interpretFieldAttribute({
       symbols: specContext.symbols,
@@ -875,7 +861,7 @@ function collectIndexes(
       diagnostics,
     });
     if (unique === undefined) continue;
-    const mappedName = fieldMappings.pslNameToMapped.get(field.name) ?? field.name;
+    const mappedName = physicalName(physicalNames, field);
     const fieldUniqueIndex = new MongoIndex({
       keys: [{ field: mappedName, direction: 1 }],
       unique: true,
@@ -885,15 +871,13 @@ function collectIndexes(
     indexSources.set(fieldUniqueIndex, diagnosticSource(sources, uniqueNode.syntax));
   }
 
-  const attributeNodes = Array.from(pslModel.node.attributes());
-  for (const [attrIndex, attr] of pslModel.attributes.entries()) {
+  for (const attr of pslModel.attributes) {
     if (attr.name !== 'index' && attr.name !== 'unique' && attr.name !== 'textIndex') continue;
-    const node = attributeNodes[attrIndex];
-    if (!node) continue;
+    const node = attr.node;
     const source = diagnosticSource(sources, node.syntax);
     const ctx: IndexBuildContext = {
       pslModel,
-      fieldMappings,
+      physicalNames,
       indexableFieldNames,
       source,
       span: attr.span,
@@ -1220,24 +1204,15 @@ export function interpretPslDocumentToMongoContract(
     model,
     controlMutationDefaults: input.controlMutationDefaults,
   });
-  const modelMetadata = new Map<ModelSymbol, MongoModelMetadata>();
+  const physicalNames = new Map<ModelSymbol | FieldSymbol, string>();
   for (const model of allModels) {
-    const specContext = specContextFor(model);
-    modelMetadata.set(model, {
-      collectionName: resolveCollectionName({
-        model,
-        specContext,
-        sources,
-        binder,
-        diagnostics,
-      }),
-      fieldMappings: resolveFieldMappings({
-        model,
-        specContext,
-        sources,
-        binder,
-        diagnostics,
-      }),
+    resolvePhysicalNames({
+      model,
+      physicalNames,
+      specContext: specContextFor(model),
+      sources,
+      binder,
+      diagnostics,
     });
   }
 
@@ -1291,9 +1266,7 @@ export function interpretPslDocumentToMongoContract(
 
   for (const pslModel of allModels) {
     const modelSource = diagnosticSource(sources, pslModel.node.syntax);
-    const metadata = modelMetadata.get(pslModel);
-    if (!metadata) continue;
-    const { collectionName, fieldMappings } = metadata;
+    const collectionName = physicalName(physicalNames, pslModel);
     const specContext = specContextFor(pslModel);
 
     const fields: Record<string, ContractField> = {};
@@ -1303,7 +1276,7 @@ export function interpretPslDocumentToMongoContract(
       const resolution = fieldTypeResolution(field, binder);
       if (resolution?.kind === 'model') {
         const target = resolution.symbol;
-        const relationNode = findFieldAttributeNode(field, 'relation');
+        const relationNode = field.attributes.find((attr) => attr.name === 'relation')?.node;
         const relation = relationNode
           ? interpretFieldAttribute({
               symbols: specContext.symbols,
@@ -1345,11 +1318,12 @@ export function interpretPslDocumentToMongoContract(
             });
             continue;
           }
-          const localMapped = relation.fields.map((f) => fieldMappings.pslNameToMapped.get(f) ?? f);
-
-          const targetFieldMappings = modelMetadata.get(target)?.fieldMappings;
-          const targetMapped = relation.references.map(
-            (f) => targetFieldMappings?.pslNameToMapped.get(f) ?? f,
+          if (!physicalNames.has(target)) continue;
+          const localMapped = relation.fields.map((name) =>
+            physicalName(physicalNames, pslModel.fields[name]),
+          );
+          const targetMapped = relation.references.map((name) =>
+            physicalName(physicalNames, target.fields[name]),
           );
 
           relations[field.name] = {
@@ -1384,7 +1358,7 @@ export function interpretPslDocumentToMongoContract(
       );
       if (!resolved) continue;
 
-      const mappedName = fieldMappings.pslNameToMapped.get(field.name) ?? field.name;
+      const mappedName = physicalName(physicalNames, field);
       fields[mappedName] = resolved.field;
       if (resolved.executionDefaults) {
         presetExecutionDefaults.push({
@@ -1399,7 +1373,7 @@ export function interpretPslDocumentToMongoContract(
     const isVariantModel = pslModel.attributes.some((attr) => attr.name === 'base');
     const hasIdField =
       Object.values(pslModel.fields).filter((field) => {
-        const idNode = findFieldAttributeNode(field, 'id');
+        const idNode = field.attributes.find((attr) => attr.name === 'id')?.node;
         if (!idNode) return false;
         return (
           interpretFieldAttribute({
@@ -1449,7 +1423,7 @@ export function interpretPslDocumentToMongoContract(
     const modelIndexes = collectIndexes(
       pslModel,
       specContext,
-      fieldMappings,
+      physicalNames,
       sources,
       binder,
       diagnostics,
@@ -1500,7 +1474,7 @@ export function interpretPslDocumentToMongoContract(
   const { discriminatorDeclarations, baseDeclarations } = collectPolymorphismDeclarations(
     allModels,
     specContextFor,
-    modelMetadata,
+    physicalNames,
     sources,
     binder,
     diagnostics,
@@ -1514,7 +1488,7 @@ export function interpretPslDocumentToMongoContract(
     baseDeclarations,
     indexSpans,
     modelIndexesByName,
-    modelMetadata,
+    physicalNames,
     indexSources,
   });
   const executionDefaults = resolvePresetExecutionDefaults({
