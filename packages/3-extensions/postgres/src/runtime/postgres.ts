@@ -158,14 +158,12 @@ export default function postgres<TContract extends Contract<SqlStorage>>(
   let connectPromise: Promise<void> | undefined;
   let backgroundConnectError: unknown;
   let closed = false;
-  // Set once the driver holds a pool this client created. Closing the runtime ends that pool; a
-  // pool or client the caller passed in stays open.
-  let closeOwnedRuntime: (() => Promise<void>) | undefined;
+  let closePromise: Promise<void> | undefined;
+  // True once the driver holds a pool this client created. close() then closes the runtime, which
+  // ends that pool; a pool or client the caller passed in stays open, and so does the runtime.
+  let ownsPool = false;
 
-  const connectDriver = async (
-    resolvedBinding: PostgresBinding,
-    runtime: Runtime,
-  ): Promise<void> => {
+  const connectDriver = async (resolvedBinding: PostgresBinding): Promise<void> => {
     if (driverConnected) return;
     if (!runtimeDriver) throw new InternalError('Postgres runtime driver missing');
     if (connectPromise) return connectPromise;
@@ -178,9 +176,7 @@ export default function postgres<TContract extends Contract<SqlStorage>>(
       .connect(runtimeBinding)
       .then(() => {
         driverConnected = true;
-        if (ownedPool !== undefined) {
-          closeOwnedRuntime = () => runtime.close();
-        }
+        ownsPool = ownedPool !== undefined;
       })
       .catch(async (err) => {
         backgroundConnectError = err;
@@ -226,7 +222,7 @@ export default function postgres<TContract extends Contract<SqlStorage>>(
     });
     runtimeInstance = runtime;
     if (binding !== undefined) {
-      void connectDriver(binding, runtime).catch(() => undefined);
+      void connectDriver(binding).catch(() => undefined);
     }
 
     return runtime;
@@ -283,15 +279,20 @@ export default function postgres<TContract extends Contract<SqlStorage>>(
         return runtime;
       }
 
-      await connectDriver(binding, runtime);
+      await connectDriver(binding);
       return runtime;
     },
 
-    async close(): Promise<void> {
-      if (closed) return;
+    close(): Promise<void> {
+      if (closePromise) return closePromise;
       closed = true;
-      await connectPromise?.catch(() => undefined);
-      await closeOwnedRuntime?.();
+      closePromise = (async () => {
+        await connectPromise?.catch(() => undefined);
+        if (ownsPool) {
+          await runtimeInstance?.close();
+        }
+      })();
+      return closePromise;
     },
 
     [Symbol.asyncDispose](): Promise<void> {

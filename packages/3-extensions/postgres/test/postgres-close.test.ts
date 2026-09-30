@@ -68,6 +68,7 @@ beforeEach(() => {
   (Pool as unknown as { _connectSpy: ReturnType<typeof vi.fn> })._connectSpy.mockResolvedValue({
     query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
     release: vi.fn(),
+    on: vi.fn(),
   });
 });
 
@@ -114,24 +115,67 @@ describe('postgres close()', () => {
     expect(poolEndSpy()).toHaveBeenCalledTimes(1);
   });
 
-  it('close() is idempotent even after a failed pool.end()', async () => {
-    // A first close() that fails due to pool.end() error must not leave the
-    // facade in a state where a second close() tries pool.end() again.
+  it('returns the same promise from every call, so a failed pool.end() is reported to both callers and not retried', async () => {
     poolEndSpy().mockRejectedValueOnce(new Error('pool.end failed')).mockResolvedValue(undefined);
 
     const db = postgres({ contract, url: 'postgres://localhost:5432/db' });
     db.runtime();
-    // Wait for background connect setup (ownedDispose) to be wired
     await Promise.resolve();
     await Promise.resolve();
 
-    // First close fails because pool.end() throws
+    const first = db.close();
+    const second = db.close();
+
+    expect(second).toBe(first);
+    await expect(first).rejects.toThrow('pool.end failed');
     await expect(db.close()).rejects.toThrow('pool.end failed');
-
-    // Second close is a no-op (already disposed guard)
-    await expect(db.close()).resolves.toBeUndefined();
-    // pool.end was not called a second time
     expect(poolEndSpy()).toHaveBeenCalledTimes(1);
+  });
+
+  it('two concurrent calls both settle after pool.end() has settled', async () => {
+    const order: string[] = [];
+    let finishEnd: () => void = () => {};
+    poolEndSpy().mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finishEnd = () => {
+            order.push('pool ended');
+            resolve();
+          };
+        }),
+    );
+    const db = postgres({ contract, url: 'postgres://localhost:5432/db' });
+    db.runtime();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const first = db.close().then(() => order.push('first close'));
+    const second = db.close().then(() => order.push('second close'));
+    await expect.poll(() => poolEndSpy().mock.calls.length).toBe(1);
+    finishEnd();
+    await Promise.all([first, second]);
+
+    expect(order).toEqual(['pool ended', 'first close', 'second close']);
+  });
+
+  it('with a caller-supplied pg.Pool, ends nothing and leaves the runtime open', async () => {
+    const pool = new Pool({ connectionString: 'postgres://localhost:5432/db' });
+    const ownEndSpy = vi.fn().mockResolvedValue(undefined);
+    (pool as unknown as { end: typeof vi.fn }).end = ownEndSpy;
+    const db = postgres<Contract>({ contractJson: fixtureContract, pg: pool, verifyMarker: false });
+    const runtime = db.runtime();
+
+    await db.close();
+
+    await expect(
+      runtime.execute(
+        db.sql.public.users
+          .update({ name: 'probe' })
+          .where((f, fns) => fns.eq(f.id, 1))
+          .build(),
+      ),
+    ).resolves.toEqual({ affectedRows: 0 });
+    expect(ownEndSpy).not.toHaveBeenCalled();
   });
 
   it('before any connect is a no-op', async () => {
@@ -169,18 +213,41 @@ describe('a promise pending when close() is called on a client that owns its poo
   const recordUnhandledRejection = (reason: unknown): void => {
     unhandledRejections.push(reason);
   };
+  const calls: string[] = [];
 
   beforeEach(() => {
     unhandledRejections.length = 0;
+    calls.length = 0;
     process.on('unhandledRejection', recordUnhandledRejection);
-    // The real pool.end() settles on an I/O turn; a macrotask keeps close() pending while an
-    // unawaited promise would reject.
-    poolEndSpy().mockImplementation(() => new Promise((resolve) => setTimeout(resolve, 0)));
-    (Pool as unknown as { _connectSpy: ReturnType<typeof vi.fn> })._connectSpy.mockResolvedValue({
-      query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
-      release: vi.fn(),
-      on: vi.fn(),
+    // Like pg-pool, end() waits for every checked-out client to be released, then settles on a
+    // later macrotask, as the real socket close does.
+    let checkedOut = 0;
+    let wakeEnd: (() => void) | undefined;
+    poolEndSpy().mockImplementation(async () => {
+      while (checkedOut > 0) {
+        await new Promise<void>((wake) => {
+          wakeEnd = wake;
+        });
+      }
+      calls.push('end');
+      await new Promise((resolve) => setTimeout(resolve, 0));
     });
+    (Pool as unknown as { _connectSpy: ReturnType<typeof vi.fn> })._connectSpy.mockImplementation(
+      async () => {
+        checkedOut += 1;
+        return {
+          query: vi.fn(async () => {
+            calls.push('query');
+            return { rows: [], rowCount: 0 };
+          }),
+          release: vi.fn(() => {
+            checkedOut -= 1;
+            wakeEnd?.();
+          }),
+          on: vi.fn(),
+        };
+      },
+    );
   });
 
   afterEach(() => {
@@ -206,29 +273,44 @@ describe('a promise pending when close() is called on a client that owns its poo
       (reason: unknown) => ({ rejected: reason }),
     );
     expect.soft(unhandledRejections).toEqual([]);
-    expect.soft(outcome).toEqual({ rejected: expect.objectContaining(runtimeClosedError) });
     expect(poolEndSpy()).toHaveBeenCalledTimes(1);
+    expect(calls.slice(calls.indexOf('end'))).toEqual(['end']);
+    return outcome;
   }
 
-  it('an ORM read rejects with the runtime closed error and the pool ends once', async () => {
+  it('an ORM all() starts when awaited, after the close, and rejects with the runtime closed error', async () => {
     const db = await connectedClient();
 
-    await closeWhilePending(db, db.orm.public.User.all());
+    const outcome = await closeWhilePending(db, db.orm.public.User.all());
+
+    expect(outcome).toEqual({ rejected: expect.objectContaining(runtimeClosedError) });
   });
 
-  it('a transaction rejects with the runtime closed error and the pool ends once', async () => {
+  it('an ORM first() has started, so the close waits for it and it resolves', async () => {
     const db = await connectedClient();
 
-    await closeWhilePending(
+    const outcome = await closeWhilePending(db, db.orm.public.User.first());
+
+    expect(outcome).toEqual({ resolved: null });
+    expect(calls.indexOf('query')).toBeLessThan(calls.indexOf('end'));
+  });
+
+  it('a transaction has started, so the close waits for it and it commits', async () => {
+    const db = await connectedClient();
+
+    const outcome = await closeWhilePending(
       db,
       db.transaction(async (tx) => (await tx.orm.public.User.all()).length),
     );
+
+    expect(outcome).toEqual({ resolved: 0 });
+    expect(calls.indexOf('query')).toBeLessThan(calls.indexOf('end'));
   });
 
-  it('an execute rejects with the runtime closed error and the pool ends once', async () => {
+  it('an execute has started, so the close waits for it and it resolves', async () => {
     const db = await connectedClient();
 
-    await closeWhilePending(
+    const outcome = await closeWhilePending(
       db,
       db.runtime().execute(
         db.sql.public.users
@@ -237,5 +319,8 @@ describe('a promise pending when close() is called on a client that owns its poo
           .build(),
       ),
     );
+
+    expect(outcome).toEqual({ resolved: { affectedRows: 0 } });
+    expect(calls.indexOf('query')).toBeLessThan(calls.indexOf('end'));
   });
 });
