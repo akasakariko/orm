@@ -1,3 +1,4 @@
+import { structuredError } from '@internal/utils/structured-error';
 import { describe, expect, it } from 'vitest';
 import { CliStructuredError } from '../src/control';
 import {
@@ -309,6 +310,30 @@ describe('Runtime Errors', () => {
         { space: 'app', markerLocation: 'prisma_contract.marker' },
       ),
     ).rejects.toBe(driverError);
+  });
+
+  it('rethrowMarkerReadError passes a DRIVER-namespace structured error without a category through unchanged', () => {
+    const closed = structuredError('DRIVER.NOT_CONNECTED', 'Runtime is closed');
+
+    expect(() =>
+      rethrowMarkerReadError(closed, { space: 'app', markerLocation: 'prisma_contract.marker' }),
+    ).toThrow(closed);
+  });
+
+  it('rethrowMarkerReadError wraps a structured error outside the DRIVER namespace', () => {
+    const other = structuredError('RUNTIME.ENCODE_FAILED', 'encode failed');
+
+    expect(() =>
+      rethrowMarkerReadError(other, { space: 'app', markerLocation: 'prisma_contract.marker' }),
+    ).toThrow(expect.objectContaining({ code: 'CONTRACT.MARKER_READ_FAILED', cause: other }));
+  });
+
+  it('rethrowMarkerReadError wraps a plain Error', () => {
+    const plain = new Error('socket reset');
+
+    expect(() =>
+      rethrowMarkerReadError(plain, { space: 'app', markerLocation: 'prisma_contract.marker' }),
+    ).toThrow(expect.objectContaining({ code: 'CONTRACT.MARKER_READ_FAILED', cause: plain }));
   });
 
   it('withMarkerReadErrorHandling wraps async query failures', async () => {

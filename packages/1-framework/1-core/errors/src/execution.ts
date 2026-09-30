@@ -3,7 +3,11 @@ import type {
   VerifyDatabaseSchemaResult,
 } from '@internal/framework-components/control';
 import { ifDefined } from '@internal/utils/defined';
-import type { Diagnostic, NextAction } from '@internal/utils/structured-error';
+import {
+  type Diagnostic,
+  isStructuredError,
+  type NextAction,
+} from '@internal/utils/structured-error';
 import { CliStructuredError } from './control';
 
 // ============================================================================
@@ -115,7 +119,7 @@ export function errorMarkerReadFailed(options: {
 }
 
 function isDriverError(err: unknown): boolean {
-  return typeof err === 'object' && err !== null && 'category' in err && err.category === 'DRIVER';
+  return isStructuredError(err) && err.code.startsWith('DRIVER.');
 }
 
 function isMarkerRowParseError(err: unknown): err is Error {
