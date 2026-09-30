@@ -30,6 +30,11 @@ import {
   postgresDiffSubjectGranularity,
 } from '../core/schema-ir/schema-node-kinds';
 
+/**
+ * The raw default text of a schema node derived from a contract. It never reaches the database: a
+ * contract-derived node always carries its structured default, which the diff compares and DDL
+ * writes through the column codec.
+ */
 export function postgresRenderDefault(def: ColumnDefault, column: StorageColumn): string {
   if (def.kind === 'function') {
     return def.expression;
