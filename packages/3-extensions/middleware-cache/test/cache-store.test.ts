@@ -16,6 +16,36 @@ function controlledClock(start = 0) {
 }
 
 describe('createInMemoryCacheStore', () => {
+  describe('options', () => {
+    it.each([
+      ['ttlMs', { ttlMs: 0 }],
+      ['ttlMs', { ttlMs: -1 }],
+      ['ttlMs', { ttlMs: Number.NaN }],
+      ['maxEntries', { maxEntries: 0 }],
+      ['maxEntries', { maxEntries: -1 }],
+      ['maxEntries', { maxEntries: 1.5 }],
+      ['maxEntries', { maxEntries: Number.NaN }],
+      ['maxEntries', { maxEntries: Number.POSITIVE_INFINITY }],
+    ])('rejects an invalid %s (%o)', (argument, options) => {
+      expect(() => createInMemoryCacheStore(options)).toThrow(
+        expect.objectContaining({
+          code: 'RUNTIME.ARGUMENT_INVALID',
+          meta: {
+            helper: 'createInMemoryCacheStore',
+            argument,
+            received: Object.values(options)[0],
+          },
+        }),
+      );
+    });
+
+    it('accepts ttlMs: Infinity and a positive integer maxEntries', () => {
+      expect(() =>
+        createInMemoryCacheStore({ ttlMs: Number.POSITIVE_INFINITY, maxEntries: 1 }),
+      ).not.toThrow();
+    });
+  });
+
   describe('get and set', () => {
     it('returns undefined for a missing key', async () => {
       const store = createInMemoryCacheStore();

@@ -14,12 +14,15 @@ export interface CachedEntry {
  * - `get` returns the live entry under `key`, or `undefined`.
  * - `set` stores `entry` under `key`. `meta` is the read annotation's `meta`, or `undefined`,
  *   passed by reference. The store decides what it means, for example tags to index or a lifetime.
- * - `unset` removes the entries named by `keys`, the entries that match `meta`, or both. A store
- *   that cannot act on a `meta` it is given must throw rather than ignore it.
+ * - `unset` removes every entry named in `keys` and every entry that matches `meta`. `keys` is
+ *   `undefined` or non-empty. A store that cannot act on a `meta` it is given must throw rather
+ *   than ignore it. An `unset` by key must also drop that key from any `meta` index the store
+ *   keeps.
  *
  * Lifetime and eviction are the store's policy. A `set` must be visible to any `unset` of the same
- * key issued after it resolves. `unset` must not run queries through the runtime that uses the
- * middleware.
+ * key issued after it resolves. The middleware's `unset` after a stale `set` may remove an entry a
+ * later read stored under the same key; that costs one miss. `unset` must not run queries through
+ * the runtime that uses the middleware.
  */
 export interface CacheStore {
   get(key: string): Promise<CachedEntry | undefined>;
@@ -37,8 +40,10 @@ export interface CacheStore {
 /**
  * Options for `createInMemoryCacheStore`.
  *
- * - `maxEntries` — the most entries kept; the least recently used is evicted first. Default 1000.
- * - `ttlMs` — how long an entry lives after its `set`. `Infinity` never expires. Default 60 000.
+ * - `maxEntries` — the most entries kept, a positive integer; the least recently used is evicted
+ *   first. Default 1000.
+ * - `ttlMs` — how long an entry lives after its `set`, a positive number of milliseconds.
+ *   `Infinity` never expires. Default 60 000.
  * - `clock` — the time source for expiry. Default `Date.now`.
  */
 export interface InMemoryCacheStoreOptions {
@@ -60,14 +65,32 @@ function metaUnsupported() {
   );
 }
 
+function invalidOption(argument: 'maxEntries' | 'ttlMs', received: number, expected: string) {
+  return structuredError(
+    'RUNTIME.ARGUMENT_INVALID',
+    `createInMemoryCacheStore: ${argument} must be ${expected}`,
+    {
+      fix: `Pass ${argument} as ${expected}, or leave it unset for the default.`,
+      meta: { helper: 'createInMemoryCacheStore', argument, received },
+    },
+  );
+}
+
 /**
  * The default cache store: a least-recently-used map with one lifetime for every entry, local to
  * the process. It ignores `meta` in `set`, and its `unset` rejects any `meta`, including `null`.
+ * It throws `RUNTIME.ARGUMENT_INVALID` for a `maxEntries` or `ttlMs` outside the ranges above.
  */
 export function createInMemoryCacheStore(options?: InMemoryCacheStoreOptions): CacheStore {
   const maxEntries = options?.maxEntries ?? 1000;
   const ttlMs = options?.ttlMs ?? 60_000;
   const clock = options?.clock ?? Date.now;
+  if (!Number.isInteger(maxEntries) || maxEntries <= 0) {
+    throw invalidOption('maxEntries', maxEntries, 'a positive integer');
+  }
+  if (!(ttlMs > 0)) {
+    throw invalidOption('ttlMs', ttlMs, 'a positive number of milliseconds, or Infinity');
+  }
   const records = new Map<string, StoredRecord>();
 
   async function get(key: string): Promise<CachedEntry | undefined> {
