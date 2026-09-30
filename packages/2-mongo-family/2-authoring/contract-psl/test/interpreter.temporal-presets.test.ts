@@ -175,6 +175,53 @@ describe('Mongo PSL temporal presets', () => {
 });
 
 describe('Mongo PSL temporal preset misuse', () => {
+  it('keeps a contributed type namespace error instead of dropping an unqualified preset field', () => {
+    expect(
+      diagnosticsOf(
+        `model Post {
+  id ObjectId @id @map("_id")
+  touchedAt timestamp()
+}`,
+        {
+          authoringContributions: {
+            field: { timestamp: temporalCodecPreset(mongoDate) },
+            type: { timestamp: { scalar: { kind: 'typeConstructor', output: mongoDate } } },
+          },
+        },
+      ).map(({ code, message, sourceId }) => ({ code, message, sourceId })),
+    ).toEqual([
+      {
+        code: 'PSL_UNRESOLVED_REFERENCE',
+        message:
+          '"timestamp" is a namespace; a type reference must name a model, composite type, enum, or named type',
+        sourceId: 'schema.prisma',
+      },
+    ]);
+  });
+
+  it.each([
+    ['type', 'composite type', 'createdAtt'],
+    ['type', 'composite type', 'createdAt'],
+    ['model', 'model', 'createdAtt'],
+    ['model', 'model', 'createdAt'],
+  ])('keeps only the binder error for a %s (%s) qualifier with %s', (keyword, kind, member) => {
+    expect(
+      diagnosticsOf(`${keyword} temporal {
+  ${keyword === 'model' ? 'id ObjectId @id @map("_id")' : 'value String'}
+}
+model Post {
+  id ObjectId @id @map("_id")
+  createdAt temporal.${member}()?
+}`).map(({ code, message, sourceId }) => ({ code, message, sourceId })),
+    ).toEqual([
+      {
+        code: 'PSL_UNRESOLVED_REFERENCE',
+        message: `"temporal" is a ${kind}, not a namespace`,
+        sourceId: 'schema.prisma',
+      },
+    ]);
+  });
+
   it.each(['temporal.createdAt', 'weather.updatedAt'])(
     'reports unresolved bare %s without a preset diagnostic',
     (name) => {

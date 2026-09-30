@@ -24,9 +24,6 @@ import type {
   ParsedPslExtensionBlock,
 } from '@internal/framework-components/authoring';
 import {
-  checkUncomposedNamespace,
-  getAuthoringFieldPreset,
-  hasRegisteredFieldNamespace,
   instantiateAuthoringEntityType,
   isAuthoringEntityTypeDescriptor,
   isAuthoringTypeConstructorDescriptor,
@@ -1030,6 +1027,7 @@ function resolveNonRelationField(
   codecIdByEnumName: ReadonlyMap<string, string>,
   presetContext: FieldPresetContext,
   warnDeprecatedScalar: (field: FieldSymbol) => void,
+  onPresetHandled: (field: FieldSymbol) => void,
 ): ResolvedNonRelationField | undefined {
   const ownerName = owner.name;
   if (resolution?.kind === 'compositeType') {
@@ -1074,23 +1072,22 @@ function resolveNonRelationField(
     return undefined;
   }
 
-  const preset = resolveFieldPreset({
-    field,
-    ownerName,
-    ownerKind: owner.kind,
-    context: presetContext,
-  });
-  if (preset.kind === 'invalid') {
-    return undefined;
-  }
-  if (preset.kind === 'preset') {
+  if (resolution.kind === 'unresolved') {
+    if (resolution.name !== field.typeConstructor?.path.join('.')) return undefined;
+    const preset = resolveFieldPreset({
+      field,
+      ownerName,
+      ownerKind: owner.kind,
+      context: presetContext,
+    });
+    if (preset.kind === 'none') return undefined;
+    onPresetHandled(field);
+    if (preset.kind === 'invalid') return undefined;
     return {
       field: preset.field,
       ...ifDefined('executionDefaults', preset.executionDefaults),
     };
   }
-
-  if (resolution.kind !== 'contributedType') return undefined;
   const codecId = resolution.symbol.descriptor.output.codecId;
 
   warnDeprecatedScalar(field);
@@ -1160,28 +1157,6 @@ function processEnumDeclarations(input: {
   return builtEnums;
 }
 
-function replacedByMongoPresetVoice(
-  diagnostic: PslDiagnostic,
-  context: FieldPresetContext,
-): boolean {
-  const data = diagnostic.data;
-  if (data?.['reference'] !== 'type' || data['constructorCall'] !== true) return false;
-  const name = data['name'];
-  if (typeof name !== 'string') return false;
-  const [namespace, member] = name.split('.');
-  return (
-    getAuthoringFieldPreset(context.authoringContributions, name.split('.')) !== undefined ||
-    (namespace !== undefined &&
-      member !== undefined &&
-      hasRegisteredFieldNamespace(context.authoringContributions, namespace)) ||
-    checkUncomposedNamespace(name, context.composedExtensions, {
-      familyId: 'mongo',
-      targetId: 'mongo',
-      authoringContributions: context.authoringContributions,
-    }) !== undefined
-  );
-}
-
 export function interpretPslDocumentToMongoContract(
   input: InterpretPslDocumentToMongoContractInput,
 ): Result<Contract, ContractSourceDiagnostics> {
@@ -1206,11 +1181,24 @@ export function interpretPslDocumentToMongoContract(
     controlMutationDefaults: input.controlMutationDefaults,
     authoringContributions: input.authoringContributions,
   });
-  diagnostics.push(
-    ...binderDiagnostics.filter(
-      (diagnostic) => !replacedByMongoPresetVoice(diagnostic, presetContext),
-    ),
-  );
+  const replacedTypeDiagnostics = new Set<PslDiagnostic>();
+  const onPresetHandled = (field: FieldSymbol): void => {
+    const node = typeReferenceNode(field);
+    if (node === undefined) return;
+    const { filename, range } = diagnosticSource(sources, node).at();
+    for (const diagnostic of binderDiagnostics) {
+      if (
+        diagnostic.code === 'PSL_UNRESOLVED_REFERENCE' &&
+        diagnostic.filename === filename &&
+        diagnostic.range.start.line === range.start.line &&
+        diagnostic.range.start.character === range.start.character &&
+        diagnostic.range.end.line === range.end.line &&
+        diagnostic.range.end.character === range.end.character
+      ) {
+        replacedTypeDiagnostics.add(diagnostic);
+      }
+    }
+  };
   const { parsedBlocks, diagnostics: blockDiagnostics } = interpretExtensionBlocks({
     symbolTable,
     sources,
@@ -1392,6 +1380,7 @@ export function interpretPslDocumentToMongoContract(
         codecIdByEnumName,
         presetContext,
         warnDeprecatedScalar,
+        onPresetHandled,
       );
       if (!resolved) continue;
 
@@ -1489,6 +1478,7 @@ export function interpretPslDocumentToMongoContract(
         codecIdByEnumName,
         presetContext,
         warnDeprecatedScalar,
+        onPresetHandled,
       );
       if (!resolved) continue;
       fields[field.name] = resolved.field;
@@ -1534,7 +1524,11 @@ export function interpretPslDocumentToMongoContract(
     diagnostics,
   });
 
+  const remainingBinderDiagnostics = binderDiagnostics.filter(
+    (diagnostic) => !replacedTypeDiagnostics.has(diagnostic),
+  );
   if (
+    remainingBinderDiagnostics.length > 0 ||
     diagnostics.length > 0 ||
     polyResult.diagnostics.length > 0 ||
     (input.seedDiagnostics?.length ?? 0) > 0
@@ -1543,6 +1537,7 @@ export function interpretPslDocumentToMongoContract(
       summary: 'PSL to Mongo contract interpretation failed',
       diagnostics: [
         ...(input.seedDiagnostics ?? []),
+        ...mapPslDiagnostics(remainingBinderDiagnostics, sources),
         ...diagnostics.toExternal(),
         ...polyResult.diagnostics.toExternal(),
       ],
