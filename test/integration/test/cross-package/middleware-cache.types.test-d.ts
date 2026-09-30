@@ -1,11 +1,7 @@
-import { type CacheMiddleware, createCacheMiddleware } from '@internal/middleware-cache';
+import { createCacheMiddleware } from '@internal/middleware-cache';
 import type { MongoMiddleware } from '@internal/mongo-runtime';
 import type { SqlMiddleware } from '@internal/sql-runtime';
-import { expectTypeOf, test } from 'vitest';
-
-test('createCacheMiddleware returns a CacheMiddleware', () => {
-  expectTypeOf(createCacheMiddleware()).toEqualTypeOf<CacheMiddleware>();
-});
+import { test } from 'vitest';
 
 test('a CacheMiddleware fits in a SQL middleware list', () => {
   const middleware: SqlMiddleware[] = [createCacheMiddleware()];

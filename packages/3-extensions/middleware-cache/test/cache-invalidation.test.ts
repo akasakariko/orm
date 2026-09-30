@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { cacheAnnotation } from '../src/cache-annotation';
 import { createCacheMiddleware } from '../src/cache-middleware';
-import type { CacheStore } from '../src/cache-store';
+import type { CachedEntry, CacheStore } from '../src/cache-store';
 import { makeCtx, makeExec, runMiss, spyStore } from './middleware-fixtures';
 
 describe('createCacheMiddleware — invalidate', () => {
@@ -48,6 +48,37 @@ describe('createCacheMiddleware — invalidate', () => {
     await mw.invalidate({ tags: ['users'] });
 
     expect(await mw.interceptQuery?.(exec, ctx)).toBeUndefined();
+  });
+
+  it('calls the store methods with the store as this', async () => {
+    class MapStore implements CacheStore {
+      readonly entries = new Map<string, CachedEntry>();
+      async get(key: string) {
+        return this.entries.get(key);
+      }
+      async set(key: string, entry: CachedEntry) {
+        this.entries.set(key, entry);
+      }
+      async delete(key: string) {
+        this.entries.delete(key);
+      }
+      async deleteByTag(tags: readonly string[]) {
+        for (const [key, entry] of this.entries) {
+          if (entry.tags?.some((tag) => tags.includes(tag))) {
+            this.entries.delete(key);
+          }
+        }
+      }
+    }
+    const store = new MapStore();
+    store.entries.set('user-1', { rows: [], storedAt: 0 });
+    store.entries.set('user-2', { rows: [], storedAt: 0, tags: ['users'] });
+    store.entries.set('post-1', { rows: [], storedAt: 0, tags: ['posts'] });
+    const mw = createCacheMiddleware({ store });
+
+    await mw.invalidate({ keys: ['user-1'], tags: ['users'] });
+
+    expect([...store.entries.keys()]).toEqual(['post-1']);
   });
 
   it('does not call the store when keys and tags are missing', async () => {

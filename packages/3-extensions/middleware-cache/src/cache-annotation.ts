@@ -45,7 +45,7 @@ export interface CachePayload {
  * import { cacheAnnotation } from '@internal/middleware-cache';
  *
  * // ORM read terminal — accepts the read-only annotation via the meta callback.
- * const user = await db.User.first(
+ * const user = await db.orm.public.User.first(
  *   { id },
  *   (meta) => meta.annotate(cacheAnnotation({ ttl: 60_000 })),
  * );

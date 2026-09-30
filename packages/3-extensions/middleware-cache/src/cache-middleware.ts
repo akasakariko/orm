@@ -23,8 +23,8 @@ import { type CacheStore, createInMemoryCacheStore } from './cache-store';
  *   clock to make commit-time observable. Note: TTL math lives inside
  *   the store, not the middleware — supplying a clock here only affects
  *   the `storedAt` field on committed `CachedEntry` values.
- * - `defaultTtlMs` — TTL for annotated reads whose annotation has no `ttl`. When unset, such reads
- *   pass through uncached.
+ * - `defaultTtlMs` — TTL for annotated reads whose annotation has no `ttl`. When unset, such
+ *   reads pass through uncached.
  */
 export interface CacheMiddlewareOptions {
   readonly store?: CacheStore;
@@ -44,8 +44,9 @@ export interface CacheInvalidation {
 
 /**
  * The cache middleware. `invalidate` removes entries by key and by tag, and makes any read that
- * was in flight when it ran skip storing its rows. It throws `RUNTIME.CACHE_STORE_CANNOT_INVALIDATE`
- * before deleting anything when the store lacks `delete` (for keys) or `deleteByTag` (for tags).
+ * was in flight when it ran skip storing its rows. It throws
+ * `RUNTIME.CACHE_STORE_CANNOT_INVALIDATE` before deleting anything when the store lacks `delete`
+ * (for keys) or `deleteByTag` (for tags).
  */
 export type CacheMiddleware = CrossFamilyMiddleware & {
   readonly invalidate: (target: CacheInvalidation) => Promise<void>;
@@ -172,7 +173,7 @@ function cannotInvalidate(missingMethod: 'delete' | 'deleteByTag', by: 'key' | '
  *   middleware: [createCacheMiddleware({ maxEntries: 1000 })],
  * });
  *
- * const user = await db.User.first(
+ * const user = await db.orm.public.User.first(
  *   { id },
  *   (meta) => meta.annotate(cacheAnnotation({ ttl: 60_000 })),
  * );
