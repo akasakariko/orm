@@ -1,62 +1,8 @@
-import type { PlanMeta } from '@internal/contract/types';
-import type {
-  ExecutionPlan,
-  RuntimeMiddlewareContext,
-} from '@internal/framework-components/runtime';
+import type { ExecutionPlan } from '@internal/framework-components/runtime';
 import { describe, expect, it, vi } from 'vitest';
 import { cacheAnnotation } from '../src/cache-annotation';
 import { createCacheMiddleware } from '../src/cache-middleware';
-import type { CachedEntry, CacheStore } from '../src/cache-store';
-
-interface MockExec extends ExecutionPlan {
-  readonly statement: string;
-}
-
-const baseMeta: PlanMeta = {
-  target: 'postgres',
-  targetFamily: 'sql',
-  storageHash: 'test',
-  lane: 'orm',
-};
-
-function makeExec(statement: string, annotations?: Record<string, unknown>): MockExec {
-  return Object.freeze({
-    statement,
-    meta: annotations ? { ...baseMeta, annotations } : baseMeta,
-  });
-}
-
-function makeCtx(overrides?: Partial<RuntimeMiddlewareContext>): RuntimeMiddlewareContext {
-  return {
-    contract: {},
-    mode: 'strict',
-    now: () => Date.now(),
-    log: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} },
-    contentHash: async (exec) => `id:${(exec as MockExec).statement}`,
-    scope: 'runtime',
-    planExecutionId: 'test-fixture-plan-execution-id',
-    ...overrides,
-  };
-}
-
-function spyStore(): CacheStore & {
-  readonly getSpy: ReturnType<typeof vi.fn>;
-  readonly setSpy: ReturnType<typeof vi.fn>;
-  readonly inner: Map<string, CachedEntry>;
-} {
-  const inner = new Map<string, CachedEntry>();
-  const getSpy = vi.fn(async (key: string) => inner.get(key));
-  const setSpy = vi.fn(async (key: string, entry: CachedEntry, _ttlMs: number) => {
-    inner.set(key, entry);
-  });
-  return { get: getSpy, set: setSpy, getSpy, setSpy, inner };
-}
-
-async function drain<T>(iter: AsyncIterable<T>): Promise<T[]> {
-  const out: T[] = [];
-  for await (const x of iter) out.push(x);
-  return out;
-}
+import { baseMeta, drain, type MockExec, makeCtx, makeExec, spyStore } from './middleware-fixtures';
 
 describe('cache key resolution', () => {
   describe('default path: ctx.contentHash(exec)', () => {
@@ -77,8 +23,8 @@ describe('cache key resolution', () => {
         ctx,
       );
 
-      expect(store.getSpy).toHaveBeenCalledWith('id:select 1');
-      expect(store.setSpy).toHaveBeenCalledWith('id:select 1', expect.anything(), 60_000);
+      expect(store.getSpy).toHaveBeenCalledWith('key:select 1');
+      expect(store.setSpy).toHaveBeenCalledWith('key:select 1', expect.anything(), 60_000);
     });
 
     it('invokes ctx.contentHash when no per-query key annotation is supplied', async () => {
@@ -127,8 +73,8 @@ describe('cache key resolution', () => {
       );
 
       expect(store.inner.size).toBe(2);
-      expect(store.inner.get('id:A')?.rows).toEqual([{ from: 'A' }]);
-      expect(store.inner.get('id:B')?.rows).toEqual([{ from: 'B' }]);
+      expect(store.inner.get('key:A')?.rows).toEqual([{ from: 'A' }]);
+      expect(store.inner.get('key:B')?.rows).toEqual([{ from: 'B' }]);
     });
   });
 

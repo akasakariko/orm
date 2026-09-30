@@ -11,7 +11,7 @@ export interface MockExec extends ExecutionPlan {
   readonly statement: string;
 }
 
-const baseMeta: PlanMeta = {
+export const baseMeta: PlanMeta = {
   target: 'postgres',
   targetFamily: 'sql',
   storageHash: 'test',
