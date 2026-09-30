@@ -1,5 +1,6 @@
 import type { JsonValue } from '@internal/contract/types';
 import { canonicalStringify } from '@internal/utils/canonical-stringify';
+import { InternalError } from '@internal/utils/internal-error';
 import type { Codec } from './codec';
 import type { AuthoringEntityContext } from './framework-authoring';
 import type { ParsedPslExtensionBlock } from './psl-extension-block';
@@ -30,9 +31,10 @@ export function readEnumBlockMembers(
 
   for (const [memberName, memberValue] of Object.entries(block.values)) {
     const span = block.parameterSpans[memberName] ?? block.span;
+    const written = memberValue === undefined ? memberName : memberValue;
     let read: unknown;
     try {
-      read = codec.decodeJson(memberValue === undefined ? memberName : memberValue);
+      read = codec.decodeJson(written);
     } catch (err) {
       diagnostics?.push(
         memberValue === undefined
@@ -66,8 +68,22 @@ export function readEnumBlockMembers(
       memberError = true;
       continue;
     }
+    let storedValue: unknown;
+    try {
+      storedValue = codec.decodeJson(stored);
+    } catch (err) {
+      if (err instanceof InternalError) throw err;
+      diagnostics?.push({
+        code: 'PSL_EXTENSION_INVALID_VALUE',
+        message: `enum "${block.name}" member "${memberName}" is written ${JSON.stringify(written)}, which codec "${codecId}" stores as ${JSON.stringify(stored)} and cannot read back: ${err instanceof Error ? err.message : String(err)}`,
+        sourceId,
+        span,
+      });
+      memberError = true;
+      continue;
+    }
     memberByStoredValue.set(storedKey, memberName);
-    members.push({ name: memberName, value: codec.decodeJson(stored) });
+    members.push({ name: memberName, value: storedValue });
   }
 
   if (memberError) return undefined;

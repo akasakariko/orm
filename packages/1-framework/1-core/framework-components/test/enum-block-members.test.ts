@@ -35,9 +35,16 @@ const lowerCasingCodec: Codec = {
   },
 };
 
-function read(values: Record<string, JsonValue | undefined>) {
+/** Reads text and stores it as a number, which its own `decodeJson` then refuses. */
+const numberStoringCodec: Codec = {
+  ...lowerCasingCodec,
+  id: 'test/number-storing@1',
+  encodeJson: (value) => Number(value),
+};
+
+function read(values: Record<string, JsonValue | undefined>, codec: Codec = lowerCasingCodec) {
   const diagnostics: unknown[] = [];
-  const members = readEnumBlockMembers(enumBlock(values), 'test/lower-casing@1', lowerCasingCodec, {
+  const members = readEnumBlockMembers(enumBlock(values), codec.id, codec, {
     family: 'test',
     target: 'test',
     sourceId: 'schema.prisma',
@@ -80,6 +87,21 @@ describe('readEnumBlockMembers', () => {
           code: 'PSL_EXTENSION_INVALID_VALUE',
           message:
             'enum "Key" member "A" was rejected by codec "test/lower-casing@1": expected text, got number',
+          sourceId: 'schema.prisma',
+          span: SPAN,
+        },
+      ],
+    });
+  });
+
+  it('reports a member whose stored value the codec cannot read back', () => {
+    expect(read({ A: '1.5' }, numberStoringCodec)).toEqual({
+      members: undefined,
+      diagnostics: [
+        {
+          code: 'PSL_EXTENSION_INVALID_VALUE',
+          message:
+            'enum "Key" member "A" is written "1.5", which codec "test/number-storing@1" stores as 1.5 and cannot read back: expected text, got number',
           sourceId: 'schema.prisma',
           span: SPAN,
         },
