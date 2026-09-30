@@ -29,6 +29,10 @@ Each `:agent` run has a hard timeout (default 5 minutes, override with `AGENT_CM
 | `pnpm lint:deps:agent` | Dependency-layering check |
 | `pnpm fixtures:check:agent` | Regenerate fixtures and diff them |
 
+## Do not run the full integration suite locally
+
+`pnpm test:integration` in full takes well over fifteen minutes and produces timeouts and mongod start failures under load that are not real failures. Run only the integration files relevant to your change (for example `pnpm --filter integration-tests test -- test/cross-package/middleware-cache`) and let CI run the whole suite. The same applies to `pnpm test:packages` when you only need confirmation: run the changed package's own `pnpm test`.
+
 ## 2. Run one package's tests
 
 ```bash
