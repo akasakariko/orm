@@ -1,69 +1,9 @@
-import type { PlanMeta } from '@internal/contract/types';
-import type {
-  AfterQueryResult,
-  ExecutionPlan,
-  RuntimeMiddlewareContext,
-} from '@internal/framework-components/runtime';
+import type { AfterQueryResult } from '@internal/framework-components/runtime';
 import { describe, expect, it, vi } from 'vitest';
 import { cacheAnnotation } from '../src/cache-annotation';
 import { createCacheMiddleware } from '../src/cache-middleware';
-import { type CachedEntry, type CacheStore, createInMemoryCacheStore } from '../src/cache-store';
-
-interface MockExec extends ExecutionPlan {
-  readonly statement: string;
-}
-
-const baseMeta: PlanMeta = {
-  target: 'postgres',
-  targetFamily: 'sql',
-  storageHash: 'test',
-  lane: 'orm',
-};
-
-function makeExec(statement: string, annotations?: Record<string, unknown>): MockExec {
-  return Object.freeze({
-    statement,
-    meta: annotations ? { ...baseMeta, annotations } : baseMeta,
-  });
-}
-
-function makeCtx(overrides?: Partial<RuntimeMiddlewareContext>): RuntimeMiddlewareContext {
-  return {
-    contract: {},
-    mode: 'strict',
-    now: () => Date.now(),
-    log: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} },
-    contentHash: async (exec) => `key:${(exec as MockExec).statement}`,
-    scope: 'runtime',
-    planExecutionId: 'test-fixture-plan-execution-id',
-    ...overrides,
-  };
-}
-
-function spyStore(): CacheStore & {
-  readonly getSpy: ReturnType<typeof vi.fn>;
-  readonly setSpy: ReturnType<typeof vi.fn>;
-  readonly inner: Map<string, CachedEntry>;
-} {
-  const inner = new Map<string, CachedEntry>();
-  const getSpy = vi.fn(async (key: string) => inner.get(key));
-  const setSpy = vi.fn(async (key: string, entry: CachedEntry, _ttlMs: number) => {
-    inner.set(key, entry);
-  });
-  return {
-    get: getSpy,
-    set: setSpy,
-    getSpy,
-    setSpy,
-    inner,
-  };
-}
-
-async function drain<T>(iter: AsyncIterable<T>): Promise<T[]> {
-  const out: T[] = [];
-  for await (const x of iter) out.push(x);
-  return out;
-}
+import { createInMemoryCacheStore } from '../src/cache-store';
+import { drain, makeCtx, makeExec, spyStore } from './middleware-fixtures';
 
 describe('createCacheMiddleware — opt-in semantics', () => {
   it('passes through (no store interaction) when the plan has no cache annotation', async () => {

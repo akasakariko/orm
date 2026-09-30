@@ -16,6 +16,9 @@ test('cacheAnnotation call rejects non-CachePayload arguments', () => {
 
   // @ts-expect-error - wrong field type
   cacheAnnotation({ skip: 'yes' });
+
+  // @ts-expect-error - tags must be a string array
+  cacheAnnotation({ tags: 'users' });
 });
 
 test('cacheAnnotation.read returns CachePayload | undefined', () => {
@@ -40,7 +43,7 @@ test('cacheAnnotation declares applicableTo = "read" only', () => {
   expectTypeOf(cacheAnnotation.applicableTo).toEqualTypeOf<ReadonlySet<'read'>>();
 });
 
-test('CachePayload has optional ttl, skip, and key', () => {
+test('CachePayload has optional ttl, skip, key, and tags', () => {
   const empty: CachePayload = {};
   void empty;
 
@@ -53,7 +56,10 @@ test('CachePayload has optional ttl, skip, and key', () => {
   const keyOnly: CachePayload = { key: 'k' };
   void keyOnly;
 
-  const all: CachePayload = { ttl: 60, skip: false, key: 'k' };
+  const tagsOnly: CachePayload = { tags: ['users'] };
+  void tagsOnly;
+
+  const all: CachePayload = { ttl: 60, skip: false, key: 'k', tags: ['users', 'posts'] };
   void all;
 });
 

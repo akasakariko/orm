@@ -4,6 +4,8 @@ import type {
   ExecutionPlan,
   RuntimeMiddlewareContext,
 } from '@internal/framework-components/runtime';
+import { ifDefined } from '@internal/utils/defined';
+import { structuredError } from '@internal/utils/structured-error';
 import { type CachePayload, cacheAnnotation } from './cache-annotation';
 import { type CacheStore, createInMemoryCacheStore } from './cache-store';
 
@@ -21,12 +23,36 @@ import { type CacheStore, createInMemoryCacheStore } from './cache-store';
  *   clock to make commit-time observable. Note: TTL math lives inside
  *   the store, not the middleware — supplying a clock here only affects
  *   the `storedAt` field on committed `CachedEntry` values.
+ * - `defaultTtlMs` — TTL for annotated reads whose annotation has no
+ *   `ttl`. When unset, such reads pass through uncached.
  */
 export interface CacheMiddlewareOptions {
   readonly store?: CacheStore;
   readonly maxEntries?: number;
   readonly clock?: () => number;
+  readonly defaultTtlMs?: number;
 }
+
+/**
+ * Entries to remove from the cache store. `keys` are matched literally
+ * against `cacheAnnotation({ key })` strings; `tags` remove every entry
+ * carrying at least one of them.
+ */
+export interface CacheInvalidation {
+  readonly keys?: readonly string[];
+  readonly tags?: readonly string[];
+}
+
+/**
+ * The cache middleware. `invalidate` removes entries by key and by tag,
+ * and makes any read that was in flight when it ran skip storing its rows.
+ * It throws `RUNTIME.CACHE_STORE_CANNOT_INVALIDATE` before deleting
+ * anything when the store lacks `delete` (for keys) or `deleteByTag` (for
+ * tags).
+ */
+export type CacheMiddleware = CrossFamilyMiddleware & {
+  readonly invalidate: (target: CacheInvalidation) => Promise<void>;
+};
 
 /**
  * Per-execution buffer correlated with the post-lowering `exec` object
@@ -44,6 +70,8 @@ export interface CacheMiddlewareOptions {
 interface PendingMiss {
   readonly key: string;
   readonly ttlMs: number;
+  readonly tags: readonly string[] | undefined;
+  readonly invalidations: number;
   readonly buffer: Record<string, unknown>[];
 }
 
@@ -94,6 +122,17 @@ async function resolveCacheKey(
   return ctx.contentHash(exec);
 }
 
+function cannotInvalidate(missingMethod: 'delete' | 'deleteByTag', by: 'key' | 'tag') {
+  return structuredError(
+    'RUNTIME.CACHE_STORE_CANNOT_INVALIDATE',
+    `The cache store cannot invalidate entries by ${by} because it has no ${missingMethod} method`,
+    {
+      fix: `Supply a CacheStore that implements ${missingMethod}.`,
+      meta: { missingMethod },
+    },
+  );
+}
+
 /**
  * Creates a family-agnostic caching middleware.
  *
@@ -118,7 +157,7 @@ async function resolveCacheKey(
  * The middleware bypasses the cache entirely when:
  * - the plan has no `cache` annotation, or
  * - the annotation has `skip: true`, or
- * - the annotation has no `ttl`, or
+ * - the annotation has no `ttl` and no `defaultTtlMs` is set, or
  * - `ctx.scope !== 'runtime'` (connection / transaction scopes opt out).
  *
  * Returns a cross-family `RuntimeMiddleware` (no `familyId` /
@@ -143,13 +182,15 @@ async function resolveCacheKey(
  * );
  * ```
  */
-export function createCacheMiddleware(options?: CacheMiddlewareOptions): CrossFamilyMiddleware {
+export function createCacheMiddleware(options?: CacheMiddlewareOptions): CacheMiddleware {
   const store =
     options?.store ??
     createInMemoryCacheStore({
       maxEntries: options?.maxEntries ?? DEFAULT_MAX_ENTRIES,
     });
   const clock = options?.clock ?? Date.now;
+  const defaultTtlMs = options?.defaultTtlMs;
+  let invalidations = 0;
 
   // Per-execution scratch space, keyed on the post-lowering `exec`
   // object identity. WeakMap keeps cleanup automatic: if an execution is
@@ -173,7 +214,8 @@ export function createCacheMiddleware(options?: CacheMiddlewareOptions): CrossFa
     if (payload.skip === true) {
       return undefined;
     }
-    if (payload.ttl === undefined) {
+    const ttlMs = payload.ttl ?? defaultTtlMs;
+    if (ttlMs === undefined) {
       return undefined;
     }
 
@@ -189,7 +231,7 @@ export function createCacheMiddleware(options?: CacheMiddlewareOptions): CrossFa
     // Miss: record the pending buffer so onRow / afterExecute can
     // commit on success. The TTL is captured here so a later mutation
     // of the annotation (defensive) cannot change the commit window.
-    pending.set(exec, { key, ttlMs: payload.ttl, buffer: [] });
+    pending.set(exec, { key, ttlMs, tags: payload.tags, invalidations, buffer: [] });
     ctx.log.debug?.({ event: 'middleware.cache.miss', middleware: 'cache', key });
     return undefined;
   }
@@ -223,8 +265,43 @@ export function createCacheMiddleware(options?: CacheMiddlewareOptions): CrossFa
       return;
     }
 
-    await store.set(slot.key, { rows: slot.buffer, storedAt: clock() }, slot.ttlMs);
+    if (slot.invalidations !== invalidations) {
+      ctx.log.debug?.({
+        event: 'middleware.cache.store-skipped',
+        middleware: 'cache',
+        key: slot.key,
+      });
+      return;
+    }
+
+    await store.set(
+      slot.key,
+      { rows: slot.buffer, storedAt: clock(), ...ifDefined('tags', slot.tags) },
+      slot.ttlMs,
+    );
     ctx.log.debug?.({ event: 'middleware.cache.store', middleware: 'cache', key: slot.key });
+  }
+
+  async function invalidate(target: CacheInvalidation): Promise<void> {
+    const keys = target.keys ?? [];
+    const tags = target.tags ?? [];
+    if (keys.length > 0 && store.delete === undefined) {
+      throw cannotInvalidate('delete', 'key');
+    }
+    if (tags.length > 0 && store.deleteByTag === undefined) {
+      throw cannotInvalidate('deleteByTag', 'tag');
+    }
+    if (keys.length === 0 && tags.length === 0) {
+      return;
+    }
+
+    invalidations += 1;
+    for (const key of keys) {
+      await store.delete?.(key);
+    }
+    if (tags.length > 0) {
+      await store.deleteByTag?.(tags);
+    }
   }
 
   return {
@@ -232,5 +309,6 @@ export function createCacheMiddleware(options?: CacheMiddlewareOptions): CrossFa
     interceptQuery,
     onRow,
     afterQuery,
+    invalidate,
   };
 }
