@@ -4,6 +4,7 @@ import type {
   ExecutionPlan,
   RuntimeMiddlewareContext,
 } from '@internal/framework-components/runtime';
+import { ifDefined } from '@internal/utils/defined';
 import { structuredError } from '@internal/utils/structured-error';
 import { type CachePayload, cacheAnnotation } from './cache-annotation';
 import { type CacheStore, createInMemoryCacheStore } from './cache-store';
@@ -24,30 +25,51 @@ import { type CacheStore, createInMemoryCacheStore } from './cache-store';
  *   the `storedAt` field on committed `CachedEntry` values.
  * - `defaultTtlMs` — TTL for annotated reads whose annotation has no `ttl`. When unset, such
  *   reads pass through uncached.
+ * - `deriveKey` — computes the cache key of a cached read whose annotation has no `key`.
+ *   Defaults to `deriveKeyFromContentHash`. It runs on every such read, hit or miss, and an
+ *   error from it fails the read. It must return different keys whenever the rows can differ;
+ *   build on `deriveKeyFromContentHash` to keep the statement, parameters and storage hash.
  */
 export interface CacheMiddlewareOptions {
   readonly store?: CacheStore;
   readonly maxEntries?: number;
   readonly clock?: () => number;
   readonly defaultTtlMs?: number;
+  readonly deriveKey?: (
+    exec: ExecutionPlan,
+    ctx: RuntimeMiddlewareContext,
+  ) => string | Promise<string>;
 }
 
 /**
- * Entries to remove from the cache store. `keys` are matched literally against
- * `cacheAnnotation({ key })` strings.
- */
-export interface CacheInvalidation {
-  readonly keys?: readonly string[];
-}
-
-/**
- * The cache middleware. `invalidate` removes entries by key, and makes any read that was in
- * flight when it ran skip storing its rows. It throws `RUNTIME.CACHE_STORE_CANNOT_INVALIDATE`
- * before deleting anything when the store lacks `delete`.
+ * The cache middleware.
+ *
+ * `invalidate` makes every read that missed before it was called skip storing its rows, then
+ * removes entries:
+ *
+ * - `invalidate({ keys })` calls the store's `delete` for each key, in order. It throws
+ *   `RUNTIME.CACHE_STORE_CANNOT_INVALIDATE` before anything else when the store has no `delete`,
+ *   and does nothing for empty `keys`.
+ * - `invalidate(run)` awaits `run`, which deletes through a store reference the caller holds. It
+ *   performs no capability check.
+ *
+ * A rejection from the store or from `run` propagates; entries already removed stay removed.
  */
 export type CacheMiddleware = CrossFamilyMiddleware & {
-  readonly invalidate: (target: CacheInvalidation) => Promise<void>;
+  invalidate(target: { readonly keys: readonly string[] }): Promise<void>;
+  invalidate(run: () => Promise<void>): Promise<void>;
 };
+
+/**
+ * The default `deriveKey`: the family runtime's content hash of the plan, which covers the
+ * statement, its parameters and the storage hash.
+ */
+export function deriveKeyFromContentHash(
+  exec: ExecutionPlan,
+  ctx: RuntimeMiddlewareContext,
+): Promise<string> {
+  return ctx.contentHash(exec);
+}
 
 /**
  * Per-execution buffer correlated with the post-lowering `exec` object
@@ -65,6 +87,7 @@ export type CacheMiddleware = CrossFamilyMiddleware & {
 interface PendingMiss {
   readonly key: string;
   readonly ttlMs: number;
+  readonly attributes: unknown;
   readonly invalidations: number;
   readonly buffer: Record<string, unknown>[];
 }
@@ -87,33 +110,6 @@ const DEFAULT_MAX_ENTRIES = 1000;
  */
 function readCachePayload(plan: ExecutionPlan): CachePayload | undefined {
   return cacheAnnotation.read(plan);
-}
-
-/**
- * Computes the cache key for an execution.
- *
- * Two-tier resolution:
- *
- * 1. Per-query override: `cacheAnnotation({ key })` — the supplied
- *    string is used verbatim. Not rehashed; the user is responsible for
- *    keeping the string bounded and free of sensitive data.
- * 2. Default: `ctx.contentHash(exec)` — the family runtime owns this and
- *    returns an opaque, bounded digest (SHA-512 in the SQL and Mongo
- *    runtimes today).
- *
- * The returned string is consumed directly as the `Map<string, …>` key
- * by the underlying `CacheStore`; the cache middleware does not perform
- * any further transformation.
- */
-async function resolveCacheKey(
-  payload: CachePayload,
-  exec: ExecutionPlan,
-  ctx: RuntimeMiddlewareContext,
-): Promise<string> {
-  if (payload.key !== undefined) {
-    return payload.key;
-  }
-  return ctx.contentHash(exec);
 }
 
 function cannotInvalidate(missingMethod: 'delete') {
@@ -155,7 +151,7 @@ function cannotInvalidate(missingMethod: 'delete') {
  * - `ctx.scope !== 'runtime'` (connection / transaction scopes opt out).
  *
  * Returns a cross-family `RuntimeMiddleware` (no `familyId` / `targetId`) with an `invalidate`
- * method. The package depends on no SQL or Mongo package; cache keys come from
+ * method. The package depends on no SQL or Mongo package; the default cache key is
  * `ctx.contentHash(exec)`, populated by the family runtime, so SQL and Mongo runtimes both work
  * out of the box.
  *
@@ -183,6 +179,7 @@ export function createCacheMiddleware(options?: CacheMiddlewareOptions): CacheMi
     });
   const clock = options?.clock ?? Date.now;
   const defaultTtlMs = options?.defaultTtlMs;
+  const deriveKey = options?.deriveKey ?? deriveKeyFromContentHash;
   let invalidations = 0;
 
   // Per-execution scratch space, keyed on the post-lowering `exec`
@@ -212,7 +209,7 @@ export function createCacheMiddleware(options?: CacheMiddlewareOptions): CacheMi
       return undefined;
     }
 
-    const key = await resolveCacheKey(payload, exec, ctx);
+    const key = payload.key ?? (await deriveKey(exec, ctx));
     const hit = await store.get(key);
     if (hit !== undefined) {
       ctx.log.debug?.({ event: 'middleware.cache.hit', middleware: 'cache', key });
@@ -224,7 +221,7 @@ export function createCacheMiddleware(options?: CacheMiddlewareOptions): CacheMi
     // Miss: record the pending buffer so onRow / afterExecute can
     // commit on success. The TTL is captured here so a later mutation
     // of the annotation (defensive) cannot change the commit window.
-    pending.set(exec, { key, ttlMs, invalidations, buffer: [] });
+    pending.set(exec, { key, ttlMs, attributes: payload.attributes, invalidations, buffer: [] });
     ctx.log.debug?.({ event: 'middleware.cache.miss', middleware: 'cache', key });
     return undefined;
   }
@@ -267,12 +264,23 @@ export function createCacheMiddleware(options?: CacheMiddlewareOptions): CacheMi
       return;
     }
 
-    await store.set(slot.key, { rows: slot.buffer, storedAt: clock() }, slot.ttlMs);
+    await store.set(
+      slot.key,
+      { rows: slot.buffer, storedAt: clock(), ...ifDefined('attributes', slot.attributes) },
+      slot.ttlMs,
+    );
     ctx.log.debug?.({ event: 'middleware.cache.store', middleware: 'cache', key: slot.key });
   }
 
-  async function invalidate(target: CacheInvalidation): Promise<void> {
-    const keys = target.keys ?? [];
+  async function invalidate(
+    target: { readonly keys: readonly string[] } | (() => Promise<void>),
+  ): Promise<void> {
+    if (typeof target === 'function') {
+      invalidations += 1;
+      await target();
+      return;
+    }
+    const { keys } = target;
     if (keys.length === 0) {
       return;
     }

@@ -11,17 +11,18 @@ import { defineAnnotation } from '@internal/framework-components/runtime';
  *   untouched even if a `ttl` is set. Useful for selectively bypassing
  *   the cache on a per-call basis without removing the annotation
  *   entirely (e.g. a "force refresh" knob in user code).
- * - `key` — Per-query override of the cache key. When supplied, replaces
- *   the default `RuntimeMiddlewareContext.contentHash(exec)` digest.
- *   The supplied string is stored as-is — the cache middleware does
- *   **not** rehash it, so the caller is responsible for ensuring the
- *   string is bounded in size and free of sensitive data they do not
- *   want flowing into logs / Redis `KEYS` / persistence dumps.
+ * - `key` — Per-query cache key. When supplied, the middleware uses it as-is and does not call
+ *   its `deriveKey`, so any prefix `deriveKey` adds must be part of this string. It is not
+ *   rehashed: keep it bounded in size and free of data you do not want in logs or store dumps.
+ * - `attributes` — Any value, copied by reference onto the stored `CachedEntry`. The middleware
+ *   never reads it; extensions and `InMemoryCacheStore.deleteWhere` do. Do not mutate it after
+ *   the read, and keep it serialisable if the store serialises entries.
  */
 export interface CachePayload {
   readonly ttl?: number;
   readonly skip?: boolean;
   readonly key?: string;
+  readonly attributes?: unknown;
 }
 
 /**
