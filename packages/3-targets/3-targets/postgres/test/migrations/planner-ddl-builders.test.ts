@@ -1,10 +1,10 @@
 import type { CodecControlHooks } from '@internal/family-sql/control';
 import type { StorageColumn } from '@internal/sql-contract/types';
+import { describe, expect, it } from 'vitest';
 import {
   buildColumnTypeSql,
   renderDefaultLiteral,
-} from '@internal/target-postgres/planner-ddl-builders';
-import { describe, expect, it } from 'vitest';
+} from '../../src/core/migrations/planner-ddl-builders';
 
 const noHooks = new Map<string, CodecControlHooks>();
 
