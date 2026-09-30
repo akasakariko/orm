@@ -25,15 +25,15 @@ It ships an in-memory LRU-with-TTL store and exposes the `CacheStore` interface 
 ```ts
 const cache = createCacheMiddleware();
 
-await db.orm.User.first({ id: 1 }, (meta) =>
+await db.orm.public.User.first({ id: 1 }, (meta) =>
   meta.annotate(cacheAnnotation({ ttl: 60_000, key: 'user-1', tags: ['users'] })),
 );
 
 await cache.invalidate({ tags: ['users'] });
 ```
 
-Invalidating by key needs `CacheStore.delete`, and by tag needs `CacheStore.deleteByTag`; when the store lacks one, `invalidate` throws `RUNTIME.CACHE_STORE_CANNOT_INVALIDATE` before deleting anything. Call `invalidate` after the write has committed: inside a transaction, another request can put the old rows back in the cache before the commit. A read that was in flight when `invalidate` ran does not store its rows; this guard works within one process only, so a shared store such as Redis is not protected against reads in other processes.
+Invalidating by key needs `CacheStore.delete`, and by tag needs `CacheStore.deleteByTag`; when the store lacks one, `invalidate` throws `RUNTIME.CACHE_STORE_CANNOT_INVALIDATE` before deleting anything. Call `invalidate` after the write has committed: inside a transaction, another request can put the old rows back in the cache before the commit. A read that was in flight when `invalidate` ran does not store its rows; this guard works within one process only, so a shared store such as Redis is not protected against reads in other processes. Any non-empty `invalidate` makes every in-flight miss skip its store, whatever keys or tags it names, so frequent invalidation lowers the hit rate. If the store's `delete` rejects partway, entries already removed stay removed, and calling `invalidate` again is safe.
 
 ## Scope
 
-The middleware is a read-through cache with a control surface. It does not decide when to invalidate: write-driven invalidation, invalidation strategies, request coalescing and routing between several stores are policy, and belong in separate extensions built on `invalidate`, tags and the store interface.
+The middleware is a read-through cache with a control surface. It does not decide when to invalidate: write-driven invalidation, invalidation strategies, request coalescing and routing between several stores are policy, and belong in separate extensions built on `invalidate` and tags. Those extensions invalidate through `invalidate`, not by calling the store's `delete` or `deleteByTag` directly, because calling the store skips the guard for overlapping reads. The `CacheStore` interface is the extension point for backends, not for invalidation.
