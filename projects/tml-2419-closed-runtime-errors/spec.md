@@ -1,6 +1,6 @@
 # Slice spec: a query run after its connection or client is closed fails once, clearly, and never as an unhandled rejection
 
-Orphan slice (Linear TML-2419). One pull request. Branch `tml-2419-closed-runtime-errors`, based on `tml-2398-serverless-client-symmetry` (prisma/orm#30482, approved, not yet merged). The root-cause research is in `wip/findings.md` (copied from the spike); read it first.
+Orphan slice (Linear TML-2419). One pull request. Branch `tml-2419-closed-runtime-errors`. The root-cause research is in [root-cause-findings.md](root-cause-findings.md); the review of the first implementation is in [reviews/](reviews/). This spec supersedes the design those reviews examined.
 
 ## At a glance
 
@@ -11,28 +11,50 @@ async function listUsers(url: string) {
 }
 ```
 
-Today this fails with "Database error while reading contract marker", caused by "Postgres driver not connected. Call connect(binding) …". The same mistake with `return db.transaction(...)` also raises an unhandled promise rejection, which ends a Node.js process by default; under some conditions it commits instead. After this slice, every such call rejects with one `DRIVER.NOT_CONNECTED` error that says the runtime is closed and names the likely cause, the rejection reaches only the caller, and the outcome does not depend on timing.
+On `main` this fails with "Database error while reading contract marker", caused by "Postgres driver not connected. Call connect(binding) …". The same mistake with `return db.transaction(...)` also raises an unhandled promise rejection, which ends a Node.js process by default; under some conditions it commits instead. After this slice, `close()` waits for work that started before it and refuses work that starts after it. The unawaited `all()` above rejects once with `DRIVER.NOT_CONNECTED` "Runtime is closed", whose `fix` names the missing `await`. An unawaited `first()`, `execute()` or `transaction()` had already started, so it finishes: the transaction commits. Nothing rejects while the close is pending, so Node reports no unhandled rejection.
+
+## Decision: work that has started finishes; work that starts later is refused
+
+When `close()` is called while work is running, that work finishes. This is how Node's `server.close()` and pg's `pool.end()` behave, it keeps `main`'s behaviour for a transaction in flight on a pooled client, and it keeps the documented promise that `close()` does not abort in-flight queries.
+
+The first implementation refused every operation that reached the driver after `close()` had started and held the rejection until the close settled. The reviews found two structural faults: a held transaction can be waiting on the refused work, so both hang for ever (code review F-02, system design SD-11); and the rejection is held only until this connection's close settles, so it still reaches Node's handler when another resource is disposed afterwards (F-04). Refusing at once and marking the promise as handled does not work either: "handled" is a property of a promise, not of an error, so the mark would silence every genuine failure on that promise. The chosen rule has neither fault: refused work rejects at once and is never awaited by a close; work that has started is awaited by the close and so cannot reject before the caller's handler is attached.
 
 ## Chosen design
 
-1. **`@internal/sql-runtime` owns the rule.** `SqlRuntimeBase.close()` records a single closing promise. Every operation that would reach the driver after close has started (query, execute, connection, marker read) fails with one structured `DRIVER.NOT_CONNECTED` error: message "Runtime is closed"; `why` says `close()` was called, or the `await using` scope that held it ended; `fix` names the two likely causes, a query returned without `await` inside an `await using` scope, and use after `close()`.
-2. **The rejection is delivered after the close settles.** Runtime-level operations wait for the closing promise before they reject, so the caller has attached its handler and Node never reports an unhandled rejection. Operations on a connection or transaction that already holds a lease reject at once, because waiting inside a held lease would deadlock. `withTransaction` rejects only after it has released its connection and the close has settled.
-3. **One outcome for one mistake.** An unawaited `return db.transaction(fn)` fails the same way whether or not the marker was verified before.
-4. **A failed marker read does not poison the runtime.** The cached marker check is cleared when it rejects, so a later call retries.
-5. **`postgres().close()` closes the runtime** when the client owns the pool, so a client and a connection fail the same way after close. A pool or `pg.Client` the caller passed in is not ended.
-6. **Driver and errors.** After `close()`, the Postgres driver's error says it is closed, not "not connected. Call connect(binding)". `rethrowMarkerReadError` passes `DRIVER`-category errors through without wrapping them as `CONTRACT.MARKER_READ_FAILED`.
-7. **Documents.** The Postgres README, the deployment guide, ADR 207, the skill references and the error reference currently describe the old errors for this mistake; they describe the new one.
+1. **`@internal/sql-runtime` owns the rule.** `SqlRuntimeBase.close()` records one close promise, waits for the runtime-scope operations in flight, then closes the driver. An operation that starts after `close()` was called is refused at its entry, before middleware and parameter encoding, with a structured `DRIVER.NOT_CONNECTED` error: message "Runtime is closed"; `why`: "close() was called on this runtime, or on the client or connection that owns it. An await using scope calls close() when it ends."; `fix`: "Await every query, transaction and prepared statement before close(). The usual cause is a query returned without await from an await using scope." The refusal is immediate: it never waits for the close.
+2. **What "starts" means.** A runtime-scope operation starts when it enters the runtime: `execute()` is called, `connection()` is called, a prepared execute is called, or the generator behind `query()` or a prepared query begins, which `toArray()`, `then()`, `first()` and `for await` trigger on their first `next()`. A lazy result consumed after `close()` starts after `close()`, and is refused.
+3. **What `close()` waits for.** `execute()`, a prepared execute and `connection()` are in flight until they settle. A `query()` or prepared query is in flight until its first driver row or its completion arrives, that is, until the statement has been sent and answered; from then on the driver's own close discipline applies (a pool waits for checked-out clients; the direct driver waits for its connection lease and for the client query lock). A generator that is started by hand and never finished therefore cannot block `close()` at the runtime level.
+4. **A held connection is never refused.** Operations with scope `connection` or `transaction` are neither refused nor tracked: they hold a database connection, and the driver's close waits for its release. Their contract-marker read runs on the held queryable, not on the runtime's driver, so a first query on a held connection or inside a transaction succeeds after `close()` has started. `withTransaction` no longer waits for anything on failure.
+5. **No new public members.** `Runtime` and `ConnectionProvider` keep their `main` shape; `closing` is removed from both. The serverless connection keeps its own memoised close.
+6. **A failed marker read does not poison the runtime.** The cached marker check is cleared when it rejects, so a later call retries. (Unchanged from the first implementation.)
+7. **`postgres().close()` closes the runtime it owns.** When the client created the pool from `{ url }`, `close()` calls `runtime.close()`; a pool or `pg.Client` the caller passed in is not ended and the runtime is left as it is. `close()` stores its promise and returns it on every call, so a second concurrent `close()` settles when the first does. A transaction in flight when `close()` is called commits, as on `main`.
+8. **Driver.** The Postgres runtime driver wrapper marks itself closed before it awaits the delegate's close, so a call during a pending close already gets "Postgres driver is closed. Call connect(binding) to reconnect." When the delegate reported a lost connection instead, the message is "Postgres connection lost or closed. Call connect(binding) to reconnect." The direct driver's `close()` takes the client query lock as well as the connection lease before `pg.Client.end()`, so a statement or cursor stream in flight finishes before the socket ends; this is the direct-driver equivalent of `pool.end()` waiting for checked-out clients.
+9. **Errors.** `rethrowMarkerReadError` passes through any structured error whose code is in the `DRIVER` namespace (`isStructuredError(err) && err.code.startsWith('DRIVER.')`), whichever factory built it.
+10. **Documents.** The Postgres README, the deployment guide, ADR 207, the runtime subsystem document, the skill references and the error reference describe the rule and the outcome of each unawaited return. ADR 207's rejected alternative is the first implementation (refuse after close has started, hold the rejection until the close settles), with the two faults above. The subsystem document gains a "Shutdown" paragraph: the rule, what "starts" means, why held connections are exempt, and that owners must close through the runtime. Every sentence that promises "no unhandled rejection" states it for this mistake and says that a genuine failure of unawaited in-flight work rejects like any unawaited promise.
 
 Correct code does not change behaviour.
 
 ## Scope
 
-In: `packages/2-sql/5-runtime` (sql-runtime), `packages/3-extensions/postgres`, the Postgres runtime driver in `packages/3-targets/7-drivers/postgres` (closed message only), the marker-read wrapper in the errors package, their tests, the documents above, upgrade instructions as `check:upgrade-coverage` requires.
+In: `packages/2-sql/5-runtime` (sql-runtime), `packages/3-extensions/postgres`, the Postgres runtime driver in `packages/3-targets/7-drivers/postgres`, the marker-read wrapper in `packages/1-framework/1-core/errors`, their tests, the documents above, upgrade instructions as `check:upgrade-coverage` requires.
 
-Out: waiting for in-flight work before closing (rejected: one mistake would have two outcomes depending on timing, and an abandoned stream could block `close()` for ever); detecting a query through `db` inside its own transaction (TML-3344); `transaction()` and `prepare()` throwing synchronously on a closed client (TML-3345); a leaked `runtime().connection()` blocking `close()` on the direct driver (record as a ticket if confirmed); SQLite and Mongo clients (check them and record tickets if they share the bug).
+Out: detecting a query through `db` inside its own transaction (TML-3344); `transaction()` and `prepare()` throwing synchronously on a closed client (TML-3345); a leaked `runtime().connection()` or an unfinished cursor stream blocking `close()` for ever; SQLite, Mongo and Supabase clients, which close their driver directly and keep the old error; work queued inside pg-pool for a client when `pool.end()` runs (pg-pool never serves it; the runtime's wait for `connection()` covers the case that this slice can reach). Each is recorded as a follow-up in the pull request.
+
+## Pre-investigated edge cases
+
+| Case | Expected |
+| --- | --- |
+| `return db.orm.public.User.first()` from an `await using` scope, first query on the connection | The marker read and the query run; `close()` waits; the caller gets the row; no unhandled rejection. |
+| `return db.transaction(fn)` from an `await using` scope, with or without an earlier awaited query, with or without `verifyMarker` | The transaction commits; the caller gets `fn`'s value. |
+| `return db.orm.public.User.all()` or `return db.runtime().query(plan)` | Rejects with "Runtime is closed" when awaited; the driver is not called. |
+| Two `await using` connections, the second returned from without `await` (`return stream.orm.public.User.first()`) | Resolves; no unhandled rejection, because nothing rejects. |
+| `const c = await rt.connection(); rt.close(); await c.query(plan).toArray(); await c.release()` | The query succeeds and reads the marker through `c`; `close()` settles after `release()`. |
+| `rt.execute(plan)` inside a transaction callback after `close()` was called (the TML-3344 mistake) | Rejects at once with "Runtime is closed"; the transaction rolls back; `close()` settles. No hang. |
+| A `beforeExecute` middleware that would throw, on an operation started after `close()` | The middleware is not called; the closed error wins. |
+| `postgres()` with a caller's `pg.Pool`, `close()` while a query is pending | The pool is not ended and the runtime is not closed; the query completes. Pinned by a test as intended. |
 
 ## Done when
 
-- Each symptom in `wip/findings.md` has a test that fails before the fix, including a test run that fails on any unhandled rejection.
-- Measured against Docker Postgres in Node and in workerd: the unawaited `all()`, `first()`, `runtime().query()`, `runtime().execute()` and `transaction()` each reject once with the new error; no unhandled rejection; the process keeps running.
-- `/drive-code-review` (no walkthrough) run and its findings fixed; manual QA done.
+- Each row above and each finding in [reviews/code-review.md](reviews/code-review.md) and [reviews/system-design-review.md](reviews/system-design-review.md) has a test that fails before the fix, or a written reason why it is out of scope. The serverless test run fails on any unhandled rejection.
+- Measured against Docker Postgres in Node: the unawaited `all()` and `runtime().query()` reject once with the new error; the unawaited `first()`, `runtime().execute()` and `transaction()` resolve; no unhandled rejection; the process keeps running.
+- `/drive-code-review` (no walkthrough) run again on the final tree and its findings fixed; manual QA done.
