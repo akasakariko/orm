@@ -10,7 +10,7 @@ import type { DdlColumn, DdlTableConstraint } from '@internal/sql-relational-cor
 import { blindCast } from '@internal/utils/casts';
 import { ifDefined } from '@internal/utils/defined';
 import type { ColumnDefaultSetting } from '../ddl/nodes';
-import { errorPostgresMigrationStackMissing } from '../errors';
+import { errorPostgresMigrationStackMissing, postgresError } from '../errors';
 import { PostgresContractView } from '../postgres-contract-view';
 import { PostgresRlsPolicy, type RenderedRlsPolicyLiteral } from '../postgres-rls-policy';
 import {
@@ -394,6 +394,13 @@ export abstract class PostgresMigration<
       readonly operationClass?: 'additive' | 'widening';
     },
   ): Promise<SqlMigrationPlanOperation<PostgresPlanTargetDetails>> {
+    if (options.default === undefined) {
+      throw postgresError(
+        'CONTRACT.DEFAULT_INVALID',
+        `setDefault on column "${options.column}" of table "${options.table}" has no default. setDefault takes the default as default: lit(value) for a literal or default: fn(expression) for an expression.`,
+        { meta: { operation: 'setDefault', table: options.table, column: options.column } },
+      );
+    }
     return new SetDefaultCall(
       options.schema,
       options.table,

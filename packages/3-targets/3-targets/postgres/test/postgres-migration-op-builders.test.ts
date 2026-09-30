@@ -505,6 +505,24 @@ describe('PostgresMigration op-builder methods with a ControlStack', () => {
     expect(typeof op.execute[0]?.sql).toBe('string');
   });
 
+  it('setDefault refuses an argument with no default, such as an untyped call that passes defaultSql', () => {
+    const m = new ExposedMigration(fakeControlStack());
+    const untypedCall = {
+      schema: 'public',
+      table: 'widget',
+      column: 'name',
+      defaultSql: "DEFAULT 'unnamed'",
+    } as unknown as Parameters<ExposedMigration['callSetDefault']>[0];
+
+    expect(() => m.callSetDefault(untypedCall)).toThrow(
+      expect.objectContaining({
+        code: 'CONTRACT.DEFAULT_INVALID',
+        message:
+          'setDefault on column "name" of table "widget" has no default. setDefault takes the default as default: lit(value) for a literal or default: fn(expression) for an expression.',
+      }),
+    );
+  });
+
   it('dropTable lowers to a destructive drop-table operation', async () => {
     const m = new ExposedMigration(fakeControlStack());
     const op = await m.callDropTable({ schema: 'public', table: 'widget' });
