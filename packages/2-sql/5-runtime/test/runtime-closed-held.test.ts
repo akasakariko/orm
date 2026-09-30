@@ -5,6 +5,7 @@ import {
   affectedCountPlan,
   afterRefusalBegins,
   closedError,
+  delay,
   rowsPlan,
   setup,
   setupWithMarkerReader,
@@ -69,7 +70,37 @@ describe('withTransaction when close() is called inside the callback', () => {
   });
 });
 
-describe('a runtime-scope query inside a transaction callback a tick after close()', () => {
+describe('a transaction and a reload on the runtime that follow each other from the tick of close()', () => {
+  it('both complete, because the runtime is busy with database work until the reload ends', async () => {
+    const { runtime, calls, hooks } = setup();
+    hooks.execute = () => delay(5);
+    hooks.commit = () => delay(5);
+
+    const closing = runtime.close();
+    const chain = (async () => {
+      await withTransaction(runtime, async (tx) => {
+        await tx.execute(affectedCountPlan());
+        await tx.execute(affectedCountPlan());
+      });
+      return runtime.execute(affectedCountPlan());
+    })();
+
+    await expect(chain).resolves.toEqual({ affectedRows: 1 });
+    await closing;
+    expect(calls).toEqual([
+      'acquire',
+      'transaction.execute',
+      'transaction.execute',
+      'commit',
+      'release',
+      'driver.execute',
+      'close',
+      'closed',
+    ]);
+  });
+});
+
+describe('a runtime-scope query inside a transaction callback after the runtime was idle for a tick', () => {
   it('is refused at once, the transaction rolls back, and the close settles', async () => {
     const { runtime, calls, driver } = setup();
     let closing: Promise<void> | undefined;

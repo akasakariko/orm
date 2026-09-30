@@ -92,7 +92,7 @@ describe('runtime-scope work started before close() finishes before the driver c
     const held = await pending;
     await held.release();
     await closing;
-    expect(calls).toEqual(['acquire', 'close', 'release', 'closed']);
+    expect(calls).toEqual(['acquire', 'release', 'close', 'closed']);
     expect(settled).toEqual(['connection', 'close']);
   });
 
@@ -177,6 +177,41 @@ describe('runtime-scope work that enters in the same tick as close()', () => {
     await closing;
     expect(calls).toEqual(['driver.execute', 'close', 'closed']);
     expect(settled).toEqual(['execute', 'close']);
+  });
+});
+
+describe('runtime-scope work that starts in the tick in which the previous one settled', () => {
+  it('is admitted, so a chain of dependent queries completes before the driver closes', async () => {
+    const { runtime, calls, hooks } = setup();
+    hooks.execute = () => delay(5);
+
+    const closing = runtime.close();
+    const chain = (async () => {
+      await runtime.execute(affectedCountPlan());
+      await runtime.execute(affectedCountPlan());
+      return runtime.query(rowsPlan()).toArray();
+    })();
+
+    await expect(chain).resolves.toEqual([{ id: 1 }, { id: 2 }, { id: 3 }]);
+    await closing;
+    expect(calls).toEqual(['driver.execute', 'driver.execute', 'driver.query', 'close', 'closed']);
+  });
+});
+
+describe('runtime-scope work that started and ended since close() set its timer', () => {
+  it('keeps the close waiting another tick, so work one tick later is still admitted', async () => {
+    const { runtime, calls } = setup();
+
+    const closing = runtime.close();
+    const chain = (async () => {
+      await runtime.execute(affectedCountPlan());
+      await delay(0);
+      return runtime.execute(affectedCountPlan());
+    })();
+
+    await expect(chain).resolves.toEqual({ affectedRows: 1 });
+    await closing;
+    expect(calls).toEqual(['driver.execute', 'driver.execute', 'close', 'closed']);
   });
 });
 

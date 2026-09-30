@@ -109,7 +109,7 @@ export interface Runtime extends RuntimeQueryable {
   connection(): Promise<RuntimeConnection>;
   telemetry(): RuntimeTelemetryEvent | null;
   /**
-   * Waits for runtime-scope work that started before it or in the same tick, then closes the driver. Runtime-scope work that starts a tick later is refused with `DRIVER.NOT_CONNECTED`. Work on a held connection or transaction is not refused; the driver's close waits for its release. Every call returns the same promise.
+   * Waits until the runtime has been idle for one tick, with no database work in flight and none started since, then closes the driver. Runtime-scope work that starts after that is refused with `DRIVER.NOT_CONNECTED`. Work on a held connection or transaction is never refused; the driver's close waits for its release. Every call returns the same promise.
    */
   close(): Promise<void>;
 
@@ -160,7 +160,6 @@ function isExecutionPlan(plan: SqlExecutionPlan | SqlQueryPlan): plan is SqlExec
 // v8 ignore next 2
 const noopLogSink = (): void => {};
 const noopLog: Log = { info: noopLogSink, warn: noopLogSink, error: noopLogSink };
-const noopEnd = (): void => {};
 
 function runtimeClosedError(): StructuredError {
   return structuredError('DRIVER.NOT_CONNECTED', 'Runtime is closed', {
@@ -403,12 +402,9 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
     await this.verifyMarkerPromise;
   }
 
-  // Called synchronously when an operation enters the runtime. Work on the driver is runtime-scope work: it throws once refusal has begun, otherwise it returns the callback that ends its in-flight record. Work on any other queryable holds a connection, so it is neither refused nor tracked: the driver's close waits for its release.
+  // Called synchronously when an operation enters the runtime; returns the callback that ends its in-flight record. Work on the driver is runtime-scope work and throws once refusal has begun. Work on any other queryable holds a connection, so it is never refused, but it is recorded, so the runtime counts as busy while it runs.
   private beginOperation(queryable: SqlQueryable): () => void {
-    if (queryable !== this.driver) {
-      return noopEnd;
-    }
-    if (this.#refusing) {
+    if (queryable === this.driver && this.#refusing) {
       throw runtimeClosedError();
     }
     return this.#inFlight.begin();
@@ -879,14 +875,14 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
       PreparedStatementQueryTarget &
       PreparedStatementExecuteTarget = {
       async transaction(): Promise<RuntimeTransaction> {
-        const driverTx = await driverConn.beginTransaction();
+        const driverTx = await self.#inFlight.track(() => driverConn.beginTransaction());
         return self.wrapTransaction(driverTx);
       },
       async release(): Promise<void> {
-        await driverConn.release();
+        await self.#inFlight.track(() => driverConn.release());
       },
       async destroy(reason?: unknown): Promise<void> {
-        await driverConn.destroy(reason);
+        await self.#inFlight.track(() => driverConn.destroy(reason));
       },
       query<Row>(
         plan: (SqlExecutionPlan<unknown> | SqlQueryPlan<unknown>) & { readonly _row?: Row },
@@ -948,10 +944,10 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
       PreparedStatementQueryTarget &
       PreparedStatementExecuteTarget = {
       async commit(): Promise<void> {
-        await driverTx.commit();
+        await self.#inFlight.track(() => driverTx.commit());
       },
       async rollback(): Promise<void> {
-        await driverTx.rollback();
+        await self.#inFlight.track(() => driverTx.rollback());
       },
       query<Row>(
         plan: (SqlExecutionPlan<unknown> | SqlQueryPlan<unknown>) & { readonly _row?: Row },
@@ -1014,15 +1010,17 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
     return this.closePromise;
   }
 
-  // Refusal begins one timer tick after close(), so work that enters in the same tick, such as the queries of an ORM create() or of an async helper returned without await, is admitted and waited for.
+  // Refusal begins once the runtime has been idle for one tick: no database work in flight, and none started since the timer was set. A chain of dependent queries that keeps the runtime busy from the close onward, such as an ORM write and its reload, is admitted to its end.
   private async drainThenCloseDriver(): Promise<void> {
-    await new Promise<void>((resolve) =>
-      setTimeout(() => {
-        this.#refusing = true;
-        resolve();
-      }, 0),
-    );
-    await this.#inFlight.drained();
+    for (;;) {
+      const startedBefore = this.#inFlight.started;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      if (!this.#inFlight.active && this.#inFlight.started === startedBefore) {
+        break;
+      }
+      await this.#inFlight.drained();
+    }
+    this.#refusing = true;
     await this.driver.close();
   }
 

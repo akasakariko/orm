@@ -68,6 +68,7 @@ export interface StubDriverHooks {
   acquire: () => Promise<void>;
   execute: () => Promise<void>;
   firstRow: () => Promise<void>;
+  commit: () => Promise<void>;
   close: () => Promise<void>;
 }
 
@@ -88,6 +89,7 @@ function createStubDriver(): Omit<ClosedRuntimeFixture, 'runtime'> {
     acquire: async () => {},
     execute: async () => {},
     firstRow: async () => {},
+    commit: async () => {},
     close: () => delay(0),
   };
 
@@ -116,6 +118,7 @@ function createStubDriver(): Omit<ClosedRuntimeFixture, 'runtime'> {
   const transaction = {
     ...queryable('transaction'),
     commit: vi.fn().mockImplementation(async () => {
+      await hooks.commit();
       calls.push('commit');
     }),
     rollback: vi.fn().mockImplementation(async () => {
