@@ -246,6 +246,16 @@ describe('a promise pending when close() is called on a client that owns its poo
             const ada = { id: 1, email: 'ada@example.com', name: 'Ada', invited_by_id: null };
             if (text.startsWith('INSERT INTO "public"."users"')) return { rows: [ada] };
             if (text.includes('json_agg')) return { rows: [{ ...ada, posts: [] }] };
+            if (text.startsWith('INSERT INTO "public"."posts"')) {
+              return { rows: [{ id: 1, title: 'Hello', user_id: 1, views: 0 }] };
+            }
+            if (
+              text.startsWith('SELECT') &&
+              text.includes('FROM "public"."users"') &&
+              text.includes('WHERE')
+            ) {
+              return { rows: [ada] };
+            }
             return { rows: [], rowCount: 0 };
           }),
           release: vi.fn(() => {
@@ -346,17 +356,36 @@ describe('a promise pending when close() is called on a client that owns its poo
     });
   });
 
-  it("an ORM include('posts').create() in the tick of the close runs its insert, then its reload a tick later is refused by the runtime", async () => {
+  it("an ORM include('posts').create() keeps the runtime busy from the close onward, so its insert and reload both run and it resolves", async () => {
     const db = await connectedClient();
 
     const outcome = await closeWhilePending(
       db,
       db.orm.public.User.include('posts').create({ email: 'ada@example.com', name: 'Ada' }),
-      [expect.objectContaining(runtimeClosedError)],
     );
 
-    expect(outcome).toEqual({ rejected: expect.objectContaining(runtimeClosedError) });
+    expect(outcome).toEqual({
+      resolved: { id: 1, email: 'ada@example.com', name: 'Ada', invitedById: null, posts: [] },
+    });
     expect(statements.some((text) => text.startsWith('INSERT INTO "public"."users"'))).toBe(true);
+  });
+
+  it('a nested create keeps the runtime busy through its transaction and reload, so it commits and resolves', async () => {
+    const db = await connectedClient();
+
+    const outcome = await closeWhilePending(
+      db,
+      db.orm.public.User.create({
+        email: 'ada@example.com',
+        name: 'Ada',
+        posts: (post) => post.create([{ id: 1, title: 'Hello', views: 0 }]),
+      }),
+    );
+
+    expect(outcome).toEqual({
+      resolved: { id: 1, email: 'ada@example.com', name: 'Ada', invitedById: null },
+    });
+    expect(statements).toContain('COMMIT');
   });
 
   it('close() closes the runtime in the same call, so a lazy read awaited a tick later is refused, as on a connection', async () => {

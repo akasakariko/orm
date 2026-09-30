@@ -32,7 +32,13 @@ vi.mock('pg', () => {
       if (text.startsWith('INSERT INTO "public"."posts"')) {
         return { rows: [{ id: 1, title: 'Hello', user_id: 1, views: 0 }], rowCount: 1 };
       }
-      if (text.startsWith('INSERT INTO "public"."users"') || text.includes('json_agg')) {
+      if (
+        text.startsWith('INSERT INTO "public"."users"') ||
+        text.includes('json_agg') ||
+        (recorded.answerOnATimer &&
+          text.startsWith('SELECT') &&
+          text.includes('FROM "public"."users"'))
+      ) {
         return {
           rows: [{ id: 1, email: 'ada@example.com', name: 'Ada', invited_by_id: null, posts: [] }],
           rowCount: 1,
@@ -222,21 +228,18 @@ async function countUsers(db: Connection): Promise<number> {
   return (await db.orm.public.User.all()).length;
 }
 
-const sameTickReturns: ReadonlyArray<[...UnawaitedReturn, unknown]> = [
-  ['an async helper that awaits a lazy read', (db) => countUsers(db), 0],
+const busyChainReturns: ReadonlyArray<[...UnawaitedReturn, unknown]> = [
+  ['an async helper that awaits a lazy read', (db) => countUsers(db), 1],
   [
     'Promise.all over two lazy reads',
     (db) => Promise.all([db.orm.public.User.all(), db.orm.public.Post.all()]),
-    [[], []],
+    [[adaRow], []],
   ],
   ['db.orm.public.User.create(data)', (db) => db.orm.public.User.create(ada), adaRow],
-];
-
-const tickLaterReturns: ReadonlyArray<[...UnawaitedReturn, string]> = [
   [
     "db.orm.public.User.include('posts').create(data)",
     (db) => db.orm.public.User.include('posts').create(ada),
-    'INSERT INTO "public"."users"',
+    { ...adaRow, posts: [] },
   ],
   [
     'a nested create',
@@ -245,11 +248,11 @@ const tickLaterReturns: ReadonlyArray<[...UnawaitedReturn, string]> = [
         ...ada,
         posts: (post) => post.create([{ id: 1, title: 'Hello', views: 0 }]),
       }),
-    'COMMIT',
+    adaRow,
   ],
 ];
 
-// The database answers on a later tick, as a real socket does, so a second query that waits for the first answer starts after refusal has begun.
+// The database answers on a later tick, as a real socket does, so each query of a chain starts after the previous one has answered.
 describe('a promise returned without await, with a database that answers on a later tick', () => {
   const serverless = postgresServerless<Contract>({ contractJson: fixtureContract });
 
@@ -259,8 +262,8 @@ describe('a promise returned without await, with a database that answers on a la
     return run(db);
   }
 
-  it.each(sameTickReturns)(
-    '%s starts its only query in the tick of the close, so the close waits for it and it resolves',
+  it.each(busyChainReturns)(
+    '%s keeps the runtime busy from the close onward, so the close waits for it and it resolves',
     async (_name, run, value) => {
       const outcome = await settled(returnWithoutAwait(run));
 
@@ -270,15 +273,15 @@ describe('a promise returned without await, with a database that answers on a la
     },
   );
 
-  it.each(tickLaterReturns)(
-    '%s runs its first statements, then its reload starts a tick later and is refused as an ordinary unawaited failure',
-    async (_name, run, statementThatRan) => {
-      const outcome = await settled(returnWithoutAwait(run));
+  it('a helper that waits on a timer before its query starts after the runtime was idle for a tick, and is refused', async () => {
+    const outcome = await settled(
+      returnWithoutAwait(async (db) => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return countUsers(db);
+      }),
+    );
 
-      expect(outcome).toEqual({ rejected: expect.objectContaining(runtimeClosedError) });
-      expect(unhandledRejections).toEqual([expect.objectContaining(runtimeClosedError)]);
-      expect(recorded.statements.some((text) => text.startsWith(statementThatRan))).toBe(true);
-      expectOneEndAndNoQueryAfterIt();
-    },
-  );
+    expect(outcome).toEqual({ rejected: expect.objectContaining(runtimeClosedError) });
+    expectOneEndAndNoQueryAfterIt();
+  });
 });
