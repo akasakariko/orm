@@ -197,9 +197,6 @@ export async function dropNotNull(
 }
 
 /**
- * `setting.type` is the column type as DDL writes it, and a literal default is written through the
- * codec `setting.codecRef` names, by the adapter that lowers the statement.
- *
  * `operationClass` defaults to `'additive'` (setting a default on a column
  * that currently has none). The reconciliation planner passes `'widening'`
  * when the column already has a different default — policy enforcement

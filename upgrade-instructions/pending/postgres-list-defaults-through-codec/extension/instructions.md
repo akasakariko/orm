@@ -6,7 +6,7 @@ changes:
     detection:
       glob: "**/migration.ts"
       matches:
-        - '(?<![\w$])defaultSql\s*:'
+        - '\.setDefault\(\s*\{[^}]*(?<![\w$])defaultSql\s*:'
 ---
 
 # `setDefault` in a Postgres migration takes the default, not its SQL
@@ -42,6 +42,6 @@ Rewrite each call:
 - `default` is `lit(...)` holding the value `contract.json` stores for the column default, or `fn(...)` holding the expression inside the parentheses of `DEFAULT (...)`.
 - `codecRef` is the column codec: its `codecId` from `contract.json`, with the column's `typeParams`, and `many: true` for a list. Without `codecRef` a literal is written as given.
 
-Add `lit` or `fn` to the import from `@internal/postgres/migration` beside `Migration`.
+Add `lit` or `fn` to the same import that brings in `Migration`.
 
-An applied migration is unaffected: applying a migration reads `ops.json` and never loads `migration.ts`. The edit is needed only before running a `migration.ts` again.
+Applying a migration reads `ops.json` and never loads `migration.ts`, so an applied migration still applies. A project that typechecks its migrations fails on every `this.setDefault` call that still passes `defaultSql`, applied migrations included, until the call is rewritten. Rewrite each one before running or typechecking that `migration.ts` again.
