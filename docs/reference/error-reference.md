@@ -1001,6 +1001,10 @@ A client (`postgres()`, `sqlite()`, `mongo()`) was asked to connect with no bind
 
 The cache middleware's `invalidate({ keys })` was called with a `CacheStore` that has no `delete` method. The check runs before anything is deleted, so a refused call leaves the store unchanged, and reads in flight still store their rows. Supply a store that implements `delete`, or call `invalidate(run)` with a function that deletes through the store's own methods. Payload: `missingMethod` (`delete`).
 
+### RUNTIME.CACHE_STORE_META_UNSUPPORTED
+
+The default in-memory cache store was asked to remove entries by `meta`, through `invalidate({ meta })` on a cache middleware that uses it. That store ignores `meta` when it stores an entry, so it cannot tell which entries match. The call removes nothing, including the keys passed with it. Invalidate by `keys`, or supply a `CacheStore` that indexes `meta` in `set` and honours it in `unset`.
+
 ### RUNTIME.CODEC_DESCRIPTOR_ARRAY_UNSUPPORTED
 
 A codec projection used `CodecRef.many` against a SQLite codec descriptor: SQLite has no stored scalar-array codec protocol, so projecting the whole stored array would be ambiguous. Use a scalar CodecRef or an explicit target representation. Payload: `codecId`.
