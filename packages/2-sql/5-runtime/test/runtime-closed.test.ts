@@ -1,165 +1,25 @@
-import { instantiateExecutionStack } from '@internal/framework-components/execution';
-import type {
-  MarkerReadResult,
-  SqlDriver,
-  SqlExecuteRequest,
-} from '@internal/sql-relational-core/ast';
-import { RawQueryAst } from '@internal/sql-relational-core/ast';
-import type { AffectedCount } from '@internal/sql-relational-core/expression';
-import type { SqlQueryPlan } from '@internal/sql-relational-core/plan';
-import { planFromAst } from '@internal/sql-relational-core/plan';
-import { describe, expect, it, vi } from 'vitest';
-import { createSqlExecutionStack } from '../src/sql-context';
-import { withTransaction } from '../src/sql-runtime';
+import { describe, expect, it } from 'vitest';
 import {
-  createStubAdapter,
-  createTestAdapterDescriptor,
-  createTestContext,
-  createTestContract,
-  createTestRuntime,
-  createTestStackInstance,
-  createTestTargetDescriptor,
-  type StubAdapter,
-} from './utils';
-
-/**
- * A runtime whose `close()` has started refuses every operation that would reach the driver.
- * An operation that holds no connection rejects only after the close has settled, so the
- * rejection cannot precede the caller's handler. An operation on a held connection rejects at
- * once, because the driver's close waits for that connection to be released.
- */
-
-const contract = createTestContract({ storageHash: 'runtime-closed' });
-
-const closedError = {
-  code: 'DRIVER.NOT_CONNECTED',
-  message: 'Runtime is closed',
-};
-
-function createStubDriver() {
-  const calls: string[] = [];
-  let heldConnections = 0;
-  const releaseWaiters: Array<() => void> = [];
-
-  const releaseHeld = async (): Promise<void> => {
-    heldConnections -= 1;
-    for (const wake of releaseWaiters.splice(0)) wake();
-  };
-
-  const transaction = {
-    query: vi.fn().mockImplementation(async function* (_request: SqlExecuteRequest) {
-      calls.push('transaction.query');
-      yield { id: 1 };
-    }),
-    execute: vi.fn().mockImplementation(async (_request: SqlExecuteRequest) => {
-      calls.push('transaction.execute');
-      return { affectedRows: 1 };
-    }),
-    commit: vi.fn().mockImplementation(async () => {
-      calls.push('commit');
-    }),
-    rollback: vi.fn().mockImplementation(async () => {
-      calls.push('rollback');
-    }),
-  };
-
-  const connection = {
-    query: vi.fn().mockImplementation(async function* (_request: SqlExecuteRequest) {
-      calls.push('connection.query');
-      yield { id: 1 };
-    }),
-    execute: vi.fn().mockImplementation(async (_request: SqlExecuteRequest) => {
-      calls.push('connection.execute');
-      return { affectedRows: 1 };
-    }),
-    release: vi.fn().mockImplementation(async () => {
-      calls.push('release');
-      await releaseHeld();
-    }),
-    destroy: vi.fn().mockImplementation(async () => {
-      calls.push('destroy');
-      await releaseHeld();
-    }),
-    beginTransaction: vi.fn().mockResolvedValue(transaction),
-  };
-
-  const driver: SqlDriver = {
-    query: vi.fn().mockImplementation(async function* (_request: SqlExecuteRequest) {
-      calls.push('driver.query');
-      yield { id: 1 };
-    }),
-    execute: vi.fn().mockImplementation(async (_request: SqlExecuteRequest) => {
-      calls.push('driver.execute');
-      return { affectedRows: 1 };
-    }),
-    connect: vi.fn().mockResolvedValue(undefined),
-    acquireConnection: vi.fn().mockImplementation(async () => {
-      heldConnections += 1;
-      calls.push('acquire');
-      return connection;
-    }),
-    close: vi.fn().mockImplementation(async () => {
-      calls.push('close');
-      while (heldConnections > 0) {
-        await new Promise<void>((wake) => releaseWaiters.push(wake));
-      }
-      await new Promise((settle) => setTimeout(settle, 0));
-      calls.push('closed');
-    }),
-  };
-
-  return { driver, calls, connection, transaction };
-}
-
-function setup() {
-  const stub = createStubDriver();
-  const runtime = createTestRuntime({
-    stackInstance: createTestStackInstance(),
-    context: createTestContext(contract, createStubAdapter()),
-    driver: stub.driver,
-    verifyMarker: false,
-  });
-  return { runtime, ...stub };
-}
-
-function setupWithMarkerReader(readMarker: () => Promise<MarkerReadResult>) {
-  const stub = createStubDriver();
-  const base = createStubAdapter();
-  const adapter: StubAdapter = { ...base, profile: { ...base.profile, readMarker } };
-  const stack = createSqlExecutionStack({
-    target: createTestTargetDescriptor(),
-    adapter: createTestAdapterDescriptor(adapter),
-    extensions: [],
-  });
-  const runtime = createTestRuntime({
-    stackInstance: instantiateExecutionStack(stack),
-    context: createTestContext(contract, adapter),
-    driver: stub.driver,
-  });
-  return { runtime, ...stub };
-}
-
-function rowsPlan(): SqlQueryPlan<{ id: unknown }> {
-  return planFromAst(
-    RawQueryAst.rows(['select id from "user"'], { id: { codecId: 'pg/int4@1', nullable: false } }),
-    contract,
-  );
-}
-
-function affectedCountPlan(): SqlQueryPlan<AffectedCount> {
-  return planFromAst(RawQueryAst.affectedCount(['update "user" set seen = now()']), contract);
-}
+  affectedCountPlan,
+  closedError,
+  createMiddlewareSpy,
+  deferred,
+  delay,
+  outcomeWithin,
+  rowsPlan,
+  setup,
+} from './closed-runtime-stub';
 
 describe('the closed error', () => {
-  it('names the runtime, the two ways it closes, and the two likely mistakes', async () => {
+  it('names what closed the runtime and the missing await', async () => {
     const { runtime } = setup();
     await runtime.close();
 
     await expect(runtime.execute(affectedCountPlan())).rejects.toMatchObject({
       code: 'DRIVER.NOT_CONNECTED',
       message: 'Runtime is closed',
-      why: 'close() was called on this runtime, or the await using scope that held it has ended.',
-      fix: 'Await every query, transaction and prepared statement before the runtime closes. A query returned without await from an await using scope, or started after close(), runs after the connection has closed.',
+      why: 'close() was called on this runtime, or on the client or connection that owns it. An await using scope calls close() when it ends.',
+      fix: 'Await every query, transaction and prepared statement before close(). The usual cause is a query returned without await from an await using scope.',
     });
   });
 });
@@ -173,115 +33,192 @@ describe('close()', () => {
 
     expect(driver.close).toHaveBeenCalledTimes(1);
   });
+
+  it('returns the same promise on every call', () => {
+    const { runtime } = setup();
+
+    expect(runtime.close()).toBe(runtime.close());
+  });
 });
 
-describe('an operation started before close() that holds no connection', () => {
-  it('rejects with the closed error after the close has settled and makes no driver call', async () => {
-    const { runtime, driver } = setup();
+describe('runtime-scope work started before close() finishes before the driver closes', () => {
+  it('execute()', async () => {
+    const { runtime, calls, hooks } = setup();
+    const executeGate = deferred();
+    hooks.execute = () => executeGate.promise;
     const settled: string[] = [];
 
     const pending = runtime.execute(affectedCountPlan()).finally(() => settled.push('execute'));
     const closing = runtime.close().finally(() => settled.push('close'));
+    await delay(5);
+    executeGate.resolve();
 
-    await expect(pending).rejects.toMatchObject(closedError);
+    await expect(pending).resolves.toEqual({ affectedRows: 1 });
     await closing;
-    expect(settled).toEqual(['close', 'execute']);
-    expect(driver.execute).not.toHaveBeenCalled();
-  });
-});
-
-describe('an operation started after close()', () => {
-  it('execute() rejects with the closed error and makes no driver call', async () => {
-    const { runtime, driver } = setup();
-    await runtime.close();
-
-    await expect(runtime.execute(affectedCountPlan())).rejects.toMatchObject(closedError);
-    expect(driver.execute).not.toHaveBeenCalled();
+    expect(calls).toEqual(['driver.execute', 'close', 'closed']);
+    expect(settled).toEqual(['execute', 'close']);
   });
 
-  it('query() rejects with the closed error when its rows are read and makes no driver call', async () => {
-    const { runtime, driver } = setup();
-    await runtime.close();
+  it('a prepared execute', async () => {
+    const { runtime, calls, hooks } = setup();
+    const prepared = await runtime.prepare({}, () => affectedCountPlan());
+    const executeGate = deferred();
+    hooks.execute = () => executeGate.promise;
+    const settled: string[] = [];
 
-    await expect(runtime.query(rowsPlan()).toArray()).rejects.toMatchObject(closedError);
-    expect(driver.query).not.toHaveBeenCalled();
+    const pending = prepared.execute(runtime, {}).finally(() => settled.push('execute'));
+    const closing = runtime.close().finally(() => settled.push('close'));
+    await delay(5);
+    executeGate.resolve();
+
+    await expect(pending).resolves.toEqual({ affectedRows: 1 });
+    await closing;
+    expect(calls).toEqual(['driver.execute', 'close', 'closed']);
+    expect(settled).toEqual(['execute', 'close']);
   });
 
-  it('connection() rejects with the closed error and acquires nothing', async () => {
-    const { runtime, driver } = setup();
-    await runtime.close();
+  it('connection()', async () => {
+    const { runtime, calls, hooks } = setup();
+    const acquireGate = deferred();
+    hooks.acquire = () => acquireGate.promise;
+    const settled: string[] = [];
 
-    await expect(runtime.connection()).rejects.toMatchObject(closedError);
-    expect(driver.acquireConnection).not.toHaveBeenCalled();
-  });
+    const pending = runtime.connection().finally(() => settled.push('connection'));
+    const closing = runtime.close().finally(() => settled.push('close'));
+    await delay(5);
+    acquireGate.resolve();
 
-  it('a prepared query and a prepared execute reject with the closed error', async () => {
-    const { runtime, driver } = setup();
-    const preparedQuery = await runtime.prepare({}, () => rowsPlan());
-    const preparedExecute = await runtime.prepare({}, () => affectedCountPlan());
-    await runtime.close();
-
-    await expect(preparedQuery.query(runtime, {}).toArray()).rejects.toMatchObject(closedError);
-    await expect(preparedExecute.execute(runtime, {})).rejects.toMatchObject(closedError);
-    expect(driver.query).not.toHaveBeenCalled();
-    expect(driver.execute).not.toHaveBeenCalled();
-  });
-});
-
-describe('an operation on a connection held when close() starts', () => {
-  it('rejects at once, and the close completes once the connection is released', async () => {
-    const { runtime, connection } = setup();
-    const held = await runtime.connection();
-    let closed = false;
-    const closing = runtime.close().then(() => {
-      closed = true;
-    });
-
-    await expect(held.query(rowsPlan()).toArray()).rejects.toMatchObject(closedError);
-    await expect(held.execute(affectedCountPlan())).rejects.toMatchObject(closedError);
-    expect(closed).toBe(false);
-    expect(connection.query).not.toHaveBeenCalled();
-    expect(connection.execute).not.toHaveBeenCalled();
-
+    const held = await pending;
     await held.release();
     await closing;
-    expect(closed).toBe(true);
+    expect(calls).toEqual(['acquire', 'close', 'release', 'closed']);
+    expect(settled).toEqual(['connection', 'close']);
   });
-});
 
-describe('withTransaction when close() starts while the transaction holds its connection', () => {
-  it('rolls back, releases the connection, and rejects with the closed error after the close has settled', async () => {
-    const { runtime, calls, transaction } = setup();
+  it('query().toArray()', async () => {
+    const { runtime, calls, hooks } = setup();
+    const rowGate = deferred();
+    hooks.firstRow = () => rowGate.promise;
     const settled: string[] = [];
-    let closing: Promise<void> | undefined;
 
-    const pending = withTransaction(runtime, async (tx) => {
-      closing = runtime.close().finally(() => settled.push('close'));
-      await tx.execute(affectedCountPlan());
-    }).finally(() => settled.push('transaction'));
+    const pending = runtime
+      .query(rowsPlan())
+      .toArray()
+      .finally(() => settled.push('query'));
+    const closing = runtime.close().finally(() => settled.push('close'));
+    await delay(5);
+    rowGate.resolve();
 
-    await expect(pending).rejects.toMatchObject(closedError);
+    await expect(pending).resolves.toEqual([{ id: 1 }, { id: 2 }, { id: 3 }]);
     await closing;
-    expect(settled).toEqual(['close', 'transaction']);
-    expect(transaction.execute).not.toHaveBeenCalled();
-    expect(calls).toEqual(['acquire', 'close', 'rollback', 'release', 'closed']);
+    expect(calls).toEqual(['driver.query', 'close', 'closed']);
+    expect(settled).toEqual(['query', 'close']);
   });
 });
 
-describe('a marker read that fails', () => {
-  it('is retried by the next query instead of failing every later query', async () => {
-    const readMarker = vi
-      .fn<() => Promise<MarkerReadResult>>()
-      .mockRejectedValueOnce(new Error('simulated transient failure'))
-      .mockResolvedValue({ kind: 'absent' });
-    const { runtime, driver } = setupWithMarkerReader(readMarker);
+describe('a stream started before close()', () => {
+  it('holds close() until its first row arrives, then lets the driver close while the rest is read', async () => {
+    const { runtime, driver, hooks } = setup();
+    const rowGate = deferred();
+    hooks.firstRow = () => rowGate.promise;
+    const closeGate = deferred();
+    hooks.close = () => closeGate.promise;
 
-    await expect(runtime.execute(affectedCountPlan())).rejects.toThrow(
-      'simulated transient failure',
+    const iterator = runtime.query(rowsPlan())[Symbol.asyncIterator]();
+    const firstRow = iterator.next();
+    const closing = runtime.close();
+    await delay(5);
+    expect(driver.close).not.toHaveBeenCalled();
+
+    rowGate.resolve();
+    await expect(firstRow).resolves.toEqual({ done: false, value: { id: 1 } });
+    await expect.poll(() => driver.close).toHaveBeenCalled();
+
+    await expect(iterator.next()).resolves.toEqual({ done: false, value: { id: 2 } });
+    await expect(iterator.next()).resolves.toEqual({ done: false, value: { id: 3 } });
+    await expect(iterator.next()).resolves.toEqual({ done: true, value: undefined });
+    closeGate.resolve();
+    await closing;
+  });
+});
+
+describe('runtime-scope work that fails while close() waits for it', () => {
+  it('does not block the close', async () => {
+    const { runtime, calls, hooks } = setup();
+    const executeGate = deferred();
+    hooks.execute = async () => {
+      await executeGate.promise;
+      throw new Error('statement failed');
+    };
+
+    const pending = runtime.execute(affectedCountPlan());
+    const closing = runtime.close();
+    await delay(5);
+    executeGate.resolve();
+
+    await expect(pending).rejects.toThrow('statement failed');
+    await closing;
+    expect(calls).toEqual(['close', 'closed']);
+  });
+});
+
+describe('runtime-scope work started after close()', () => {
+  function closedWithSlowDriverClose() {
+    const spy = createMiddlewareSpy();
+    const stub = setup({ middleware: [spy.middleware] });
+    const closeGate = deferred();
+    stub.hooks.close = () => closeGate.promise;
+    const closing = stub.runtime.close();
+    return { ...stub, ...spy, closing, closeGate };
+  }
+
+  it('execute() is refused at once, without driver calls or middleware', async () => {
+    const { runtime, driver, beforeExecute, closeGate, closing } = closedWithSlowDriverClose();
+
+    expect(await outcomeWithin(runtime.execute(affectedCountPlan()))).toMatchObject(closedError);
+    expect(driver.execute).not.toHaveBeenCalled();
+    expect(beforeExecute).not.toHaveBeenCalled();
+    closeGate.resolve();
+    await closing;
+  });
+
+  it('query().toArray() is refused at once, without driver calls or middleware', async () => {
+    const { runtime, driver, beforeQuery, closeGate, closing } = closedWithSlowDriverClose();
+
+    expect(await outcomeWithin(runtime.query(rowsPlan()).toArray())).toMatchObject(closedError);
+    expect(driver.query).not.toHaveBeenCalled();
+    expect(beforeQuery).not.toHaveBeenCalled();
+    closeGate.resolve();
+    await closing;
+  });
+
+  it('a prepared query and a prepared execute are refused at once, without driver calls or middleware', async () => {
+    const spy = createMiddlewareSpy();
+    const { runtime, driver, hooks } = setup({ middleware: [spy.middleware] });
+    const preparedQuery = await runtime.prepare({}, () => rowsPlan());
+    const preparedExecute = await runtime.prepare({}, () => affectedCountPlan());
+    const closeGate = deferred();
+    hooks.close = () => closeGate.promise;
+    const closing = runtime.close();
+
+    expect(await outcomeWithin(preparedQuery.query(runtime, {}).toArray())).toMatchObject(
+      closedError,
     );
-    await expect(runtime.execute(affectedCountPlan())).resolves.toEqual({ affectedRows: 1 });
+    expect(await outcomeWithin(preparedExecute.execute(runtime, {}))).toMatchObject(closedError);
+    expect(driver.query).not.toHaveBeenCalled();
+    expect(driver.execute).not.toHaveBeenCalled();
+    expect(spy.beforeQuery).not.toHaveBeenCalled();
+    expect(spy.beforeExecute).not.toHaveBeenCalled();
+    closeGate.resolve();
+    await closing;
+  });
 
-    expect(readMarker).toHaveBeenCalledTimes(2);
-    expect(driver.execute).toHaveBeenCalledTimes(1);
+  it('connection() is refused at once and acquires nothing', async () => {
+    const { runtime, driver, closeGate, closing } = closedWithSlowDriverClose();
+
+    expect(await outcomeWithin(runtime.connection())).toMatchObject(closedError);
+    expect(driver.acquireConnection).not.toHaveBeenCalled();
+    closeGate.resolve();
+    await closing;
   });
 });

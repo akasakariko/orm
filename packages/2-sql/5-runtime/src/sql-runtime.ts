@@ -51,6 +51,7 @@ import { deriveParamMetadata, encodeParams, encodeParamsWithMetadata } from './c
 import { validateCodecRegistryCompleteness } from './codecs/validation';
 import { computeSqlContentHash } from './content-hash';
 import { computeSqlFingerprint } from './fingerprint';
+import { InFlightOperations } from './in-flight-operations';
 import { lowerSqlPlan } from './lower-sql-plan';
 import { runBeforeCompileChain } from './middleware/before-compile-chain';
 import type { SqlMiddleware, SqlMiddlewareContext } from './middleware/sql-middleware';
@@ -107,9 +108,13 @@ export interface RuntimeOptions<TContract extends Contract<SqlStorage> = Contrac
 export interface Runtime extends RuntimeQueryable {
   connection(): Promise<RuntimeConnection>;
   telemetry(): RuntimeTelemetryEvent | null;
+  /**
+   * Waits for runtime-scope work that started before it, then closes the driver. Runtime-scope
+   * work that starts after it is refused with `DRIVER.NOT_CONNECTED`. Work on a held connection
+   * or transaction is not refused; the driver's close waits for its release. Every call returns
+   * the same promise.
+   */
   close(): Promise<void>;
-  /** The promise `close()` returned, once it has been called; `null` before. */
-  readonly closing: Promise<void> | null;
 
   /**
    * Build a reusable {@link PreparedStatement}. Throws
@@ -158,11 +163,12 @@ function isExecutionPlan(plan: SqlExecutionPlan | SqlQueryPlan): plan is SqlExec
 // v8 ignore next 2
 const noopLogSink = (): void => {};
 const noopLog: Log = { info: noopLogSink, warn: noopLogSink, error: noopLogSink };
+const noopEnd = (): void => {};
 
 function runtimeClosedError(): StructuredError {
   return structuredError('DRIVER.NOT_CONNECTED', 'Runtime is closed', {
-    why: 'close() was called on this runtime, or the await using scope that held it has ended.',
-    fix: 'Await every query, transaction and prepared statement before the runtime closes. A query returned without await from an await using scope, or started after close(), runs after the connection has closed.',
+    why: 'close() was called on this runtime, or on the client or connection that owns it. An await using scope calls close() when it ends.',
+    fix: 'Await every query, transaction and prepared statement before close(). The usual cause is a query returned without await from an await using scope.',
   });
 }
 
@@ -186,6 +192,9 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
   // Memoises the first verifyMarker() call so concurrent first queries share one read and one log line, and is cleared when that read fails so the next query retries it. `null` until the first query; pre-resolved when `verifyMarkerOption === false`.
   private verifyMarkerPromise: Promise<void> | null;
   private closePromise: Promise<void> | null;
+  readonly #inFlight = new InFlightOperations();
+  // Connections and transactions this runtime handed out. Their marker read runs on themselves, so it works while close() waits for their release. Other queryables, such as a subclass's raw connection, read the marker through the driver.
+  readonly #heldQueryables = new WeakSet<SqlQueryable>();
   readonly #preparedStatementHandles = new WeakMap<object, unknown>();
   private codecRegistryValidated: boolean;
   private _telemetry: RuntimeTelemetryEvent | null;
@@ -382,16 +391,13 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
 
   private async setupDriverExecution(
     exec: SqlExecutionPlan,
-    scope: RuntimeMiddlewareContext['scope'],
+    queryable: SqlQueryable,
   ): Promise<void> {
-    const closing = this.closePromise;
-    if (closing !== null) {
-      await this.rejectAfterClose(closing, scope);
-    }
     this.familyAdapter.validatePlan(exec, this.contract);
     this._telemetry = null;
     if (this.verifyMarkerPromise === null) {
-      this.verifyMarkerPromise = this.verifyMarker().catch((error: unknown) => {
+      const markerQueryable = this.#heldQueryables.has(queryable) ? queryable : this.driver;
+      this.verifyMarkerPromise = this.verifyMarker(markerQueryable).catch((error: unknown) => {
         this.verifyMarkerPromise = null;
         throw error;
       });
@@ -399,20 +405,15 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
     await this.verifyMarkerPromise;
   }
 
-  /**
-   * Rejects an operation that reaches the driver after `close()` has started. An operation
-   * that holds no connection rejects only once the close has settled, so the rejection cannot
-   * precede the caller's handler. An operation on a held connection rejects at once, because
-   * the driver's close waits for that connection to be released.
-   */
-  private async rejectAfterClose(
-    closing: Promise<void>,
-    scope: RuntimeMiddlewareContext['scope'],
-  ): Promise<never> {
-    if (scope === 'runtime') {
-      await closing.catch(() => undefined);
+  // Called synchronously when an operation enters the runtime. Throws once close() has been called for runtime-scope work, otherwise returns the callback that ends its in-flight record. Work on a held connection or transaction is neither refused nor tracked: the driver's close waits for its release.
+  private beginOperation(scope: RuntimeExecuteOptions['scope']): () => void {
+    if (scope !== undefined && scope !== 'runtime') {
+      return noopEnd;
     }
-    throw runtimeClosedError();
+    if (this.closePromise !== null) {
+      throw runtimeClosedError();
+    }
+    return this.#inFlight.begin();
   }
 
   protected getListDecoder(): ListDecoder {
@@ -425,8 +426,10 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
     driverCall: () => AsyncIterable<Record<string, unknown>>,
     codecCtx: SqlCodecCallContext,
     execMiddlewareCtx: RuntimeMiddlewareContext,
+    queryable: SqlQueryable,
+    onDriverAnswered: () => void,
   ): AsyncGenerator<Row, void, unknown> {
-    await this.setupDriverExecution(exec, execMiddlewareCtx.scope);
+    await this.setupDriverExecution(exec, queryable);
 
     const startedAt = Date.now();
     let outcome: TelemetryOutcome | null = null;
@@ -448,7 +451,7 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
       try {
         while (true) {
           checkAborted(codecCtx, 'stream');
-          const next = await iterator.next();
+          const next = await iterator.next().finally(onDriverAnswered);
           if (next.done) {
             break;
           }
@@ -558,15 +561,22 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
     const self = this;
     const { codecCtx, middlewareCtx } = this.createQueryContexts(options);
     const generator = async function* (): AsyncGenerator<Row, void, unknown> {
-      const exec = await self.prepareQueryExecution(plan, codecCtx, middlewareCtx);
-      const decodeContext = buildDecodeContext(exec.ast, self.contractCodecs);
-      yield* self.streamRows<Row>(
-        exec,
-        decodeContext,
-        () => queryable.query<Record<string, unknown>>({ sql: exec.sql, params: exec.params }),
-        codecCtx,
-        middlewareCtx,
-      );
+      const endOperation = self.beginOperation(options?.scope);
+      try {
+        const exec = await self.prepareQueryExecution(plan, codecCtx, middlewareCtx);
+        const decodeContext = buildDecodeContext(exec.ast, self.contractCodecs);
+        yield* self.streamRows<Row>(
+          exec,
+          decodeContext,
+          () => queryable.query<Record<string, unknown>>({ sql: exec.sql, params: exec.params }),
+          codecCtx,
+          middlewareCtx,
+          queryable,
+          endOperation,
+        );
+      } finally {
+        endOperation();
+      }
     };
 
     return new AsyncIterableResult(generator());
@@ -578,11 +588,24 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
     queryable: SqlQueryable,
     options?: RuntimeExecuteOptions,
   ): Promise<SqlStatementStats> {
+    const endOperation = this.beginOperation(options?.scope);
+    try {
+      return await this.executeStatisticsInFlight(plan, queryable, options);
+    } finally {
+      endOperation();
+    }
+  }
+
+  private async executeStatisticsInFlight(
+    plan: SqlExecutionPlan<unknown> | SqlQueryPlan<unknown>,
+    queryable: SqlQueryable,
+    options: RuntimeExecuteOptions | undefined,
+  ): Promise<SqlStatementStats> {
     this.ensureCodecRegistryValidated();
 
     const { codecCtx, middlewareCtx } = this.createQueryContexts(options);
     const exec = await this.prepareExecuteExecution(plan, codecCtx, middlewareCtx);
-    await this.setupDriverExecution(exec, middlewareCtx.scope);
+    await this.setupDriverExecution(exec, queryable);
     checkAborted(codecCtx, 'stream');
 
     const startedAt = Date.now();
@@ -671,62 +694,87 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
     const { codecCtx, middlewareCtx: execMiddlewareCtx } = this.createQueryContexts(options);
 
     const generator = async function* (): AsyncGenerator<Row, void, unknown> {
-      checkAborted(codecCtx, 'stream');
-
-      // Resolve slot order to unencoded values so `beforeExecute`'s
-      // mutator sees pre-encode user values for prepared-param slots
-      // and can override them before encode runs.
-      const preEncodeValues = resolvePreparedSlotValues(ps, userParams);
-      const preEncodeExec: SqlExecutionPlan = {
-        sql: ps.sql,
-        params: preEncodeValues,
-        ast: ps.ast,
-        meta: ps.meta,
-      };
-
-      const mutator: SqlParamRefMutatorInternal = createSqlParamRefMutator(preEncodeExec);
-      await runBeforeQueryChain<SqlExecutionPlan, SqlParamRefMutator>(
-        preEncodeExec,
-        self.middleware,
-        execMiddlewareCtx,
-        mutator,
-      );
-
-      const encodedParams = await encodeParamsWithMetadata(
-        mutator.currentParams(),
-        ps.paramMetadata,
-        codecCtx,
-        self.contractCodecs,
-      );
-      const exec: SqlExecutionPlan = {
-        sql: ps.sql,
-        params: encodedParams,
-        ast: ps.ast,
-        meta: ps.meta,
-      };
-
-      const handles = self.#preparedStatementHandles;
-      const request: PreparedExecuteRequest = {
-        sql: exec.sql,
-        params: exec.params,
-        preparedStatementHandle: {
-          get: () => handles.get(ps),
-          set: (value) => {
-            handles.set(ps, value);
-          },
-        },
-      };
-
-      yield* self.streamRows<Row>(
-        exec,
-        ps.decodeContext,
-        () => queryable.query<Record<string, unknown>>(request),
-        codecCtx,
-        execMiddlewareCtx,
-      );
+      const endOperation = self.beginOperation(options?.scope);
+      try {
+        yield* self.streamPreparedRows<P, Row>(
+          ps,
+          userParams,
+          queryable,
+          codecCtx,
+          execMiddlewareCtx,
+          endOperation,
+        );
+      } finally {
+        endOperation();
+      }
     };
 
     return new AsyncIterableResult(generator());
+  }
+
+  private async *streamPreparedRows<P, Row>(
+    ps: PreparedStatementImpl<P, Row>,
+    userParams: unknown,
+    queryable: SqlQueryable,
+    codecCtx: SqlCodecCallContext,
+    execMiddlewareCtx: SqlMiddlewareContext,
+    onDriverAnswered: () => void,
+  ): AsyncGenerator<Row, void, unknown> {
+    checkAborted(codecCtx, 'stream');
+
+    // Resolve slot order to unencoded values so `beforeExecute`'s
+    // mutator sees pre-encode user values for prepared-param slots
+    // and can override them before encode runs.
+    const preEncodeValues = resolvePreparedSlotValues(ps, userParams);
+    const preEncodeExec: SqlExecutionPlan = {
+      sql: ps.sql,
+      params: preEncodeValues,
+      ast: ps.ast,
+      meta: ps.meta,
+    };
+
+    const mutator: SqlParamRefMutatorInternal = createSqlParamRefMutator(preEncodeExec);
+    await runBeforeQueryChain<SqlExecutionPlan, SqlParamRefMutator>(
+      preEncodeExec,
+      this.middleware,
+      execMiddlewareCtx,
+      mutator,
+    );
+
+    const encodedParams = await encodeParamsWithMetadata(
+      mutator.currentParams(),
+      ps.paramMetadata,
+      codecCtx,
+      this.contractCodecs,
+    );
+    const exec: SqlExecutionPlan = {
+      sql: ps.sql,
+      params: encodedParams,
+      ast: ps.ast,
+      meta: ps.meta,
+    };
+
+    const handles = this.#preparedStatementHandles;
+    const request: PreparedExecuteRequest = {
+      sql: exec.sql,
+      params: exec.params,
+      preparedStatementHandle: {
+        get: () => handles.get(ps),
+        set: (value) => {
+          handles.set(ps, value);
+        },
+      },
+    };
+
+    yield* this.streamRows<Row>(
+      exec,
+      ps.decodeContext,
+      () => queryable.query<Record<string, unknown>>(request),
+      codecCtx,
+      execMiddlewareCtx,
+      queryable,
+      onDriverAnswered,
+    );
   }
 
   /** Execute a prepared statement's statistics against a caller-supplied queryable through the full pipeline. */
@@ -735,6 +783,20 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
     userParams: unknown,
     queryable: SqlQueryable,
     options?: RuntimeExecuteOptions,
+  ): Promise<SqlStatementStats> {
+    const endOperation = this.beginOperation(options?.scope);
+    try {
+      return await this.runPreparedExecuteInFlight(ps, userParams, queryable, options);
+    } finally {
+      endOperation();
+    }
+  }
+
+  private async runPreparedExecuteInFlight<P>(
+    ps: PreparedExecutionImpl<P>,
+    userParams: unknown,
+    queryable: SqlQueryable,
+    options: RuntimeExecuteOptions | undefined,
   ): Promise<SqlStatementStats> {
     this.ensureCodecRegistryValidated();
 
@@ -771,7 +833,7 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
       ast: ps.ast,
       meta: ps.meta,
     };
-    await this.setupDriverExecution(exec, middlewareCtx.scope);
+    await this.setupDriverExecution(exec, queryable);
     checkAborted(codecCtx, 'stream');
 
     const handles = this.#preparedStatementHandles;
@@ -801,11 +863,14 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
   }
 
   async connection(): Promise<RuntimeConnection> {
-    const closing = this.closePromise;
-    if (closing !== null) {
-      await this.rejectAfterClose(closing, 'runtime');
+    const endOperation = this.beginOperation('runtime');
+    let driverConn: SqlConnection;
+    try {
+      driverConn = await this.driver.acquireConnection();
+    } finally {
+      endOperation();
     }
-    const driverConn = await this.driver.acquireConnection();
+    this.#heldQueryables.add(driverConn);
     const self = this;
 
     const wrappedConnection: RuntimeConnection &
@@ -875,6 +940,7 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
   }
 
   private wrapTransaction(driverTx: SqlTransaction): RuntimeTransaction {
+    this.#heldQueryables.add(driverTx);
     const self = this;
     const wrappedTransaction: RuntimeTransaction &
       PreparedStatementQueryTarget &
@@ -941,13 +1007,14 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
     return this._telemetry;
   }
 
-  get closing(): Promise<void> | null {
+  close(): Promise<void> {
+    this.closePromise ??= this.drainThenCloseDriver();
     return this.closePromise;
   }
 
-  close(): Promise<void> {
-    this.closePromise ??= this.driver.close();
-    return this.closePromise;
+  private async drainThenCloseDriver(): Promise<void> {
+    await this.#inFlight.drained();
+    await this.driver.close();
   }
 
   private ensureCodecRegistryValidated(): void {
@@ -957,8 +1024,8 @@ export abstract class SqlRuntimeBase<TContract extends Contract<SqlStorage> = Co
     }
   }
 
-  private async verifyMarker(): Promise<void> {
-    const readResult = await this.familyAdapter.markerReader.readMarker(this.driver);
+  private async verifyMarker(queryable: SqlQueryable): Promise<void> {
+    const readResult = await this.familyAdapter.markerReader.readMarker(queryable);
 
     const expectedStorageHash = this.contract.storage.storageHash;
     const expectedProfileHash = this.contract.profileHash ?? null;
@@ -1018,28 +1085,9 @@ function transactionClosedError(): Error {
 /** Minimal structural type `withTransaction` depends on — anything that can open a connection. */
 export interface ConnectionProvider {
   connection(): Promise<RuntimeConnection>;
-  /** The promise `close()` returned, once it has been called; `null` or absent before. */
-  readonly closing?: Promise<void> | null;
 }
 
-/**
- * Runs `fn` inside a transaction on a connection from `runtime`. When the transaction fails
- * after `runtime.close()` has started, the rejection is delivered once the close has settled,
- * after the connection has been released, so it cannot precede the caller's handler.
- */
 export async function withTransaction<R>(
-  runtime: ConnectionProvider,
-  fn: (tx: TransactionContext) => PromiseLike<R>,
-): Promise<R> {
-  try {
-    return await runTransaction(runtime, fn);
-  } catch (error) {
-    await runtime.closing?.catch(() => undefined);
-    throw error;
-  }
-}
-
-async function runTransaction<R>(
   runtime: ConnectionProvider,
   fn: (tx: TransactionContext) => PromiseLike<R>,
 ): Promise<R> {
