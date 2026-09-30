@@ -68,7 +68,6 @@
             },
             "fields": {
               "severity": {
-                "many": false,
                 "nullable": false,
                 "type": {
                   "codecId": "pg/text@1",
@@ -76,7 +75,6 @@
                 }
               },
               "stepsToRepro": {
-                "many": false,
                 "nullable": true,
                 "type": {
                   "codecId": "pg/text@1",
@@ -105,7 +103,6 @@
             },
             "fields": {
               "priority": {
-                "many": false,
                 "nullable": false,
                 "type": {
                   "codecId": "pg/text@1",
@@ -113,7 +110,6 @@
                 }
               },
               "targetRelease": {
-                "many": false,
                 "nullable": true,
                 "type": {
                   "codecId": "pg/text@1",
@@ -138,7 +134,6 @@
           "Post": {
             "fields": {
               "createdAt": {
-                "many": false,
                 "nullable": false,
                 "type": {
                   "codecId": "pg/timestamptz-temporal@1",
@@ -146,7 +141,6 @@
                 }
               },
               "embedding": {
-                "many": false,
                 "nullable": true,
                 "type": {
                   "codecId": "pg/vector@1",
@@ -154,7 +148,6 @@
                 }
               },
               "expiresAt": {
-                "many": false,
                 "nullable": false,
                 "type": {
                   "codecId": "pg/timestamptz-temporal@1",
@@ -162,7 +155,6 @@
                 }
               },
               "id": {
-                "many": false,
                 "nullable": false,
                 "type": {
                   "codecId": "pg/uuid@1",
@@ -170,7 +162,6 @@
                 }
               },
               "impressionCount": {
-                "many": false,
                 "nullable": true,
                 "type": {
                   "codecId": "pg/int8@1",
@@ -178,7 +169,6 @@
                 }
               },
               "priority": {
-                "many": false,
                 "nullable": false,
                 "type": {
                   "codecId": "pg/int4@1",
@@ -192,7 +182,6 @@
                 }
               },
               "reachScore": {
-                "many": false,
                 "nullable": true,
                 "type": {
                   "codecId": "pg/unboundedint@1",
@@ -200,7 +189,6 @@
                 }
               },
               "title": {
-                "many": false,
                 "nullable": false,
                 "type": {
                   "codecId": "pg/text@1",
@@ -208,7 +196,6 @@
                 }
               },
               "userId": {
-                "many": false,
                 "nullable": false,
                 "type": {
                   "codecId": "pg/uuid@1",
@@ -216,7 +203,6 @@
                 }
               },
               "viewCount": {
-                "many": false,
                 "nullable": true,
                 "type": {
                   "codecId": "pg/int8number@1",
@@ -310,7 +296,6 @@
           "PostTag": {
             "fields": {
               "postId": {
-                "many": false,
                 "nullable": false,
                 "type": {
                   "codecId": "pg/uuid@1",
@@ -318,7 +303,6 @@
                 }
               },
               "tagId": {
-                "many": false,
                 "nullable": false,
                 "type": {
                   "codecId": "pg/uuid@1",
@@ -376,7 +360,6 @@
           "Tag": {
             "fields": {
               "id": {
-                "many": false,
                 "nullable": false,
                 "type": {
                   "codecId": "pg/uuid@1",
@@ -384,7 +367,6 @@
                 }
               },
               "label": {
-                "many": false,
                 "nullable": false,
                 "type": {
                   "codecId": "pg/text@1",
@@ -441,7 +423,6 @@
             },
             "fields": {
               "createdAt": {
-                "many": false,
                 "nullable": false,
                 "type": {
                   "codecId": "pg/timestamptz-temporal@1",
@@ -449,7 +430,6 @@
                 }
               },
               "description": {
-                "many": false,
                 "nullable": true,
                 "type": {
                   "codecId": "pg/text@1",
@@ -457,7 +437,6 @@
                 }
               },
               "id": {
-                "many": false,
                 "nullable": false,
                 "type": {
                   "codecId": "pg/uuid@1",
@@ -465,7 +444,6 @@
                 }
               },
               "status": {
-                "many": false,
                 "nullable": false,
                 "type": {
                   "codecId": "pg/text@1",
@@ -473,7 +451,6 @@
                 }
               },
               "title": {
-                "many": false,
                 "nullable": false,
                 "type": {
                   "codecId": "pg/text@1",
@@ -481,7 +458,6 @@
                 }
               },
               "type": {
-                "many": false,
                 "nullable": false,
                 "type": {
                   "codecId": "pg/text@1",
@@ -489,7 +465,6 @@
                 }
               },
               "userId": {
-                "many": false,
                 "nullable": false,
                 "type": {
                   "codecId": "pg/uuid@1",
@@ -554,7 +529,6 @@
           "User": {
             "fields": {
               "address": {
-                "many": false,
                 "nullable": true,
                 "type": {
                   "kind": "valueObject",
@@ -562,7 +536,6 @@
                 }
               },
               "createdAt": {
-                "many": false,
                 "nullable": false,
                 "type": {
                   "codecId": "pg/timestamptz-temporal@1",
@@ -570,7 +543,6 @@
                 }
               },
               "displayName": {
-                "many": false,
                 "nullable": false,
                 "type": {
                   "codecId": "pg/text@1",
@@ -578,7 +550,6 @@
                 }
               },
               "email": {
-                "many": false,
                 "nullable": false,
                 "type": {
                   "codecId": "pg/text@1",
@@ -586,7 +557,6 @@
                 }
               },
               "id": {
-                "many": false,
                 "nullable": false,
                 "type": {
                   "codecId": "pg/uuid@1",
@@ -594,7 +564,6 @@
                 }
               },
               "kind": {
-                "many": false,
                 "nullable": false,
                 "type": {
                   "codecId": "pg/text@1",
@@ -670,7 +639,6 @@
           "Address": {
             "fields": {
               "city": {
-                "many": false,
                 "nullable": false,
                 "type": {
                   "codecId": "pg/text@1",
@@ -678,7 +646,6 @@
                 }
               },
               "country": {
-                "many": false,
                 "nullable": false,
                 "type": {
                   "codecId": "pg/text@1",
@@ -686,7 +653,6 @@
                 }
               },
               "street": {
-                "many": false,
                 "nullable": false,
                 "type": {
                   "codecId": "pg/text@1",
@@ -694,7 +660,6 @@
                 }
               },
               "zip": {
-                "many": false,
                 "nullable": true,
                 "type": {
                   "codecId": "pg/text@1",

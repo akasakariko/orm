@@ -16,7 +16,6 @@
           "TestModel": {
             "fields": {
               "d10_0": {
-                "many": false,
                 "nullable": true,
                 "type": {
                   "codecId": "pg/numeric@1",
@@ -24,7 +23,6 @@
                 }
               },
               "d20_10": {
-                "many": false,
                 "nullable": true,
                 "type": {
                   "codecId": "pg/numeric@1",
@@ -32,7 +30,6 @@
                 }
               },
               "d38_30": {
-                "many": false,
                 "nullable": true,
                 "type": {
                   "codecId": "pg/numeric@1",
@@ -40,7 +37,6 @@
                 }
               },
               "id": {
-                "many": false,
                 "nullable": false,
                 "type": {
                   "codecId": "pg/text@1",
