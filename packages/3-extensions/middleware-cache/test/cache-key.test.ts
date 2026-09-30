@@ -10,7 +10,7 @@ describe('cache key resolution', () => {
       const store = spyStore();
       const mw = createCacheMiddleware({ store });
       const exec = makeExec('select 1', {
-        cache: cacheAnnotation({ ttl: 60_000 }),
+        cache: cacheAnnotation({}),
       });
       const ctx = makeCtx();
 
@@ -24,14 +24,18 @@ describe('cache key resolution', () => {
       );
 
       expect(store.getSpy).toHaveBeenCalledWith('key:select 1');
-      expect(store.setSpy).toHaveBeenCalledWith('key:select 1', expect.anything(), 60_000);
+      expect(store.setSpy).toHaveBeenCalledWith({
+        key: 'key:select 1',
+        meta: undefined,
+        entry: expect.anything(),
+      });
     });
 
     it('invokes ctx.contentHash when no per-query key annotation is supplied', async () => {
       const store = spyStore();
       const mw = createCacheMiddleware({ store });
       const exec = makeExec('select 1', {
-        cache: cacheAnnotation({ ttl: 60_000 }),
+        cache: cacheAnnotation({}),
       });
       const contentHash = vi.fn(async (e: ExecutionPlan) => `derived:${(e as MockExec).statement}`);
       const ctx = makeCtx({ contentHash });
@@ -45,12 +49,12 @@ describe('cache key resolution', () => {
 
     it('produces distinct cache entries for two execs with distinct contentHash returns', async () => {
       const store = spyStore();
-      const mw = createCacheMiddleware({ store, clock: () => 0 });
+      const mw = createCacheMiddleware({ store });
       const execA = makeExec('A', {
-        cache: cacheAnnotation({ ttl: 60_000 }),
+        cache: cacheAnnotation({}),
       });
       const execB = makeExec('B', {
-        cache: cacheAnnotation({ ttl: 60_000 }),
+        cache: cacheAnnotation({}),
       });
       const ctx = makeCtx();
 
@@ -83,7 +87,7 @@ describe('cache key resolution', () => {
       const store = spyStore();
       const mw = createCacheMiddleware({ store });
       const exec = makeExec('select 1', {
-        cache: cacheAnnotation({ ttl: 60_000, key: 'custom-key' }),
+        cache: cacheAnnotation({ key: 'custom-key' }),
       });
       const ctx = makeCtx();
 
@@ -96,14 +100,18 @@ describe('cache key resolution', () => {
       );
 
       expect(store.getSpy).toHaveBeenCalledWith('custom-key');
-      expect(store.setSpy).toHaveBeenCalledWith('custom-key', expect.anything(), 60_000);
+      expect(store.setSpy).toHaveBeenCalledWith({
+        key: 'custom-key',
+        meta: undefined,
+        entry: expect.anything(),
+      });
     });
 
     it('does not invoke ctx.contentHash when an override key is supplied', async () => {
       const store = spyStore();
       const mw = createCacheMiddleware({ store });
       const exec = makeExec('select 1', {
-        cache: cacheAnnotation({ ttl: 60_000, key: 'custom-key' }),
+        cache: cacheAnnotation({ key: 'custom-key' }),
       });
       const contentHash = vi.fn(async () => 'should-not-be-used');
       const ctx = makeCtx({ contentHash });
@@ -120,7 +128,7 @@ describe('cache key resolution', () => {
       // mangle, hash, or otherwise transform it.
       const userKey = 'tenant=acme|user=alice|page=42';
       const exec = makeExec('select 1', {
-        cache: cacheAnnotation({ ttl: 60_000, key: userKey }),
+        cache: cacheAnnotation({ key: userKey }),
       });
       const ctx = makeCtx();
 
@@ -139,12 +147,11 @@ describe('cache key resolution', () => {
       const store = spyStore();
       store.inner.set('shared-key', {
         rows: [{ id: 'pre-cached' }],
-        storedAt: 0,
       });
 
       const mw = createCacheMiddleware({ store });
       const exec = makeExec('select anything', {
-        cache: cacheAnnotation({ ttl: 60_000, key: 'shared-key' }),
+        cache: cacheAnnotation({ key: 'shared-key' }),
       });
       const ctx = makeCtx();
 
@@ -176,7 +183,7 @@ describe('cache key resolution', () => {
           target: 'mongo',
           targetFamily: 'mongo',
           annotations: {
-            cache: cacheAnnotation({ ttl: 60_000 }),
+            cache: cacheAnnotation({}),
           },
         },
       });
@@ -205,9 +212,9 @@ describe('cache key resolution', () => {
 
     it('two distinct contentHash returns produce two distinct cache entries', async () => {
       const store = spyStore();
-      const mw = createCacheMiddleware({ store, clock: () => 0 });
+      const mw = createCacheMiddleware({ store });
       const exec = makeExec('shared statement', {
-        cache: cacheAnnotation({ ttl: 60_000 }),
+        cache: cacheAnnotation({}),
       });
 
       // Same exec object but two different ctx.contentHash returns —

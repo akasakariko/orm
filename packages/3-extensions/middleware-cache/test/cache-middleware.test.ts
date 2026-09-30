@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { cacheAnnotation } from '../src/cache-annotation';
 import { createCacheMiddleware } from '../src/cache-middleware';
 import { createInMemoryCacheStore } from '../src/cache-store';
-import { drain, makeCtx, makeExec, spyStore } from './middleware-fixtures';
+import { drain, makeCtx, makeExec, runMiss, spyStore } from './middleware-fixtures';
 
 describe('createCacheMiddleware — opt-in semantics', () => {
   it('passes through (no store interaction) when the plan has no cache annotation', async () => {
@@ -17,11 +17,11 @@ describe('createCacheMiddleware — opt-in semantics', () => {
     expect(store.setSpy).not.toHaveBeenCalled();
   });
 
-  it('passes through when the cache annotation has skip: true', async () => {
+  it('passes through when the cache annotation has bypass: true', async () => {
     const store = spyStore();
     const mw = createCacheMiddleware({ store });
     const exec = makeExec('select 1', {
-      cache: cacheAnnotation({ ttl: 60_000, skip: true }),
+      cache: cacheAnnotation({ bypass: true }),
     });
 
     const result = await mw.interceptQuery!(exec, makeCtx());
@@ -30,17 +30,15 @@ describe('createCacheMiddleware — opt-in semantics', () => {
     expect(store.setSpy).not.toHaveBeenCalled();
   });
 
-  it('passes through when no ttl is supplied (presence alone is not sufficient)', async () => {
+  it('caches an annotation with no options', async () => {
     const store = spyStore();
     const mw = createCacheMiddleware({ store });
-    const exec = makeExec('select 1', {
-      cache: cacheAnnotation({}),
-    });
+    const exec = makeExec('select 1', { cache: cacheAnnotation({}) });
 
-    const result = await mw.interceptQuery!(exec, makeCtx());
-    expect(result).toBeUndefined();
-    expect(store.getSpy).not.toHaveBeenCalled();
-    expect(store.setSpy).not.toHaveBeenCalled();
+    await runMiss(mw, exec, makeCtx(), [{ id: 1 }]);
+
+    expect(store.getSpy).toHaveBeenCalledWith('key:select 1');
+    expect(store.setSpy).toHaveBeenCalledTimes(1);
   });
 
   it('does not store rows for an un-annotated plan even when onRow/afterQuery fire (driver path)', async () => {
@@ -66,12 +64,11 @@ describe('createCacheMiddleware — hit path', () => {
     const store = spyStore();
     store.inner.set('key:select 1', {
       rows: [{ id: 1 }, { id: 2 }],
-      storedAt: 0,
     });
 
     const mw = createCacheMiddleware({ store });
     const exec = makeExec('select 1', {
-      cache: cacheAnnotation({ ttl: 60_000 }),
+      cache: cacheAnnotation({}),
     });
 
     const result = await mw.interceptQuery!(exec, makeCtx());
@@ -84,10 +81,10 @@ describe('createCacheMiddleware — hit path', () => {
 
   it('logs a middleware.cache.hit event via ctx.log.debug on a hit', async () => {
     const store = spyStore();
-    store.inner.set('key:select 1', { rows: [{ id: 1 }], storedAt: 0 });
+    store.inner.set('key:select 1', { rows: [{ id: 1 }] });
     const mw = createCacheMiddleware({ store });
     const exec = makeExec('select 1', {
-      cache: cacheAnnotation({ ttl: 60_000 }),
+      cache: cacheAnnotation({}),
     });
     const debug = vi.fn();
     const ctx = makeCtx({
@@ -101,10 +98,10 @@ describe('createCacheMiddleware — hit path', () => {
 
   it('does not call store.set on the hit path', async () => {
     const store = spyStore();
-    store.inner.set('key:select 1', { rows: [{ id: 1 }], storedAt: 0 });
+    store.inner.set('key:select 1', { rows: [{ id: 1 }] });
     const mw = createCacheMiddleware({ store });
     const exec = makeExec('select 1', {
-      cache: cacheAnnotation({ ttl: 60_000 }),
+      cache: cacheAnnotation({}),
     });
     const ctx = makeCtx();
 
@@ -124,10 +121,10 @@ describe('createCacheMiddleware — hit path', () => {
 
   it('survives the absence of ctx.log.debug (it is optional on RuntimeLog)', async () => {
     const store = spyStore();
-    store.inner.set('key:select 1', { rows: [{ id: 1 }], storedAt: 0 });
+    store.inner.set('key:select 1', { rows: [{ id: 1 }] });
     const mw = createCacheMiddleware({ store });
     const exec = makeExec('select 1', {
-      cache: cacheAnnotation({ ttl: 60_000 }),
+      cache: cacheAnnotation({}),
     });
     const ctx = makeCtx({
       // No debug field.
@@ -143,7 +140,7 @@ describe('createCacheMiddleware — miss path', () => {
     const store = spyStore();
     const mw = createCacheMiddleware({ store });
     const exec = makeExec('select 1', {
-      cache: cacheAnnotation({ ttl: 60_000 }),
+      cache: cacheAnnotation({}),
     });
 
     const result = await mw.interceptQuery!(exec, makeCtx());
@@ -154,7 +151,7 @@ describe('createCacheMiddleware — miss path', () => {
     const store = spyStore();
     const mw = createCacheMiddleware({ store });
     const exec = makeExec('select 1', {
-      cache: cacheAnnotation({ ttl: 60_000 }),
+      cache: cacheAnnotation({}),
     });
     const debug = vi.fn();
     const ctx = makeCtx({
@@ -168,9 +165,9 @@ describe('createCacheMiddleware — miss path', () => {
 
   it('buffers rows via onRow and commits on a successful afterQuery (source: driver)', async () => {
     const store = spyStore();
-    const mw = createCacheMiddleware({ store, clock: () => 1_234 });
+    const mw = createCacheMiddleware({ store });
     const exec = makeExec('select 1', {
-      cache: cacheAnnotation({ ttl: 60_000 }),
+      cache: cacheAnnotation({}),
     });
     const ctx = makeCtx();
 
@@ -184,21 +181,18 @@ describe('createCacheMiddleware — miss path', () => {
     );
 
     expect(store.setSpy).toHaveBeenCalledTimes(1);
-    expect(store.setSpy).toHaveBeenCalledWith(
-      'key:select 1',
-      expect.objectContaining({
-        rows: [{ id: 1 }, { id: 2 }],
-        storedAt: 1_234,
-      }),
-      60_000,
-    );
+    expect(store.setSpy).toHaveBeenCalledWith({
+      key: 'key:select 1',
+      meta: undefined,
+      entry: { rows: [{ id: 1 }, { id: 2 }] },
+    });
   });
 
   it('does not commit when completed = false (driver threw mid-stream)', async () => {
     const store = spyStore();
     const mw = createCacheMiddleware({ store });
     const exec = makeExec('select 1', {
-      cache: cacheAnnotation({ ttl: 60_000 }),
+      cache: cacheAnnotation({}),
     });
     const ctx = makeCtx();
 
@@ -220,7 +214,7 @@ describe('createCacheMiddleware — miss path', () => {
     const store = spyStore();
     const mw = createCacheMiddleware({ store });
     const exec = makeExec('select 1', {
-      cache: cacheAnnotation({ ttl: 60_000 }),
+      cache: cacheAnnotation({}),
     });
     const ctx = makeCtx();
 
@@ -243,7 +237,7 @@ describe('createCacheMiddleware — miss path', () => {
     const store = spyStore();
     const mw = createCacheMiddleware({ store });
     const exec = makeExec('select 1', {
-      cache: cacheAnnotation({ ttl: 60_000 }),
+      cache: cacheAnnotation({}),
     });
     const ctx = makeCtx();
 
@@ -269,12 +263,12 @@ describe('createCacheMiddleware — miss path', () => {
 
   it('keeps per-execution buffers isolated across two concurrent execs', async () => {
     const store = spyStore();
-    const mw = createCacheMiddleware({ store, clock: () => 0 });
+    const mw = createCacheMiddleware({ store });
     const execA = makeExec('select A', {
-      cache: cacheAnnotation({ ttl: 60_000 }),
+      cache: cacheAnnotation({}),
     });
     const execB = makeExec('select B', {
-      cache: cacheAnnotation({ ttl: 60_000 }),
+      cache: cacheAnnotation({}),
     });
     const ctx = makeCtx();
 
@@ -309,10 +303,10 @@ describe('createCacheMiddleware — miss path', () => {
 describe('createCacheMiddleware — scope guard', () => {
   it('passes through when ctx.scope = "connection"', async () => {
     const store = spyStore();
-    store.inner.set('key:select 1', { rows: [{ id: 1 }], storedAt: 0 });
+    store.inner.set('key:select 1', { rows: [{ id: 1 }] });
     const mw = createCacheMiddleware({ store });
     const exec = makeExec('select 1', {
-      cache: cacheAnnotation({ ttl: 60_000 }),
+      cache: cacheAnnotation({}),
     });
 
     const result = await mw.interceptQuery!(exec, makeCtx({ scope: 'connection' }));
@@ -322,10 +316,10 @@ describe('createCacheMiddleware — scope guard', () => {
 
   it('passes through when ctx.scope = "transaction"', async () => {
     const store = spyStore();
-    store.inner.set('key:select 1', { rows: [{ id: 1 }], storedAt: 0 });
+    store.inner.set('key:select 1', { rows: [{ id: 1 }] });
     const mw = createCacheMiddleware({ store });
     const exec = makeExec('select 1', {
-      cache: cacheAnnotation({ ttl: 60_000 }),
+      cache: cacheAnnotation({}),
     });
 
     const result = await mw.interceptQuery!(exec, makeCtx({ scope: 'transaction' }));
@@ -337,7 +331,7 @@ describe('createCacheMiddleware — scope guard', () => {
     const store = spyStore();
     const mw = createCacheMiddleware({ store });
     const exec = makeExec('select 1', {
-      cache: cacheAnnotation({ ttl: 60_000 }),
+      cache: cacheAnnotation({}),
     });
     const ctx = makeCtx({ scope: 'connection' });
 
@@ -383,9 +377,9 @@ describe('createCacheMiddleware — middleware shape', () => {
   });
 
   it('roundtrips a miss-then-hit through the default in-memory store', async () => {
-    const mw = createCacheMiddleware({ maxEntries: 10 });
+    const mw = createCacheMiddleware();
     const exec = makeExec('select roundtrip', {
-      cache: cacheAnnotation({ ttl: 60_000 }),
+      cache: cacheAnnotation({}),
     });
     const ctx = makeCtx();
 
@@ -412,7 +406,7 @@ describe('createCacheMiddleware — middleware shape', () => {
     const store = createInMemoryCacheStore({ maxEntries: 5 });
     const mw = createCacheMiddleware({ store });
     const exec = makeExec('select custom', {
-      cache: cacheAnnotation({ ttl: 60_000 }),
+      cache: cacheAnnotation({}),
     });
     const ctx = makeCtx();
 

@@ -997,10 +997,6 @@ A client (`postgres()`, `sqlite()`, `mongo()`) received a connection binding who
 
 A client (`postgres()`, `sqlite()`, `mongo()`) was asked to connect with no binding at all (no connection string, no environment fallback). Payload: `expected`.
 
-### RUNTIME.CACHE_STORE_CANNOT_INVALIDATE
-
-The cache middleware's `invalidate({ keys })` was called with a `CacheStore` that has no `delete` method. The check runs before anything is deleted, so a refused call leaves the store unchanged, and reads in flight still store their rows. Supply a store that implements `delete`, or call `invalidate(run)` with a function that deletes through the store's own methods. Payload: `missingMethod` (`delete`).
-
 ### RUNTIME.CACHE_STORE_META_UNSUPPORTED
 
 The default in-memory cache store was asked to remove entries by `meta`, through `invalidate({ meta })` on a cache middleware that uses it. That store ignores `meta` when it stores an entry, so it cannot tell which entries match. The call removes nothing, including the keys passed with it. Invalidate by `keys`, or supply a `CacheStore` that indexes `meta` in `set` and honours it in `unset`.

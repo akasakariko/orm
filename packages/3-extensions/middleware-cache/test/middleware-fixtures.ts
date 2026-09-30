@@ -38,29 +38,19 @@ export function makeCtx(overrides?: Partial<RuntimeMiddlewareContext>): RuntimeM
   };
 }
 
-export function spyStore(): Required<CacheStore> & {
-  readonly getSpy: ReturnType<typeof vi.fn>;
-  readonly setSpy: ReturnType<typeof vi.fn>;
-  readonly deleteSpy: ReturnType<typeof vi.fn>;
-  readonly inner: Map<string, CachedEntry>;
-} {
+export function spyStore() {
   const inner = new Map<string, CachedEntry>();
   const getSpy = vi.fn(async (key: string) => inner.get(key));
-  const setSpy = vi.fn(async (key: string, entry: CachedEntry, _ttlMs: number) => {
-    inner.set(key, entry);
+  const setSpy = vi.fn(async (target: Parameters<CacheStore['set']>[0]) => {
+    inner.set(target.key, target.entry);
   });
-  const deleteSpy = vi.fn(async (key: string) => {
-    inner.delete(key);
+  const unsetSpy = vi.fn(async (target: Parameters<CacheStore['unset']>[0]) => {
+    for (const key of target.keys ?? []) {
+      inner.delete(key);
+    }
   });
-  return {
-    get: getSpy,
-    set: setSpy,
-    delete: deleteSpy,
-    getSpy,
-    setSpy,
-    deleteSpy,
-    inner,
-  };
+  const store: CacheStore = { get: getSpy, set: setSpy, unset: unsetSpy };
+  return { ...store, getSpy, setSpy, unsetSpy, inner };
 }
 
 export async function drain<T>(iter: AsyncIterable<T>): Promise<T[]> {

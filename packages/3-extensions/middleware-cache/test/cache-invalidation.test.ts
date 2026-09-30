@@ -2,11 +2,15 @@ import type { RuntimeMiddlewareContext } from '@internal/framework-components/ru
 import { describe, expect, it, vi } from 'vitest';
 import { cacheAnnotation } from '../src/cache-annotation';
 import { type CacheMiddleware, createCacheMiddleware } from '../src/cache-middleware';
-import type { CachedEntry, CacheStore } from '../src/cache-store';
+import type { CacheStore } from '../src/cache-store';
 import { type MockExec, makeCtx, makeExec, runMiss, spyStore } from './middleware-fixtures';
 
-async function startMiss(mw: CacheMiddleware, ctx: RuntimeMiddlewareContext): Promise<MockExec> {
-  const exec = makeExec('select 1', { cache: cacheAnnotation({ ttl: 60_000 }) });
+async function startMiss(
+  mw: CacheMiddleware,
+  ctx: RuntimeMiddlewareContext,
+  key: string,
+): Promise<MockExec> {
+  const exec = makeExec(`select ${key}`, { cache: cacheAnnotation({ key }) });
   await mw.interceptQuery?.(exec, ctx);
   await mw.onRow?.({ id: 1 }, exec, ctx);
   return exec;
@@ -24,22 +28,59 @@ async function finishMiss(
   );
 }
 
-describe('createCacheMiddleware — invalidate({ keys })', () => {
-  it('deletes each key from the store in order', async () => {
+function debugCtx() {
+  const debug = vi.fn();
+  const ctx = makeCtx({ log: { info: () => {}, warn: () => {}, error: () => {}, debug } });
+  return { ctx, debug };
+}
+
+const skipped = (key: string) => ({
+  event: 'middleware.cache.store-skipped',
+  middleware: 'cache',
+  key,
+});
+
+describe('createCacheMiddleware — invalidate', () => {
+  it('unsets keys in one store call', async () => {
     const store = spyStore();
     const mw = createCacheMiddleware({ store });
 
     await mw.invalidate({ keys: ['user-1', 'user-2'] });
 
-    expect(store.deleteSpy.mock.calls).toEqual([['user-1'], ['user-2']]);
+    expect(store.unsetSpy.mock.calls).toEqual([[{ keys: ['user-1', 'user-2'], meta: undefined }]]);
+  });
+
+  it('unsets by meta in one store call', async () => {
+    const store = spyStore();
+    const mw = createCacheMiddleware({ store });
+
+    await mw.invalidate({ meta: { tags: ['users'] } });
+
+    expect(store.unsetSpy.mock.calls).toEqual([[{ keys: undefined, meta: { tags: ['users'] } }]]);
+  });
+
+  it('unsets keys and meta together in one store call', async () => {
+    const store = spyStore();
+    const mw = createCacheMiddleware({ store });
+
+    await mw.invalidate({ keys: ['user-1'], meta: { tags: ['users'] } });
+
+    expect(store.unsetSpy.mock.calls).toEqual([[{ keys: ['user-1'], meta: { tags: ['users'] } }]]);
+  });
+
+  it('treats meta: null as a meta to unset', async () => {
+    const store = spyStore();
+    const mw = createCacheMiddleware({ store });
+
+    await mw.invalidate({ meta: null });
+
+    expect(store.unsetSpy.mock.calls).toEqual([[{ keys: undefined, meta: null }]]);
   });
 
   it('removes a cached entry so the next read misses', async () => {
     const store = spyStore();
     const mw = createCacheMiddleware({ store });
-    const exec = makeExec('select 1', {
-      cache: cacheAnnotation({ ttl: 60_000, key: 'user-1' }),
-    });
+    const exec = makeExec('select 1', { cache: cacheAnnotation({ key: 'user-1' }) });
     const ctx = makeCtx();
     await runMiss(mw, exec, ctx, [{ id: 1 }]);
     expect(await mw.interceptQuery?.(exec, ctx)).toBeDefined();
@@ -49,202 +90,109 @@ describe('createCacheMiddleware — invalidate({ keys })', () => {
     expect(await mw.interceptQuery?.(exec, ctx)).toBeUndefined();
   });
 
-  it('calls delete with the store as this', async () => {
-    class MapStore implements CacheStore {
-      readonly entries = new Map<string, CachedEntry>();
-      async get(key: string) {
-        return this.entries.get(key);
-      }
-      async set(key: string, entry: CachedEntry) {
-        this.entries.set(key, entry);
-      }
-      async delete(key: string) {
-        this.entries.delete(key);
-      }
-    }
-    const store = new MapStore();
-    store.entries.set('user-1', { rows: [], storedAt: 0 });
-    store.entries.set('user-2', { rows: [], storedAt: 0 });
-    store.entries.set('post-1', { rows: [], storedAt: 0 });
-    const mw = createCacheMiddleware({ store });
-
-    await mw.invalidate({ keys: ['user-1', 'user-2'] });
-
-    expect([...store.entries.keys()]).toEqual(['post-1']);
-  });
-
-  it('does not call the store or move the counter when keys are empty', async () => {
+  it.each([
+    ['an empty target', {}],
+    ['empty keys', { keys: [] }],
+  ])('does nothing for %s, so an overlapping miss still stores', async (_label, target) => {
     const store = spyStore();
     const mw = createCacheMiddleware({ store });
     const ctx = makeCtx();
-    const exec = await startMiss(mw, ctx);
+    const exec = await startMiss(mw, ctx, 'user-1');
 
-    await mw.invalidate({ keys: [] });
+    await mw.invalidate(target);
     await finishMiss(mw, exec, ctx);
 
-    expect(store.deleteSpy).not.toHaveBeenCalled();
+    expect(store.unsetSpy).not.toHaveBeenCalled();
     expect(store.setSpy).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps earlier deletions and propagates the error when a delete rejects partway', async () => {
+  it('propagates a store error, and an overlapping miss for the key still skips its store', async () => {
     const store = spyStore();
-    const failure = new Error('delete failed');
-    store.deleteSpy.mockImplementation(async (key: string) => {
-      if (key === 'b') {
-        throw failure;
-      }
-      store.inner.delete(key);
-    });
-    for (const key of ['a', 'b', 'c']) {
-      store.inner.set(key, { rows: [], storedAt: 0 });
-    }
+    const failure = new Error('unset failed');
+    store.unsetSpy.mockRejectedValueOnce(failure);
     const mw = createCacheMiddleware({ store });
     const ctx = makeCtx();
-    const exec = await startMiss(mw, ctx);
+    const exec = await startMiss(mw, ctx, 'user-1');
 
-    await expect(mw.invalidate({ keys: ['a', 'b', 'c'] })).rejects.toBe(failure);
+    await expect(mw.invalidate({ keys: ['user-1'] })).rejects.toBe(failure);
     await finishMiss(mw, exec, ctx);
 
-    expect(store.deleteSpy.mock.calls).toEqual([['a'], ['b']]);
-    expect([...store.inner.keys()]).toEqual(['b', 'c']);
     expect(store.setSpy).not.toHaveBeenCalled();
   });
 
-  describe('against a store without delete', () => {
-    it('refuses with RUNTIME.CACHE_STORE_CANNOT_INVALIDATE', async () => {
-      const store = spyStore();
-      const mw = createCacheMiddleware({ store: { get: store.get, set: store.set } });
+  it('rejects a meta target against the default store', async () => {
+    const mw = createCacheMiddleware();
 
-      await expect(mw.invalidate({ keys: ['user-1'] })).rejects.toMatchObject({
-        code: 'RUNTIME.CACHE_STORE_CANNOT_INVALIDATE',
-        meta: { missingMethod: 'delete' },
-      });
-    });
-
-    it('refuses before moving the counter, so an in-flight miss still stores its rows', async () => {
-      const store = spyStore();
-      const mw = createCacheMiddleware({ store: { get: store.get, set: store.set } });
-      const ctx = makeCtx();
-      const exec = await startMiss(mw, ctx);
-
-      await expect(mw.invalidate({ keys: ['user-1'] })).rejects.toMatchObject({
-        code: 'RUNTIME.CACHE_STORE_CANNOT_INVALIDATE',
-      });
-      await finishMiss(mw, exec, ctx);
-
-      expect(store.setSpy).toHaveBeenCalledTimes(1);
-    });
-
-    it('refuses empty keys too', async () => {
-      const store = spyStore();
-      const mw = createCacheMiddleware({ store: { get: store.get, set: store.set } });
-
-      await expect(mw.invalidate({ keys: [] })).rejects.toMatchObject({
-        code: 'RUNTIME.CACHE_STORE_CANNOT_INVALIDATE',
-        meta: { missingMethod: 'delete' },
-      });
+    await expect(mw.invalidate({ meta: { tags: ['users'] } })).rejects.toMatchObject({
+      code: 'RUNTIME.CACHE_STORE_META_UNSUPPORTED',
     });
   });
 });
 
-describe('createCacheMiddleware — invalidate(run)', () => {
-  it('calls the function once with no arguments', async () => {
-    const mw = createCacheMiddleware({ store: spyStore() });
-    const run = vi.fn(async () => {});
-
-    await mw.invalidate(run);
-
-    expect(run.mock.calls).toEqual([[]]);
-  });
-
-  it('moves the counter before the function runs', async () => {
-    const store = spyStore();
-    const mw = createCacheMiddleware({ store });
-    const debug = vi.fn();
-    const ctx = makeCtx({ log: { info: () => {}, warn: () => {}, error: () => {}, debug } });
-    const exec = await startMiss(mw, ctx);
-
-    await mw.invalidate(() => finishMiss(mw, exec, ctx));
-
-    expect(store.setSpy).not.toHaveBeenCalled();
-    expect(debug).toHaveBeenCalledWith({
-      event: 'middleware.cache.store-skipped',
-      middleware: 'cache',
-      key: 'key:select 1',
-    });
-  });
-
-  it('propagates a rejection after moving the counter, so an overlapping miss skips its store', async () => {
+describe('createCacheMiddleware — misses overlapping invalidate', () => {
+  it('stores a miss for key A that overlapped invalidate({ keys: ["B"] })', async () => {
     const store = spyStore();
     const mw = createCacheMiddleware({ store });
     const ctx = makeCtx();
-    const exec = await startMiss(mw, ctx);
-    const failure = new Error('run failed');
+    const exec = await startMiss(mw, ctx, 'A');
 
-    await expect(mw.invalidate(() => Promise.reject(failure))).rejects.toBe(failure);
+    await mw.invalidate({ keys: ['B'] });
     await finishMiss(mw, exec, ctx);
 
-    expect(store.setSpy).not.toHaveBeenCalled();
-  });
-
-  it('turns a synchronous throw into a rejection after moving the counter', async () => {
-    const store = spyStore();
-    const mw = createCacheMiddleware({ store });
-    const ctx = makeCtx();
-    const exec = await startMiss(mw, ctx);
-    const failure = new Error('run failed');
-
-    await expect(
-      mw.invalidate(() => {
-        throw failure;
-      }),
-    ).rejects.toBe(failure);
-    await finishMiss(mw, exec, ctx);
-
-    expect(store.setSpy).not.toHaveBeenCalled();
-  });
-
-  it('runs against a store without delete', async () => {
-    const store = spyStore();
-    const mw = createCacheMiddleware({ store: { get: store.get, set: store.set } });
-    const run = vi.fn(async () => {});
-
-    await mw.invalidate(run);
-
-    expect(run).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe('createCacheMiddleware — reads overlapping invalidate', () => {
-  it('does not store rows from a miss that an invalidate overlapped', async () => {
-    const store = spyStore();
-    const mw = createCacheMiddleware({ store });
-    const debug = vi.fn();
-    const ctx = makeCtx({
-      log: { info: () => {}, warn: () => {}, error: () => {}, debug },
-    });
-    const exec = await startMiss(mw, ctx);
-
-    await mw.invalidate({ keys: ['user-1'] });
-    await finishMiss(mw, exec, ctx);
-
-    expect(store.setSpy).not.toHaveBeenCalled();
-    expect(debug).toHaveBeenCalledWith({
-      event: 'middleware.cache.store-skipped',
-      middleware: 'cache',
-      key: 'key:select 1',
+    expect(store.setSpy).toHaveBeenCalledWith({
+      key: 'A',
+      meta: undefined,
+      entry: { rows: [{ id: 1 }] },
     });
   });
 
-  it('stores rows from a miss that started after an invalidate', async () => {
+  it('skips storing a miss for key A that overlapped invalidate({ keys: ["A"] })', async () => {
     const store = spyStore();
     const mw = createCacheMiddleware({ store });
-    const exec = makeExec('select 1', { cache: cacheAnnotation({ ttl: 60_000 }) });
+    const { ctx, debug } = debugCtx();
+    const exec = await startMiss(mw, ctx, 'A');
+
+    await mw.invalidate({ keys: ['A'] });
+    await finishMiss(mw, exec, ctx);
+
+    expect(store.setSpy).not.toHaveBeenCalled();
+    expect(debug).toHaveBeenCalledWith(skipped('A'));
+  });
+
+  it('skips storing a miss for key A that overlapped invalidate({ meta })', async () => {
+    const store = spyStore();
+    const mw = createCacheMiddleware({ store });
+    const { ctx, debug } = debugCtx();
+    const exec = await startMiss(mw, ctx, 'A');
+
+    await mw.invalidate({ meta: { tags: ['users'] } });
+    await finishMiss(mw, exec, ctx);
+
+    expect(store.setSpy).not.toHaveBeenCalled();
+    expect(debug).toHaveBeenCalledWith(skipped('A'));
+  });
+
+  it('skips storing the second of two misses for key A when A is invalidated after the first stored', async () => {
+    const store = spyStore();
+    const mw = createCacheMiddleware({ store });
+    const ctx = makeCtx();
+    const first = await startMiss(mw, ctx, 'A');
+    const second = await startMiss(mw, ctx, 'A');
+
+    await finishMiss(mw, first, ctx);
+    await mw.invalidate({ keys: ['A'] });
+    await finishMiss(mw, second, ctx);
+
+    expect(store.setSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('stores a miss that started after an invalidate', async () => {
+    const store = spyStore();
+    const mw = createCacheMiddleware({ store });
     const ctx = makeCtx();
 
-    await mw.invalidate({ keys: ['user-1'] });
-    await mw.invalidate(async () => {});
-    await runMiss(mw, exec, ctx, [{ id: 1 }]);
+    await mw.invalidate({ keys: ['A'], meta: { tags: ['users'] } });
+    await runMiss(mw, makeExec('select A', { cache: cacheAnnotation({ key: 'A' }) }), ctx, []);
 
     expect(store.setSpy).toHaveBeenCalledTimes(1);
   });
@@ -252,65 +200,61 @@ describe('createCacheMiddleware — reads overlapping invalidate', () => {
   describe('when an invalidate runs while store.set is in flight', () => {
     function pendingSetStore() {
       const events: string[] = [];
-      let resolveSet: () => void = () => {};
+      let landSet: () => void = () => {};
       const store = {
         get: vi.fn(async () => undefined),
         set: vi.fn(
-          (key: string) =>
+          (target: Parameters<CacheStore['set']>[0]) =>
             new Promise<void>((resolve) => {
-              resolveSet = () => {
-                events.push(`set:${key}`);
+              landSet = () => {
+                events.push(`set:${target.key}`);
                 resolve();
               };
             }),
         ),
-        delete: vi.fn(async (key: string) => {
-          events.push(`delete:${key}`);
+        unset: vi.fn(async (target: Parameters<CacheStore['unset']>[0]) => {
+          events.push(`unset:${target.keys?.join(',') ?? ''}`);
         }),
-      };
-      return { store, events, resolveSet: () => resolveSet() };
+      } satisfies CacheStore;
+      return { store, events, landSet: () => landSet() };
     }
 
-    it('deletes the key again after the set lands, and logs the skip', async () => {
-      const { store, events, resolveSet } = pendingSetStore();
+    it.each([
+      ['keys', { keys: ['A'] }, 'unset:A'],
+      ['meta', { meta: { tags: ['users'] } }, 'unset:'],
+    ])(
+      'unsets the key after the set lands (invalidated by %s), and logs the skip',
+      async (_label, target, invalidation) => {
+        const { store, events, landSet } = pendingSetStore();
+        const mw = createCacheMiddleware({ store });
+        const { ctx, debug } = debugCtx();
+        const exec = await startMiss(mw, ctx, 'A');
+
+        const finishing = finishMiss(mw, exec, ctx);
+        await vi.waitFor(() => expect(store.set).toHaveBeenCalledTimes(1));
+        await mw.invalidate(target);
+        landSet();
+        await finishing;
+
+        expect(events).toEqual([invalidation, 'set:A', 'unset:A']);
+        expect(store.unset).toHaveBeenLastCalledWith({ keys: ['A'], meta: undefined });
+        expect(debug).toHaveBeenCalledWith(skipped('A'));
+      },
+    );
+
+    it('does not unset after the set when only another key was invalidated', async () => {
+      const { store, events, landSet } = pendingSetStore();
       const mw = createCacheMiddleware({ store });
-      const debug = vi.fn();
-      const ctx = makeCtx({ log: { info: () => {}, warn: () => {}, error: () => {}, debug } });
-      const exec = await startMiss(mw, ctx);
+      const ctx = makeCtx();
+      const exec = await startMiss(mw, ctx, 'A');
 
       const finishing = finishMiss(mw, exec, ctx);
       await vi.waitFor(() => expect(store.set).toHaveBeenCalledTimes(1));
-      await mw.invalidate({ keys: ['key:select 1'] });
-      resolveSet();
+      await mw.invalidate({ keys: ['B'] });
+      landSet();
       await finishing;
 
-      expect(events).toEqual(['delete:key:select 1', 'set:key:select 1', 'delete:key:select 1']);
-      expect(debug).toHaveBeenCalledWith({
-        event: 'middleware.cache.store-skipped',
-        middleware: 'cache',
-        key: 'key:select 1',
-      });
-    });
-
-    it('only logs the skip when the store has no delete', async () => {
-      const { store, resolveSet } = pendingSetStore();
-      const mw = createCacheMiddleware({ store: { get: store.get, set: store.set } });
-      const debug = vi.fn();
-      const ctx = makeCtx({ log: { info: () => {}, warn: () => {}, error: () => {}, debug } });
-      const exec = await startMiss(mw, ctx);
-
-      const finishing = finishMiss(mw, exec, ctx);
-      await vi.waitFor(() => expect(store.set).toHaveBeenCalledTimes(1));
-      await mw.invalidate(async () => {});
-      resolveSet();
-      await finishing;
-
-      expect(store.delete).not.toHaveBeenCalled();
-      expect(debug).toHaveBeenCalledWith({
-        event: 'middleware.cache.store-skipped',
-        middleware: 'cache',
-        key: 'key:select 1',
-      });
+      expect(events).toEqual(['unset:B', 'set:A']);
     });
   });
 });
