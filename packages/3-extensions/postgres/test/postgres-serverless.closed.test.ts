@@ -230,23 +230,37 @@ const sameTickReturns: ReadonlyArray<[...UnawaitedReturn, unknown]> = [
     [[], []],
   ],
   ['db.orm.public.User.create(data)', (db) => db.orm.public.User.create(ada), adaRow],
+];
+
+const tickLaterReturns: ReadonlyArray<[...UnawaitedReturn, string]> = [
   [
     "db.orm.public.User.include('posts').create(data)",
     (db) => db.orm.public.User.include('posts').create(ada),
-    { ...adaRow, posts: [] },
+    'INSERT INTO "public"."users"',
+  ],
+  [
+    'a nested create',
+    (db) =>
+      db.orm.public.User.create({
+        ...ada,
+        posts: (post) => post.create([{ id: 1, title: 'Hello', views: 0 }]),
+      }),
+    'COMMIT',
   ],
 ];
 
-describe('a promise returned without await whose first query starts in the tick of the close', () => {
+// The database answers on a later tick, as a real socket does, so a second query that waits for the first answer starts after refusal has begun.
+describe('a promise returned without await, with a database that answers on a later tick', () => {
   const serverless = postgresServerless<Contract>({ contractJson: fixtureContract });
 
   async function returnWithoutAwait(run: (db: Connection) => PromiseLike<unknown>) {
     await using db = await serverless.connect({ url });
+    recorded.answerOnATimer = true;
     return run(db);
   }
 
   it.each(sameTickReturns)(
-    '%s is admitted, so the close waits for it and it resolves',
+    '%s starts its only query in the tick of the close, so the close waits for it and it resolves',
     async (_name, run, value) => {
       const outcome = await settled(returnWithoutAwait(run));
 
@@ -255,28 +269,16 @@ describe('a promise returned without await whose first query starts in the tick 
       expectOneEndAndNoQueryAfterIt();
     },
   );
-});
 
-describe('a nested create returned without await', () => {
-  // The database answers on a later tick, as a real socket does, so the reload after the commit starts after refusal has begun.
-  it('commits its rows, then its reload starts a tick later and is refused as an ordinary unawaited failure', async () => {
-    const serverless = postgresServerless<Contract>({ contractJson: fixtureContract });
+  it.each(tickLaterReturns)(
+    '%s runs its first statements, then its reload starts a tick later and is refused as an ordinary unawaited failure',
+    async (_name, run, statementThatRan) => {
+      const outcome = await settled(returnWithoutAwait(run));
 
-    async function returnWithoutAwait() {
-      await using db = await serverless.connect({ url });
-      await db.orm.public.User.first();
-      recorded.answerOnATimer = true;
-      return db.orm.public.User.create({
-        ...ada,
-        posts: (post) => post.create([{ id: 1, title: 'Hello', views: 0 }]),
-      });
-    }
-
-    const outcome = await settled(returnWithoutAwait());
-
-    expect(outcome).toEqual({ rejected: expect.objectContaining(runtimeClosedError) });
-    expect(unhandledRejections).toEqual([expect.objectContaining(runtimeClosedError)]);
-    expect(recorded.statements).toContain('COMMIT');
-    expectOneEndAndNoQueryAfterIt();
-  });
+      expect(outcome).toEqual({ rejected: expect.objectContaining(runtimeClosedError) });
+      expect(unhandledRejections).toEqual([expect.objectContaining(runtimeClosedError)]);
+      expect(recorded.statements.some((text) => text.startsWith(statementThatRan))).toBe(true);
+      expectOneEndAndNoQueryAfterIt();
+    },
+  );
 });

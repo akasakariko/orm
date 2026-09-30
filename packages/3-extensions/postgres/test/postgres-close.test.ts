@@ -214,12 +214,14 @@ describe('a promise pending when close() is called on a client that owns its poo
     unhandledRejections.push(reason);
   };
   const calls: string[] = [];
+  const statements: string[] = [];
 
   beforeEach(() => {
     unhandledRejections.length = 0;
     calls.length = 0;
+    statements.length = 0;
     process.on('unhandledRejection', recordUnhandledRejection);
-    // Like pg-pool, end() waits for every checked-out client to be released, then settles on a
+    // Each statement is answered on a later tick, as a real socket does. Like pg-pool, end() waits for every checked-out client to be released, then settles on a
     // later macrotask, as the real socket close does.
     let checkedOut = 0;
     let wakeEnd: (() => void) | undefined;
@@ -238,7 +240,9 @@ describe('a promise pending when close() is called on a client that owns its poo
         return {
           query: vi.fn(async (arg: unknown) => {
             calls.push('query');
+            await new Promise((resolve) => setTimeout(resolve, 0));
             const text = typeof arg === 'string' ? arg : String((arg as { text: unknown }).text);
+            statements.push(text);
             const ada = { id: 1, email: 'ada@example.com', name: 'Ada', invited_by_id: null };
             if (text.startsWith('INSERT INTO "public"."users"')) return { rows: [ada] };
             if (text.includes('json_agg')) return { rows: [{ ...ada, posts: [] }] };
@@ -270,13 +274,14 @@ describe('a promise pending when close() is called on a client that owns its poo
   async function closeWhilePending(
     db: Awaited<ReturnType<typeof connectedClient>>,
     pending: PromiseLike<unknown>,
+    expectedUnhandledRejections: readonly unknown[] = [],
   ) {
     await db.close();
     const outcome = await pending.then(
       (value) => ({ resolved: value }),
       (reason: unknown) => ({ rejected: reason }),
     );
-    expect.soft(unhandledRejections).toEqual([]);
+    expect.soft(unhandledRejections).toEqual(expectedUnhandledRejections);
     expect(poolEndSpy()).toHaveBeenCalledTimes(1);
     expect(calls.slice(calls.indexOf('end'))).toEqual(['end']);
     return outcome;
@@ -341,17 +346,17 @@ describe('a promise pending when close() is called on a client that owns its poo
     });
   });
 
-  it("an ORM include('posts').create() started in the tick of the close is admitted and resolves", async () => {
+  it("an ORM include('posts').create() in the tick of the close runs its insert, then its reload a tick later is refused by the runtime", async () => {
     const db = await connectedClient();
 
     const outcome = await closeWhilePending(
       db,
       db.orm.public.User.include('posts').create({ email: 'ada@example.com', name: 'Ada' }),
+      [expect.objectContaining(runtimeClosedError)],
     );
 
-    expect(outcome).toEqual({
-      resolved: { id: 1, email: 'ada@example.com', name: 'Ada', invitedById: null, posts: [] },
-    });
+    expect(outcome).toEqual({ rejected: expect.objectContaining(runtimeClosedError) });
+    expect(statements.some((text) => text.startsWith('INSERT INTO "public"."users"'))).toBe(true);
   });
 
   it('close() closes the runtime in the same call, so a lazy read awaited a tick later is refused, as on a connection', async () => {
