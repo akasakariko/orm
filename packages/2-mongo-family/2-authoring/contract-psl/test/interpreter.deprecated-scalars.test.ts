@@ -110,14 +110,15 @@ describe('deprecated Mongo PSL scalar names', () => {
     expect(result.ok).toBe(true);
   });
 
-  it('reports a type that was never a Mongo scalar as unsupported', () => {
+  it('reports a type that was never a Mongo scalar as unresolved', () => {
     const { result } = interpret(schemaWith('Money'));
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.failure.diagnostics).toEqual([
       expect.objectContaining({
-        code: 'PSL_UNSUPPORTED_FIELD_TYPE',
-        message: 'Field "Post.value" type "Money" is not supported in Mongo PSL interpreter',
+        code: 'PSL_UNRESOLVED_REFERENCE',
+        message: 'Cannot find type "Money"',
+        sourceId: 'schema.prisma',
       }),
     ]);
   });

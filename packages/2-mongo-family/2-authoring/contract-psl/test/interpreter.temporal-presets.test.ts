@@ -146,6 +146,23 @@ describe('Mongo PSL temporal presets', () => {
     ]);
   });
 
+  it('preserves an unqualified contributed preset', () => {
+    const result = interpret(
+      `model Post {
+  id ObjectId @id @map("_id")
+  touchedAt timestamp()
+}`,
+      {
+        authoringContributions: { field: { timestamp: temporalCodecPreset(mongoDate) } },
+      },
+    );
+    if (!result.ok) throw new Error(JSON.stringify(result.failure));
+    expect(result.value.domain.namespaces[UNBOUND_NAMESPACE_ID]?.models['Post']?.fields).toEqual({
+      _id: { type: { kind: 'scalar', codecId: 'mongo/objectId@1' }, nullable: false },
+      touchedAt: { type: { kind: 'scalar', codecId: 'mongo/date@1' }, nullable: false },
+    });
+  });
+
   it('omits the execution section when no field uses a preset', () => {
     const result = interpret(`model Post {
   id        ObjectId @id @map("_id")
@@ -158,6 +175,23 @@ describe('Mongo PSL temporal presets', () => {
 });
 
 describe('Mongo PSL temporal preset misuse', () => {
+  it.each(['temporal.createdAt', 'weather.updatedAt'])(
+    'reports unresolved bare %s without a preset diagnostic',
+    (name) => {
+      expect(
+        diagnosticsOf(`model Post {\n  id ObjectId @id @map("_id")\n  value ${name}\n}`).map(
+          ({ code, message, sourceId }) => ({ code, message, sourceId }),
+        ),
+      ).toEqual([
+        {
+          code: 'PSL_UNRESOLVED_REFERENCE',
+          message: `Cannot find type "${name}"`,
+          sourceId: 'schema.prisma',
+        },
+      ]);
+    },
+  );
+
   it('rejects an optional preset field with PSL_PRESET_NOT_OPTIONAL', () => {
     expect(
       diagnosticsOf(`model Post {
