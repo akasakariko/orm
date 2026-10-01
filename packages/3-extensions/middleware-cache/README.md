@@ -115,7 +115,10 @@ const cache = createCacheMiddleware({
 
 ```typescript
 interface CacheStore<TMeta = unknown> {
-  get(key: string): Promise<{ readonly entry: CachedEntry | undefined; readonly version: number }>;
+  get(target: {
+    readonly key: string;
+    readonly meta: TMeta | undefined;
+  }): Promise<{ readonly entry: CachedEntry | undefined; readonly version: number }>;
   set(target: {
     readonly key: string;
     readonly meta: TMeta | undefined;
@@ -135,7 +138,7 @@ interface CachedEntry {
 
 The store keeps a **version** per key: an integer it keeps even for a key that holds no entry. A key never seen has version 0. Only `unset` changes a version.
 
-- `get` returns the live entry under `key`, or `undefined`, and the key's current version.
+- `get` returns the live entry under `key`, or `undefined`, and the key's current version. It also receives the read annotation's `meta`, or `undefined`. A store that matches `meta` folds the versions of whatever `meta` names into the version `get` returns, and does the same when `set` compares, so an `invalidate({ meta })` refuses an overlapping read's `set` even for a key the store has never seen.
 - `set` stores one entry: this key, this `meta`, these rows. With a numeric `version`, it stores only if the key's version is still that number, and returns whether it stored. With `version: undefined`, it stores unconditionally and returns `true`, for example to prefill the cache. `meta` is the read annotation's `meta`, or `undefined`.
 - `unset` removes every entry named in `keys` and every entry that matches `meta`, in one call so the store can batch them, and increments the version of every key it removes or would remove, including keys that hold no entry. `keys` is either `undefined` or non-empty.
 
@@ -146,7 +149,6 @@ The rules a store must follow:
 - **Lifetime and eviction are the store's policy.** A store that wants per-entry lifetimes reads them from `meta`.
 - **A conditional `set` must be atomic against `unset`.** Comparing the version and writing the entry must be one step that no `unset` of the same key can fall between: one synchronous step in memory, or one script (for example a Lua script) on a server. The middleware's guard against overlapping reads relies on this.
 - **Keep a moved version at least as long as a read can take.** A version that falls back to 0 too early lets a read that started before the `unset` store its rows.
-- **A store that matches `meta` has one more duty.** `get` does not see the read's `meta`, so an `invalidate({ meta })` can match a read whose key the store has not indexed yet. Its conditional `set` must also refuse when the `meta` it receives was invalidated after `get` issued `version`. One way is to issue versions from one store-wide sequence and record, per tag, the sequence value of its last `unset`.
 - **`unset` must not run a query through the runtime that uses the middleware.**
 - **Compare `meta` by value.** The `meta` passed to `unset` is a different object from the one passed to `set`. A store shared between processes must serialise `meta` itself.
 
@@ -161,7 +163,7 @@ const SET_IF_VERSION = `
   return 1`;
 
 const redis: CacheStore = {
-  async get(key) {
+  async get({ key }) {
     const [raw, version] = await redisClient.mget(`entry:${key}`, `version:${key}`);
     return {
       entry: raw ? (JSON.parse(raw) as CachedEntry) : undefined,
@@ -239,7 +241,8 @@ interface TagMeta {
 }
 
 class TagStore implements CacheStore<TagMeta> {
-  // get, set({ key, meta, entry, version }), unset({ keys, meta }) with meta: TagMeta | undefined
+  // get({ key, meta }), set({ key, meta, entry, version }) and unset({ keys, meta }),
+  // with meta: TagMeta | undefined
 }
 
 const cache = createCacheMiddleware({ store: new TagStore() }); // CacheMiddleware<TagMeta>

@@ -114,7 +114,7 @@ export function createCacheMiddleware<TMeta = unknown>(
     }
 
     const key = annotation.key ?? (await deriveKey(exec, ctx));
-    const lookup = await store.get(key);
+    const lookup = await store.get({ key, meta: annotation.meta });
     if (lookup.entry !== undefined) {
       ctx.log.debug?.({ event: 'middleware.cache.hit', middleware: 'cache', key });
       return { rows: lookup.entry.rows };

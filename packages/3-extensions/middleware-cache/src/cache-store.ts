@@ -15,6 +15,9 @@ export interface CachedEntry {
  * key never seen, or forgotten, has version 0. Only `unset` changes a version.
  *
  * - `get` returns the live entry under `key`, or `undefined`, and the key's current version.
+ *   `meta` is the read annotation's `meta`, or `undefined`. A store that matches `meta` folds the
+ *   versions of whatever `meta` names into the version it returns, and does the same when `set`
+ *   compares, so an `unset` by `meta` refuses a read's `set` even for a key it has never seen.
  * - `set` stores `entry` under `key`. When `version` is a number, it stores only if the key's
  *   version is still that number, and returns whether it stored. When `version` is `undefined`,
  *   it stores unconditionally and returns `true`. The compare and the write must be atomic with
@@ -35,7 +38,10 @@ export interface CachedEntry {
  * annotation's `meta` has this shape; see `cacheAnnotation`.
  */
 export interface CacheStore<TMeta = unknown> {
-  get(key: string): Promise<{ readonly entry: CachedEntry | undefined; readonly version: number }>;
+  get(target: {
+    readonly key: string;
+    readonly meta: TMeta | undefined;
+  }): Promise<{ readonly entry: CachedEntry | undefined; readonly version: number }>;
   set(target: {
     readonly key: string;
     readonly meta: TMeta | undefined;
@@ -96,8 +102,8 @@ function invalidOption(argument: 'maxEntries' | 'ttlMs', received: number, expec
 /**
  * The default cache store: a least-recently-used map with one lifetime for every entry, local to
  * the process. A key's version is kept for `ttlMs` after the `unset` that moved it, so a key
- * invalidated and never stored again costs one number until then. It ignores `meta` in `set`, and
- * its `unset` rejects any `meta`, including `null`, before changing anything. It throws
+ * invalidated and never stored again costs one number until then. It ignores `meta` in `get` and
+ * `set`, and its `unset` rejects any `meta`, including `null`, before changing anything. It throws
  * `RUNTIME.ARGUMENT_INVALID` for a `maxEntries` or `ttlMs` outside the ranges above.
  */
 export function createInMemoryCacheStore(options?: InMemoryCacheStoreOptions): CacheStore<unknown> {
@@ -141,8 +147,8 @@ export function createInMemoryCacheStore(options?: InMemoryCacheStoreOptions): C
     return record.entry;
   }
 
-  async function get(key: string) {
-    return { entry: liveEntry(key), version: versionOf(key) };
+  async function get(target: { readonly key: string }) {
+    return { entry: liveEntry(target.key), version: versionOf(target.key) };
   }
 
   async function set(target: {

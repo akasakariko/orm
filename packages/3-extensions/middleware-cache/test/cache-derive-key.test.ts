@@ -27,7 +27,7 @@ describe('createCacheMiddleware — deriveKey', () => {
 
     await runMiss(mw, exec, makeCtx(), [{ id: 1 }]);
 
-    expect(store.getSpy).toHaveBeenCalledWith('users:1');
+    expect(store.getSpy).toHaveBeenCalledWith({ key: 'users:1', meta: undefined });
     expect(store.setSpy).toHaveBeenCalledWith({
       key: 'users:1',
       meta: undefined,

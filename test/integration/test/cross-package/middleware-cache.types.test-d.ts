@@ -35,7 +35,7 @@ interface TagMeta {
 }
 
 const tagStore: CacheStore<TagMeta> = {
-  get: async (_key: string) => ({ entry: undefined, version: 0 }),
+  get: async () => ({ entry: undefined, version: 0 }),
   set: async () => true,
   unset: async () => {},
 };

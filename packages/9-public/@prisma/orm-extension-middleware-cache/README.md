@@ -28,7 +28,10 @@ How long an entry lives is the store's policy. The default store, `createInMemor
 
 ```ts
 interface CacheStore<TMeta = unknown> {
-  get(key: string): Promise<{ readonly entry: CachedEntry | undefined; readonly version: number }>;
+  get(target: {
+    readonly key: string;
+    readonly meta: TMeta | undefined;
+  }): Promise<{ readonly entry: CachedEntry | undefined; readonly version: number }>;
   set(target: {
     readonly key: string;
     readonly meta: TMeta | undefined;
@@ -42,7 +45,7 @@ interface CacheStore<TMeta = unknown> {
 }
 ```
 
-The store keeps a version per key, even for a key that holds no entry; a key never seen has version 0. `get` returns the entry and the version. `set` with a numeric `version` stores only if the key's version is still that number, and returns whether it stored; with `version: undefined` it stores unconditionally. `unset` removes every entry named in `keys` (`undefined` or non-empty) and every entry that matches `meta`, increments the version of every key it removes or would remove, and an `unset` by key also drops that key from any `meta` index. A conditional `set` must be atomic against `unset`: one synchronous step in memory, or one script on a server. Keep a moved version at least as long as a read can take; the default store keeps it for `ttlMs`. A store that matches `meta` has one more duty: `get` does not see the read's `meta`, so an `invalidate({ meta })` can match a read whose key the store has not indexed yet. Its conditional `set` must also refuse when the `meta` it receives was invalidated after `get` issued `version`. One way is to issue versions from one store-wide sequence and record, per tag, the sequence value of its last `unset`. The store interprets `meta` on both sides; the middleware never does. A store that cannot act on a `meta` given to `unset` must throw: the default store throws `RUNTIME.CACHE_STORE_META_UNSUPPORTED`. `unset` must not run queries through the runtime that uses the middleware.
+The store keeps a version per key, even for a key that holds no entry; a key never seen has version 0. `get({ key, meta })` returns the entry and the version; `meta` is the read annotation's. A store that matches `meta` folds the versions of whatever `meta` names into the version `get` returns, and does the same when `set` compares, so an `invalidate({ meta })` refuses an overlapping read's `set` even for a key the store has never seen. `set` with a numeric `version` stores only if the key's version is still that number, and returns whether it stored; with `version: undefined` it stores unconditionally. `unset` removes every entry named in `keys` (`undefined` or non-empty) and every entry that matches `meta`, increments the version of every key it removes or would remove, and an `unset` by key also drops that key from any `meta` index. A conditional `set` must be atomic against `unset`: one synchronous step in memory, or one script on a server. Keep a moved version at least as long as a read can take; the default store keeps it for `ttlMs`. The store interprets `meta` in all three methods; the middleware never does. A store that cannot act on a `meta` given to `unset` must throw: the default store throws `RUNTIME.CACHE_STORE_META_UNSUPPORTED`. `unset` must not run queries through the runtime that uses the middleware.
 
 ## Typed meta
 
@@ -54,7 +57,8 @@ interface TagMeta {
 }
 
 class TagStore implements CacheStore<TagMeta> {
-  // get, set({ key, meta, entry, version }), unset({ keys, meta }) with meta: TagMeta | undefined
+  // get({ key, meta }), set({ key, meta, entry, version }) and unset({ keys, meta }),
+  // with meta: TagMeta | undefined
 }
 
 const cache = createCacheMiddleware({ store: new TagStore() }); // CacheMiddleware<TagMeta>

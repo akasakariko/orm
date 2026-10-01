@@ -20,7 +20,7 @@ changes:
       matches:
         - '\bcreateCacheMiddleware\s*\(\s*\{[^}]*\b(maxEntries|clock)\s*:'
   - id: cache-store-object-arguments
-    summary: "A custom CacheStore keeps a version per key. get returns { entry, version }; set({ key, meta, entry, version }) replaces set(key, entry, ttlMs), stores only if the key's version is still version (unconditionally when version is undefined) and returns whether it stored; a new required unset({ keys, meta }) removes entries and increments their keys' versions. CachedEntry has no storedAt."
+    summary: "A custom CacheStore keeps a version per key. get({ key, meta }) replaces get(key) and returns { entry, version }; set({ key, meta, entry, version }) replaces set(key, entry, ttlMs), stores only if the key's version is still version (unconditionally when version is undefined) and returns whether it stored; a new required unset({ keys, meta }) removes entries and increments their keys' versions. CachedEntry has no storedAt."
     detection:
       glob: "**/*.{ts,mts,cts,tsx,js,mjs,cjs,jsx}"
       matches:
@@ -90,7 +90,7 @@ In each call to `createCacheMiddleware(...)`:
 Only for code that implements `CacheStore`, as a typed object, a class, or an object literal passed inline to `createCacheMiddleware({ store: { ... } })`. The types reject the old shape, but an untyped JavaScript store fails only at run time, so check each one.
 
 1. Keep a version per key: an integer, 0 for a key never seen, that only `unset` changes. Keep it even for keys that hold no entry, for at least as long as a read can take.
-2. Change `get(key)` to return `{ entry, version }`: the live entry or `undefined`, and the key's current version.
+2. Change `get(key)` to `get({ key, meta })`, returning `{ entry, version }`: the live entry or `undefined`, and the key's current version. `meta` is the read annotation's `meta`, or `undefined`. A store that matches `meta` folds the versions of whatever `meta` names into the version it returns, and does the same when `set` compares; a store that does not index `meta` ignores it here.
 3. Change `set(key, entry, ttlMs)` to `set({ key, meta, entry, version })`, returning a boolean. When `version` is a number, store only if the key's version still equals it, and return whether you stored. When `version` is `undefined`, store unconditionally and return `true`. The comparison and the write must be atomic against `unset`: one synchronous step in memory, or one server-side script (for example Lua on Redis). `meta` is the read annotation's `meta`, or `undefined`. There is no `ttlMs` argument: the store sets the lifetime itself, as a fixed value or read from `meta`.
 4. Add `unset({ keys, meta })`. It removes the entries stored under `keys` when `keys` is not `undefined`, and increments the version of every one of those keys, whether or not it holds an entry. When `meta` is not `undefined`, it removes the entries whose `meta` matches, compared by value, and increments their versions; a store that does not index `meta` must throw instead of ignoring it.
 5. Stop reading or writing `storedAt` on `CachedEntry`; an entry is `{ rows }`.
@@ -118,7 +118,7 @@ const SET_IF_VERSION = `
   return 1`;
 
 const store: CacheStore = {
-  async get(key) {
+  async get({ key }) {
     const [raw, version] = await redis.mget(`entry:${key}`, `version:${key}`);
     return {
       entry: raw ? (JSON.parse(raw) as CachedEntry) : undefined,

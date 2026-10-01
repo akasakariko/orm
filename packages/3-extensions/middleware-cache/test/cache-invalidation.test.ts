@@ -8,8 +8,9 @@ async function startMiss(
   mw: CacheMiddleware,
   ctx: RuntimeMiddlewareContext,
   key: string,
+  meta?: unknown,
 ): Promise<MockExec> {
-  const exec = makeExec(`select ${key}`, { cache: cacheAnnotation({ key }) });
+  const exec = makeExec(`select ${key}`, { cache: cacheAnnotation({ key, meta }) });
   await mw.interceptQuery?.(exec, ctx);
   await mw.onRow?.({ id: 1 }, exec, ctx);
   return exec;
@@ -175,17 +176,29 @@ describe('createCacheMiddleware — misses overlapping invalidate', () => {
     expect(debug).toHaveBeenCalledWith(skipped('A'));
   });
 
-  it('does not store a miss for key A that overlapped an invalidate({ meta }) the store matches to A', async () => {
-    const store = spyStore({ matchesMeta: (key) => key === 'A' });
+  it('does not store a miss for a key the store has never seen that overlapped an invalidate({ meta }) naming its meta', async () => {
+    const store = spyStore();
     const mw = createCacheMiddleware({ store });
     const { ctx, debug } = debugCtx();
-    const exec = await startMiss(mw, ctx, 'A');
+    const exec = await startMiss(mw, ctx, 'never-seen', { tags: ['users'] });
 
     await mw.invalidate({ meta: { tags: ['users'] } });
     await finishMiss(mw, exec, ctx);
 
-    expect(store.inner.has('A')).toBe(false);
-    expect(debug).toHaveBeenCalledWith(skipped('A'));
+    expect(store.inner.has('never-seen')).toBe(false);
+    expect(debug).toHaveBeenCalledWith(skipped('never-seen'));
+  });
+
+  it('stores a miss whose meta differs from the meta an overlapping invalidate names', async () => {
+    const store = spyStore();
+    const mw = createCacheMiddleware({ store });
+    const ctx = makeCtx();
+    const exec = await startMiss(mw, ctx, 'A', { tags: ['posts'] });
+
+    await mw.invalidate({ meta: { tags: ['users'] } });
+    await finishMiss(mw, exec, ctx);
+
+    expect(store.inner.get('A')).toEqual({ rows: [{ id: 1 }] });
   });
 
   it('stores a miss that started after an invalidate', async () => {

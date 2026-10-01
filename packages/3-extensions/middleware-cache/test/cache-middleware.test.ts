@@ -37,7 +37,7 @@ describe('createCacheMiddleware — opt-in semantics', () => {
 
     await runMiss(mw, exec, makeCtx(), [{ id: 1 }]);
 
-    expect(store.getSpy).toHaveBeenCalledWith('key:select 1');
+    expect(store.getSpy).toHaveBeenCalledWith({ key: 'key:select 1', meta: undefined });
     expect(store.setSpy).toHaveBeenCalledTimes(1);
   });
 
@@ -419,9 +419,9 @@ describe('createCacheMiddleware — middleware shape', () => {
       ctx,
     );
 
-    const stored = (await store.get('key:custom-not-this')).entry;
+    const stored = (await store.get({ key: 'key:custom-not-this', meta: undefined })).entry;
     expect(stored).toBeUndefined();
-    const real = (await store.get('key:select custom')).entry;
+    const real = (await store.get({ key: 'key:select custom', meta: undefined })).entry;
     expect(real?.rows).toEqual([{ id: 7 }]);
   });
 });

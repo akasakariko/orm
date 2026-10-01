@@ -39,40 +39,48 @@ export function makeCtx(overrides?: Partial<RuntimeMiddlewareContext>): RuntimeM
 }
 
 /**
- * A versioned in-memory store for middleware tests. It records a version for every key it is asked
- * about. `unset` bumps the version of every key it names and, when given `meta`, of every recorded
- * key `matchesMeta` accepts, whether or not the key holds an entry.
+ * A versioned in-memory store for middleware tests that matches `meta` by value. It keeps a version
+ * per key and one per `meta` value, and folds the version of the given `meta` into the version
+ * `get` returns and `set` compares, so an `unset` by `meta` refuses an overlapping `set` even for a
+ * key the store has never seen.
  */
-export function spyStore(options?: {
-  readonly matchesMeta?: (key: string, meta: unknown) => boolean;
-}) {
+export function spyStore() {
   const inner = new Map<string, CachedEntry>();
+  const entryMeta = new Map<string, string>();
   const versions = new Map<string, number>();
-  const versionOf = (key: string) => versions.get(key) ?? 0;
-  const bump = (key: string) => {
-    versions.set(key, versionOf(key) + 1);
+  const metaVersions = new Map<string, number>();
+  const metaId = (meta: unknown) => JSON.stringify(meta);
+  const versionOf = (key: string, meta: unknown) =>
+    (versions.get(key) ?? 0) + (meta === undefined ? 0 : (metaVersions.get(metaId(meta)) ?? 0));
+  const removeKey = (key: string) => {
+    versions.set(key, (versions.get(key) ?? 0) + 1);
     inner.delete(key);
+    entryMeta.delete(key);
   };
-  const getSpy = vi.fn(async (key: string) => {
-    versions.set(key, versionOf(key));
-    return { entry: inner.get(key), version: versionOf(key) };
-  });
+  const getSpy = vi.fn(async (target: Parameters<CacheStore['get']>[0]) => ({
+    entry: inner.get(target.key),
+    version: versionOf(target.key, target.meta),
+  }));
   const setSpy = vi.fn(async (target: Parameters<CacheStore['set']>[0]) => {
-    if (target.version !== undefined && target.version !== versionOf(target.key)) {
+    if (target.version !== undefined && target.version !== versionOf(target.key, target.meta)) {
       return false;
     }
     inner.set(target.key, target.entry);
+    if (target.meta !== undefined) {
+      entryMeta.set(target.key, metaId(target.meta));
+    }
     return true;
   });
   const unsetSpy = vi.fn(async (target: Parameters<CacheStore['unset']>[0]) => {
     for (const key of target.keys ?? []) {
-      bump(key);
+      removeKey(key);
     }
-    const matchesMeta = options?.matchesMeta;
-    if (target.meta !== undefined && matchesMeta !== undefined) {
-      for (const key of new Set([...inner.keys(), ...versions.keys()])) {
-        if (matchesMeta(key, target.meta)) {
-          bump(key);
+    if (target.meta !== undefined) {
+      const id = metaId(target.meta);
+      metaVersions.set(id, (metaVersions.get(id) ?? 0) + 1);
+      for (const [key, keyMeta] of [...entryMeta]) {
+        if (keyMeta === id) {
+          removeKey(key);
         }
       }
     }

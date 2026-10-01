@@ -23,7 +23,7 @@ describe('cache key resolution', () => {
         ctx,
       );
 
-      expect(store.getSpy).toHaveBeenCalledWith('key:select 1');
+      expect(store.getSpy).toHaveBeenCalledWith({ key: 'key:select 1', meta: undefined });
       expect(store.setSpy).toHaveBeenCalledWith({
         key: 'key:select 1',
         meta: undefined,
@@ -45,7 +45,7 @@ describe('cache key resolution', () => {
 
       expect(contentHash).toHaveBeenCalledTimes(1);
       expect(contentHash).toHaveBeenCalledWith(exec);
-      expect(store.getSpy).toHaveBeenCalledWith('derived:select 1');
+      expect(store.getSpy).toHaveBeenCalledWith({ key: 'derived:select 1', meta: undefined });
     });
 
     it('produces distinct cache entries for two execs with distinct contentHash returns', async () => {
@@ -100,7 +100,7 @@ describe('cache key resolution', () => {
         ctx,
       );
 
-      expect(store.getSpy).toHaveBeenCalledWith('custom-key');
+      expect(store.getSpy).toHaveBeenCalledWith({ key: 'custom-key', meta: undefined });
       expect(store.setSpy).toHaveBeenCalledWith({
         key: 'custom-key',
         meta: undefined,
