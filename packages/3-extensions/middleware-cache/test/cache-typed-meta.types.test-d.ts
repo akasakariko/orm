@@ -15,14 +15,17 @@ interface TagMeta {
 }
 
 class TagStore implements CacheStore<TagMeta> {
-  async get(_key: string): Promise<CachedEntry | undefined> {
-    return undefined;
+  async get(_key: string): Promise<{ readonly entry: CachedEntry | undefined; version: number }> {
+    return { entry: undefined, version: 0 };
   }
   async set(_target: {
     readonly key: string;
     readonly meta: TagMeta | undefined;
     readonly entry: CachedEntry;
-  }): Promise<void> {}
+    readonly version: number | undefined;
+  }): Promise<boolean> {
+    return true;
+  }
   async unset(_target: {
     readonly keys: readonly string[] | undefined;
     readonly meta: TagMeta | undefined;

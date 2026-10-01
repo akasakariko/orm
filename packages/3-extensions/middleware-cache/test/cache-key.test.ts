@@ -28,6 +28,7 @@ describe('cache key resolution', () => {
         key: 'key:select 1',
         meta: undefined,
         entry: expect.anything(),
+        version: 0,
       });
     });
 
@@ -104,6 +105,7 @@ describe('cache key resolution', () => {
         key: 'custom-key',
         meta: undefined,
         entry: expect.anything(),
+        version: 0,
       });
     });
 

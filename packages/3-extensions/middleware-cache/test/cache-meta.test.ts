@@ -16,6 +16,7 @@ describe('createCacheMiddleware — meta', () => {
       key: 'key:select 1',
       meta: { tags: ['users', 'posts'] },
       entry: { rows: [{ id: 1 }] },
+      version: 0,
     });
     expect(store.setSpy.mock.calls[0]?.[0].meta).toBe(meta);
   });
@@ -31,6 +32,7 @@ describe('createCacheMiddleware — meta', () => {
       key: 'user-1',
       meta: undefined,
       entry: { rows: [{ id: 1 }] },
+      version: 0,
     });
   });
 });

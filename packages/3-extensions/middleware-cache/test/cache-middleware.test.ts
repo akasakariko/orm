@@ -185,6 +185,7 @@ describe('createCacheMiddleware — miss path', () => {
       key: 'key:select 1',
       meta: undefined,
       entry: { rows: [{ id: 1 }, { id: 2 }] },
+      version: 0,
     });
   });
 
@@ -418,9 +419,9 @@ describe('createCacheMiddleware — middleware shape', () => {
       ctx,
     );
 
-    const stored = await store.get('key:custom-not-this');
+    const stored = (await store.get('key:custom-not-this')).entry;
     expect(stored).toBeUndefined();
-    const real = await store.get('key:select custom');
+    const real = (await store.get('key:select custom')).entry;
     expect(real?.rows).toEqual([{ id: 7 }]);
   });
 });

@@ -1,5 +1,4 @@
 import {
-  type CachedEntry,
   type CacheStore,
   cacheAnnotation,
   createCacheMiddleware,
@@ -36,8 +35,8 @@ interface TagMeta {
 }
 
 const tagStore: CacheStore<TagMeta> = {
-  get: async (_key: string): Promise<CachedEntry | undefined> => undefined,
-  set: async () => {},
+  get: async (_key: string) => ({ entry: undefined, version: 0 }),
+  set: async () => true,
   unset: async () => {},
 };
 

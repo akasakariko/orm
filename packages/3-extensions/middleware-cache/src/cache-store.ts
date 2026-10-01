@@ -11,29 +11,37 @@ export interface CachedEntry {
 /**
  * The backend the cache middleware reads from and writes to.
  *
- * - `get` returns the live entry under `key`, or `undefined`.
- * - `set` stores `entry` under `key`. `meta` is the read annotation's `meta`, or `undefined`,
- *   passed by reference. The store decides what it means, for example tags to index or a lifetime.
- * - `unset` removes every entry named in `keys` and every entry that matches `meta`. `keys` is
- *   `undefined` or non-empty. A store that cannot act on a `meta` it is given must throw rather
- *   than ignore it. An `unset` by key must also drop that key from any `meta` index the store
- *   keeps.
+ * The store keeps a version per key, an integer it keeps even for a key that holds no entry. A
+ * key never seen, or forgotten, has version 0. Only `unset` changes a version.
  *
- * Lifetime and eviction are the store's policy. A `set` must be visible to any `unset` of the same
- * key issued after it resolves. The middleware's `unset` after a stale `set` may remove an entry a
- * later read stored under the same key; that costs one miss. `unset` must not run queries through
- * the runtime that uses the middleware.
+ * - `get` returns the live entry under `key`, or `undefined`, and the key's current version.
+ * - `set` stores `entry` under `key`. When `version` is a number, it stores only if the key's
+ *   version is still that number, and returns whether it stored. When `version` is `undefined`,
+ *   it stores unconditionally and returns `true`. The compare and the write must be atomic with
+ *   respect to `unset`, for example one synchronous step in memory or one script on a server.
+ *   `meta` is the read annotation's `meta`, or `undefined`, passed by reference. The store decides
+ *   what it means, for example tags to index or a lifetime.
+ * - `unset` removes every entry named in `keys` and every entry that matches `meta`, and
+ *   increments the version of every key it removes or would remove, including keys that hold no
+ *   entry. `keys` is `undefined` or non-empty. A store that cannot act on a `meta` it is given
+ *   must throw rather than ignore it. An `unset` by key must also drop that key from any `meta`
+ *   index the store keeps.
+ *
+ * Lifetime and eviction are the store's policy. A version that `unset` moved must be kept at least
+ * as long as a read can take, so that a read that started before the `unset` cannot store. `unset`
+ * must not run queries through the runtime that uses the middleware.
  *
  * `TMeta` is the shape of `meta` the store understands. The middleware does not check that a read
  * annotation's `meta` has this shape; see `cacheAnnotation`.
  */
 export interface CacheStore<TMeta = unknown> {
-  get(key: string): Promise<CachedEntry | undefined>;
+  get(key: string): Promise<{ readonly entry: CachedEntry | undefined; readonly version: number }>;
   set(target: {
     readonly key: string;
     readonly meta: TMeta | undefined;
     readonly entry: CachedEntry;
-  }): Promise<void>;
+    readonly version: number | undefined;
+  }): Promise<boolean>;
   unset(target: {
     readonly keys: readonly string[] | undefined;
     readonly meta: TMeta | undefined;
@@ -45,8 +53,9 @@ export interface CacheStore<TMeta = unknown> {
  *
  * - `maxEntries` — the most entries kept, a positive integer; the least recently used is evicted
  *   first. Default 1000.
- * - `ttlMs` — how long an entry lives after its `set`, a positive number of milliseconds.
- *   `Infinity` never expires. Default 60 000.
+ * - `ttlMs` — how long an entry lives after its `set`, and how long a key's version is kept after
+ *   the `unset` that moved it, a positive number of milliseconds. `Infinity` never expires.
+ *   Default 60 000.
  * - `clock` — the time source for expiry. Default `Date.now`.
  */
 export interface InMemoryCacheStoreOptions {
@@ -57,6 +66,11 @@ export interface InMemoryCacheStoreOptions {
 
 interface StoredRecord {
   readonly entry: CachedEntry;
+  readonly expiresAt: number;
+}
+
+interface VersionRecord {
+  readonly version: number;
   readonly expiresAt: number;
 }
 
@@ -81,8 +95,10 @@ function invalidOption(argument: 'maxEntries' | 'ttlMs', received: number, expec
 
 /**
  * The default cache store: a least-recently-used map with one lifetime for every entry, local to
- * the process. It ignores `meta` in `set`, and its `unset` rejects any `meta`, including `null`.
- * It throws `RUNTIME.ARGUMENT_INVALID` for a `maxEntries` or `ttlMs` outside the ranges above.
+ * the process. A key's version is kept for `ttlMs` after the `unset` that moved it, so a key
+ * invalidated and never stored again costs one number until then. It ignores `meta` in `set`, and
+ * its `unset` rejects any `meta`, including `null`, before changing anything. It throws
+ * `RUNTIME.ARGUMENT_INVALID` for a `maxEntries` or `ttlMs` outside the ranges above.
  */
 export function createInMemoryCacheStore(options?: InMemoryCacheStoreOptions): CacheStore<unknown> {
   const maxEntries = options?.maxEntries ?? 1000;
@@ -95,8 +111,24 @@ export function createInMemoryCacheStore(options?: InMemoryCacheStoreOptions): C
     throw invalidOption('ttlMs', ttlMs, 'a positive number of milliseconds, or Infinity');
   }
   const records = new Map<string, StoredRecord>();
+  const versions = new Map<string, VersionRecord>();
 
-  async function get(key: string): Promise<CachedEntry | undefined> {
+  function forgetExpiredVersions(): void {
+    const now = clock();
+    for (const [key, record] of versions) {
+      if (now < record.expiresAt) {
+        return;
+      }
+      versions.delete(key);
+    }
+  }
+
+  function versionOf(key: string): number {
+    forgetExpiredVersions();
+    return versions.get(key)?.version ?? 0;
+  }
+
+  function liveEntry(key: string): CachedEntry | undefined {
     const record = records.get(key);
     if (record === undefined) {
       return undefined;
@@ -109,7 +141,18 @@ export function createInMemoryCacheStore(options?: InMemoryCacheStoreOptions): C
     return record.entry;
   }
 
-  async function set(target: { readonly key: string; readonly entry: CachedEntry }) {
+  async function get(key: string) {
+    return { entry: liveEntry(key), version: versionOf(key) };
+  }
+
+  async function set(target: {
+    readonly key: string;
+    readonly entry: CachedEntry;
+    readonly version: number | undefined;
+  }) {
+    if (target.version !== undefined && target.version !== versionOf(target.key)) {
+      return false;
+    }
     records.delete(target.key);
     records.set(target.key, { entry: target.entry, expiresAt: clock() + ttlMs });
     for (const leastRecentlyUsed of records.keys()) {
@@ -118,6 +161,7 @@ export function createInMemoryCacheStore(options?: InMemoryCacheStoreOptions): C
       }
       records.delete(leastRecentlyUsed);
     }
+    return true;
   }
 
   async function unset(target: {
@@ -129,6 +173,9 @@ export function createInMemoryCacheStore(options?: InMemoryCacheStoreOptions): C
     }
     for (const key of target.keys ?? []) {
       records.delete(key);
+      const version = versionOf(key) + 1;
+      versions.delete(key);
+      versions.set(key, { version, expiresAt: clock() + ttlMs });
     }
   }
 

@@ -32,6 +32,7 @@ describe('createCacheMiddleware — deriveKey', () => {
       key: 'users:1',
       meta: undefined,
       entry: expect.anything(),
+      version: 0,
     });
   });
 
@@ -46,6 +47,7 @@ describe('createCacheMiddleware — deriveKey', () => {
       key: 'sync-key',
       meta: undefined,
       entry: expect.anything(),
+      version: 0,
     });
   });
 
@@ -74,6 +76,7 @@ describe('createCacheMiddleware — deriveKey', () => {
       key: 'users:key:select 1',
       meta: undefined,
       entry: expect.anything(),
+      version: 0,
     });
   });
 
@@ -92,6 +95,7 @@ describe('createCacheMiddleware — deriveKey', () => {
       key: 'user-1',
       meta: undefined,
       entry: expect.anything(),
+      version: 0,
     });
   });
 
@@ -150,6 +154,7 @@ describe('createCacheMiddleware — deriveKey', () => {
       key: 'key:select 1',
       meta: undefined,
       entry: expect.anything(),
+      version: 0,
     });
   });
 });

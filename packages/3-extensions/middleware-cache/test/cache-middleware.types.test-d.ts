@@ -49,8 +49,8 @@ test('createInMemoryCacheStore returns a CacheStore', () => {
 
 test('an old positional set is a type error', () => {
   const positionalSet = {
-    get: async (_key: string): Promise<CachedEntry | undefined> => undefined,
-    set: async (_key: string, _entry: CachedEntry, _ttlMs: number) => {},
+    get: async (_key: string) => ({ entry: undefined, version: 0 }),
+    set: async (_key: string, _entry: CachedEntry, _ttlMs: number) => true,
     unset: async (_target: Parameters<CacheStore['unset']>[0]) => {},
   };
 
@@ -61,8 +61,8 @@ test('an old positional set is a type error', () => {
 
 test('an old positional unset(key) is a type error', () => {
   const positionalUnset = {
-    get: async (_key: string): Promise<CachedEntry | undefined> => undefined,
-    set: async (_target: Parameters<CacheStore['set']>[0]) => {},
+    get: async (_key: string) => ({ entry: undefined, version: 0 }),
+    set: async (_target: Parameters<CacheStore['set']>[0]) => true,
     unset: async (_key: string) => {},
   };
 
@@ -73,12 +73,36 @@ test('an old positional unset(key) is a type error', () => {
 
 test('a store without unset is a type error', () => {
   const noUnset = {
-    get: async (_key: string): Promise<CachedEntry | undefined> => undefined,
-    set: async (_target: Parameters<CacheStore['set']>[0]) => {},
+    get: async (_key: string) => ({ entry: undefined, version: 0 }),
+    set: async (_target: Parameters<CacheStore['set']>[0]) => true,
   };
 
   // @ts-expect-error - unset is required
   const store: CacheStore = noUnset;
+  void store;
+});
+
+test('an old get returning the entry alone is a type error', () => {
+  const oldGet = {
+    get: async (_key: string): Promise<CachedEntry | undefined> => undefined,
+    set: async (_target: Parameters<CacheStore['set']>[0]) => true,
+    unset: async (_target: Parameters<CacheStore['unset']>[0]) => {},
+  };
+
+  // @ts-expect-error - get returns { entry, version }
+  const store: CacheStore = oldGet;
+  void store;
+});
+
+test('an old set returning nothing is a type error', () => {
+  const oldSet = {
+    get: async (_key: string) => ({ entry: undefined, version: 0 }),
+    set: async (_target: Parameters<CacheStore['set']>[0]) => {},
+    unset: async (_target: Parameters<CacheStore['unset']>[0]) => {},
+  };
+
+  // @ts-expect-error - set returns whether it stored the entry
+  const store: CacheStore = oldSet;
   void store;
 });
 

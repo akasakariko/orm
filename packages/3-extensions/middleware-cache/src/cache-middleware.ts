@@ -30,10 +30,10 @@ export interface CacheMiddlewareOptions<TMeta = unknown> {
  * The cache middleware.
  *
  * `invalidate` removes entries through one `store.unset({ keys, meta })` call. It does nothing
- * when `keys` is empty or absent and `meta` is absent. Before calling the store it marks reads in
- * flight as stale so they skip storing their rows: reads for the named `keys`, and every read when
- * `meta` is given, because only the store knows which entries `meta` matches. This guard covers
- * reads in the same process only. An error from the store propagates.
+ * when `keys` is empty or absent and `meta` is absent. The store moves the version of every key it
+ * removes, so a read that missed before the call and finishes after it does not store its rows:
+ * its conditional `store.set` returns `false`. This holds across processes that share a store. An
+ * error from the store propagates.
  *
  * `TMeta` is the store's meta type, which `invalidate`'s `meta` must have.
  */
@@ -56,27 +56,15 @@ export function deriveKeyFromContentHash(
 }
 
 /**
- * The generation of one key, kept while misses for it are pending. A miss whose `afterQuery` never
- * runs (an abandoned row stream, or an earlier middleware's `afterQuery` throwing) leaves its key's
- * entry behind. The number of leftover counters grows with the number of distinct keys, not with
- * the number of reads; with content-hash keys, that means distinct parameter sets.
- */
-interface KeyState {
-  generation: number;
-  pendingMisses: number;
-}
-
-/**
  * A cache miss in flight, keyed on the post-lowering `exec` object in a `WeakMap`. Family runtimes
- * build a fresh `exec` per call; the runtime subsystem doc records that invariant.
+ * build a fresh `exec` per call; the runtime subsystem doc records that invariant. `version` is the
+ * key's version from `store.get`, which makes the later `store.set` conditional.
  */
 interface PendingMiss {
   readonly key: string;
   readonly meta: unknown;
+  readonly version: number;
   readonly buffer: Record<string, unknown>[];
-  readonly globalGeneration: number;
-  readonly keyGeneration: number;
-  readonly keyState: KeyState;
 }
 
 /**
@@ -89,9 +77,9 @@ interface PendingMiss {
  * - `interceptQuery` — on a hit, returns the stored rows and the driver does not run. On a miss,
  *   starts collecting rows.
  * - `onRow` — collects each row of a miss.
- * - `afterQuery` — stores the rows with `store.set` when the driver completed the read and no
- *   overlapping `invalidate` made it stale. If an `invalidate` made it stale while `set` was in
- *   flight, it removes the key again with `store.unset`.
+ * - `afterQuery` — when the driver completed the read, stores the rows with a `store.set`
+ *   conditional on the version `store.get` returned. If an `unset` moved the version meanwhile,
+ *   `set` stores nothing and the middleware logs `middleware.cache.store-skipped`.
  *
  * @example
  * ```typescript
@@ -111,36 +99,7 @@ export function createCacheMiddleware<TMeta = unknown>(
 ): CacheMiddleware<TMeta> {
   const store: CacheStore<unknown> = options?.store ?? createInMemoryCacheStore();
   const deriveKey = options?.deriveKey ?? deriveKeyFromContentHash;
-  let globalGeneration = 0;
-  const keyStates = new Map<string, KeyState>();
   const pending = new WeakMap<object, PendingMiss>();
-
-  function startMiss(key: string, meta: unknown): PendingMiss {
-    const keyState = keyStates.get(key) ?? { generation: 0, pendingMisses: 0 };
-    keyStates.set(key, keyState);
-    keyState.pendingMisses += 1;
-    return {
-      key,
-      meta,
-      buffer: [],
-      globalGeneration,
-      keyGeneration: keyState.generation,
-      keyState,
-    };
-  }
-
-  function releaseMiss(miss: PendingMiss): void {
-    miss.keyState.pendingMisses -= 1;
-    if (miss.keyState.pendingMisses === 0) {
-      keyStates.delete(miss.key);
-    }
-  }
-
-  function isStale(miss: PendingMiss): boolean {
-    return (
-      miss.globalGeneration !== globalGeneration || miss.keyGeneration !== miss.keyState.generation
-    );
-  }
 
   async function interceptQuery(
     exec: ExecutionPlan,
@@ -155,13 +114,13 @@ export function createCacheMiddleware<TMeta = unknown>(
     }
 
     const key = annotation.key ?? (await deriveKey(exec, ctx));
-    const hit = await store.get(key);
-    if (hit !== undefined) {
+    const lookup = await store.get(key);
+    if (lookup.entry !== undefined) {
       ctx.log.debug?.({ event: 'middleware.cache.hit', middleware: 'cache', key });
-      return { rows: hit.rows };
+      return { rows: lookup.entry.rows };
     }
 
-    pending.set(exec, startMiss(key, annotation.meta));
+    pending.set(exec, { key, meta: annotation.meta, version: lookup.version, buffer: [] });
     ctx.log.debug?.({ event: 'middleware.cache.miss', middleware: 'cache', key });
     return undefined;
   }
@@ -174,34 +133,6 @@ export function createCacheMiddleware<TMeta = unknown>(
     pending.get(exec)?.buffer.push(row);
   }
 
-  async function storeMiss(
-    miss: PendingMiss,
-    result: AfterQueryResult,
-    ctx: RuntimeMiddlewareContext,
-  ): Promise<void> {
-    if (!result.completed || result.source !== 'driver') {
-      return;
-    }
-    const logSkipped = () =>
-      ctx.log.debug?.({
-        event: 'middleware.cache.store-skipped',
-        middleware: 'cache',
-        key: miss.key,
-      });
-
-    if (isStale(miss)) {
-      logSkipped();
-      return;
-    }
-    await store.set({ key: miss.key, meta: miss.meta, entry: { rows: miss.buffer } });
-    if (isStale(miss)) {
-      await store.unset({ keys: [miss.key], meta: undefined });
-      logSkipped();
-      return;
-    }
-    ctx.log.debug?.({ event: 'middleware.cache.store', middleware: 'cache', key: miss.key });
-  }
-
   async function afterQuery(
     exec: ExecutionPlan,
     result: AfterQueryResult,
@@ -212,11 +143,20 @@ export function createCacheMiddleware<TMeta = unknown>(
       return;
     }
     pending.delete(exec);
-    try {
-      await storeMiss(miss, result, ctx);
-    } finally {
-      releaseMiss(miss);
+    if (!result.completed || result.source !== 'driver') {
+      return;
     }
+    const stored = await store.set({
+      key: miss.key,
+      meta: miss.meta,
+      entry: { rows: miss.buffer },
+      version: miss.version,
+    });
+    ctx.log.debug?.({
+      event: stored ? 'middleware.cache.store' : 'middleware.cache.store-skipped',
+      middleware: 'cache',
+      key: miss.key,
+    });
   }
 
   async function invalidate(target: {
@@ -226,15 +166,6 @@ export function createCacheMiddleware<TMeta = unknown>(
     const keys = target.keys !== undefined && target.keys.length > 0 ? target.keys : undefined;
     if (keys === undefined && target.meta === undefined) {
       return;
-    }
-    for (const key of keys ?? []) {
-      const keyState = keyStates.get(key);
-      if (keyState !== undefined) {
-        keyState.generation += 1;
-      }
-    }
-    if (target.meta !== undefined) {
-      globalGeneration += 1;
     }
     await store.unset({ keys, meta: target.meta });
   }

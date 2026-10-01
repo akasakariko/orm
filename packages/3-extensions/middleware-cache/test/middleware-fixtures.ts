@@ -38,19 +38,47 @@ export function makeCtx(overrides?: Partial<RuntimeMiddlewareContext>): RuntimeM
   };
 }
 
-export function spyStore() {
+/**
+ * A versioned in-memory store for middleware tests. It records a version for every key it is asked
+ * about. `unset` bumps the version of every key it names and, when given `meta`, of every recorded
+ * key `matchesMeta` accepts, whether or not the key holds an entry.
+ */
+export function spyStore(options?: {
+  readonly matchesMeta?: (key: string, meta: unknown) => boolean;
+}) {
   const inner = new Map<string, CachedEntry>();
-  const getSpy = vi.fn(async (key: string) => inner.get(key));
+  const versions = new Map<string, number>();
+  const versionOf = (key: string) => versions.get(key) ?? 0;
+  const bump = (key: string) => {
+    versions.set(key, versionOf(key) + 1);
+    inner.delete(key);
+  };
+  const getSpy = vi.fn(async (key: string) => {
+    versions.set(key, versionOf(key));
+    return { entry: inner.get(key), version: versionOf(key) };
+  });
   const setSpy = vi.fn(async (target: Parameters<CacheStore['set']>[0]) => {
+    if (target.version !== undefined && target.version !== versionOf(target.key)) {
+      return false;
+    }
     inner.set(target.key, target.entry);
+    return true;
   });
   const unsetSpy = vi.fn(async (target: Parameters<CacheStore['unset']>[0]) => {
     for (const key of target.keys ?? []) {
-      inner.delete(key);
+      bump(key);
+    }
+    const matchesMeta = options?.matchesMeta;
+    if (target.meta !== undefined && matchesMeta !== undefined) {
+      for (const key of new Set([...inner.keys(), ...versions.keys()])) {
+        if (matchesMeta(key, target.meta)) {
+          bump(key);
+        }
+      }
     }
   });
   const store: CacheStore = { get: getSpy, set: setSpy, unset: unsetSpy };
-  return { ...store, getSpy, setSpy, unsetSpy, inner };
+  return { ...store, getSpy, setSpy, unsetSpy, inner, versions };
 }
 
 export async function drain<T>(iter: AsyncIterable<T>): Promise<T[]> {
