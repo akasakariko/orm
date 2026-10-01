@@ -20,7 +20,7 @@ changes:
       matches:
         - '\bcreateCacheMiddleware\s*\(\s*\{[^}]*\b(maxEntries|clock)\s*:'
   - id: cache-store-object-arguments
-    summary: "A custom CacheStore keeps a version per key. get({ key, meta }) replaces get(key) and returns { entry, version }; set({ key, meta, entry, version }) replaces set(key, entry, ttlMs), stores only if the key's version is still version (unconditionally when version is undefined) and returns whether it stored; a new required unset({ keys, meta }) removes entries and increments their keys' versions. CachedEntry has no storedAt."
+    summary: "A custom CacheStore is now a cache of values with a version per key: CacheStore<TMeta, TValue>. get({ key, meta }) replaces get(key) and returns a CacheEntry { key, meta, version, data } whose data is { empty: true } or { empty: false, value }; set(entry, value) replaces set(key, entry, ttlMs), stores only if the key's version still equals entry.version, and returns whether it stored; a new required unset({ keys, meta }) removes values and increments their keys' versions. CachedEntry is replaced by CacheEntry, and the rows type by CachedRows."
     detection:
       glob: "**/*.{ts,mts,cts,tsx,js,mjs,cjs,jsx}"
       matches:
@@ -89,11 +89,11 @@ In each call to `createCacheMiddleware(...)`:
 
 Only for code that implements `CacheStore`, as a typed object, a class, or an object literal passed inline to `createCacheMiddleware({ store: { ... } })`. The types reject the old shape, but an untyped JavaScript store fails only at run time, so check each one.
 
-1. Keep a version per key: an integer, 0 for a key never seen, that only `unset` changes. Keep it even for keys that hold no entry, for at least as long as a read can take.
-2. Change `get(key)` to `get({ key, meta })`, returning `{ entry, version }`: the live entry or `undefined`, and the key's current version. `meta` is the read annotation's `meta`, or `undefined`. A store that matches `meta` folds the versions of whatever `meta` names into the version it returns, and does the same when `set` compares; a store that does not index `meta` ignores it here.
-3. Change `set(key, entry, ttlMs)` to `set({ key, meta, entry, version })`, returning a boolean. When `version` is a number, store only if the key's version still equals it, and return whether you stored. When `version` is `undefined`, store unconditionally and return `true`. The comparison and the write must be atomic against `unset`: one synchronous step in memory, or one server-side script (for example Lua on Redis). `meta` is the read annotation's `meta`, or `undefined`. There is no `ttlMs` argument: the store sets the lifetime itself, as a fixed value or read from `meta`.
-4. Add `unset({ keys, meta })`. It removes the entries stored under `keys` when `keys` is not `undefined`, and increments the version of every one of those keys, whether or not it holds an entry. When `meta` is not `undefined`, it removes the entries whose `meta` matches, compared by value, and increments their versions; a store that does not index `meta` must throw instead of ignoring it.
-5. Stop reading or writing `storedAt` on `CachedEntry`; an entry is `{ rows }`.
+1. Keep a version per key: an integer, 0 for a key never seen, that only `unset` changes. Keep it even for keys that hold no value, for at least as long as a read can take.
+2. Change `get(key)` to `get({ key, meta })`, returning a `CacheEntry`: `{ key, meta, version, data }`, where `meta` is the `meta` passed in, `version` the key's current version, and `data` is `{ empty: true }` on a miss or `{ empty: false, value }` with the stored rows. `meta` is the read annotation's `meta`, or `undefined`. A store that matches `meta` folds the versions of whatever `meta` names into `version`, and does the same in `set`; a store that does not index `meta` ignores it here.
+3. Change `set(key, entry, ttlMs)` to `set(entry, value)`, returning a boolean. `entry` is the `CacheEntry` your `get` returned; `value` is the rows. Store `value` under `entry.key` only if the key's version still equals `entry.version`, and return whether you stored. The comparison and the write must be atomic against `unset`: one synchronous step in memory, or one server-side script (for example Lua on Redis). There is no unconditional write and no `ttlMs` argument: the store sets the lifetime itself, as a fixed value or read from `entry.meta`. Code that prefilled the cache with `set(key, entry, ttlMs)` now calls `get` and then `set`.
+4. Add `unset({ keys, meta })`. It removes the values stored under `keys` when `keys` is not `undefined`, and increments the version of every one of those keys, whether or not it holds a value. When `meta` is not `undefined`, it removes the values whose `meta` matches, compared by value, and increments their versions; a store that does not index `meta` must throw instead of ignoring it.
+5. Replace `CachedEntry` with `CachedRows` (the rows, `readonly Record<string, unknown>[]`) for stored values and `CacheEntry` for what `get` returns. Type the store as `CacheStore<TMeta, CachedRows>`, or `CacheStore<TMeta, unknown>` if it stores any value. There is no `storedAt`.
 
 Before:
 
@@ -117,22 +117,20 @@ const SET_IF_VERSION = `
   redis.call('SET', KEYS[1], ARGV[1], 'PX', 60000)
   return 1`;
 
-const store: CacheStore = {
-  async get({ key }) {
-    const [raw, version] = await redis.mget(`entry:${key}`, `version:${key}`);
+const store: CacheStore<unknown, CachedRows> = {
+  async get({ key, meta }) {
+    const [raw, version] = await redis.mget(`value:${key}`, `version:${key}`);
     return {
-      entry: raw ? (JSON.parse(raw) as CachedEntry) : undefined,
+      key,
+      meta,
       version: Number(version ?? 0),
+      data: raw ? { empty: false, value: JSON.parse(raw) as CachedRows } : { empty: true },
     };
   },
-  async set({ key, entry, version }) {
-    const value = JSON.stringify(entry);
-    if (version === undefined) {
-      await redis.set(`entry:${key}`, value, 'PX', 60_000);
-      return true;
-    }
-    const keys = [`entry:${key}`, `version:${key}`];
-    return (await redis.eval(SET_IF_VERSION, 2, ...keys, value, version)) === 1;
+  async set(entry, value) {
+    const keys = [`value:${entry.key}`, `version:${entry.key}`];
+    const json = JSON.stringify(value);
+    return (await redis.eval(SET_IF_VERSION, 2, ...keys, json, entry.version)) === 1;
   },
   async unset({ keys, meta }) {
     if (meta !== undefined) {
@@ -141,7 +139,7 @@ const store: CacheStore = {
     for (const key of keys ?? []) {
       await redis
         .multi()
-        .del(`entry:${key}`)
+        .del(`value:${key}`)
         .incr(`version:${key}`)
         .pexpire(`version:${key}`, 60_000)
         .exec();
