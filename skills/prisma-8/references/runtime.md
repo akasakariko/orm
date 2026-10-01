@@ -264,7 +264,7 @@ const user = await db.orm.public.User.first({ id: 1 }, (meta) =>
 await cache.invalidate({ keys: ['user-1'] });
 ```
 
-**Invalidate after the commit, not inside the transaction.** A read from another request can refill the cache with the old rows before the commit lands. Remove entries through `invalidate`, not by calling the store's `unset` directly, so reads in flight do not store the old rows.
+**Invalidate after the commit, not inside the transaction.** A read from another request can refill the cache with the old rows before the commit lands. A read that missed before the `invalidate` and finishes after it does not store its rows: the store moves the key's version on `unset`, and the read's `set` is conditional on the version it saw. This holds across processes that share a store.
 
 **The cache key carries no identity.** The default key is the runtime's content hash of the plan — contract hash, SQL text, and bound parameters — so two callers issuing the same statement share one entry regardless of who they are. Never annotate a read whose rows depend on the caller (per-user, per-tenant, or RLS-filtered data) on the plain `postgres()` façade unless the identity is part of the key: `cacheAnnotation({ key: `user:${userId}:profile` })`, or a `where` clause that binds the identity as a parameter (the parameter is in the hash). Queries that run on a pinned connection or inside a transaction bypass the cache entirely (`ctx.scope !== 'runtime'`), which is why a Supabase `RoleBoundDb` read — executed on a connection with the role bound via `set_config` — is never served from cache; the plain façade has no such protection.
 

@@ -115,12 +115,13 @@ const cache = createCacheMiddleware({
 
 ```typescript
 interface CacheStore<TMeta = unknown> {
-  get(key: string): Promise<CachedEntry | undefined>;
+  get(key: string): Promise<{ readonly entry: CachedEntry | undefined; readonly version: number }>;
   set(target: {
     readonly key: string;
     readonly meta: TMeta | undefined;
     readonly entry: CachedEntry;
-  }): Promise<void>;
+    readonly version: number | undefined;
+  }): Promise<boolean>;
   unset(target: {
     readonly keys: readonly string[] | undefined;
     readonly meta: TMeta | undefined;
@@ -132,39 +133,61 @@ interface CachedEntry {
 }
 ```
 
-- `get` returns the live entry under `key`, or `undefined`.
-- `set` stores one entry: this key, this `meta`, these rows. `meta` is the read annotation's `meta`, or `undefined`.
-- `unset` removes every entry named in `keys` and every entry that matches `meta`, in one call so the store can batch them. `keys` is either `undefined` or non-empty.
+The store keeps a **version** per key: an integer it keeps even for a key that holds no entry. A key never seen has version 0. Only `unset` changes a version.
+
+- `get` returns the live entry under `key`, or `undefined`, and the key's current version.
+- `set` stores one entry: this key, this `meta`, these rows. With a numeric `version`, it stores only if the key's version is still that number, and returns whether it stored. With `version: undefined`, it stores unconditionally and returns `true`, for example to prefill the cache. `meta` is the read annotation's `meta`, or `undefined`.
+- `unset` removes every entry named in `keys` and every entry that matches `meta`, in one call so the store can batch them, and increments the version of every key it removes or would remove, including keys that hold no entry. `keys` is either `undefined` or non-empty.
 
 The rules a store must follow:
 
 - **The store interprets `meta`; the middleware never does.** A store that does not index `meta` must throw when `unset` receives a `meta` it cannot act on. An invalidation is never silently ignored.
 - **An `unset` by key also drops that key from any `meta` index the store keeps.**
 - **Lifetime and eviction are the store's policy.** A store that wants per-entry lifetimes reads them from `meta`.
-- **A `set` must be visible to any later `unset` of the same key.** When `set` resolves, the entry must be in place, so that an `unset` issued afterwards removes it. The middleware's guard against overlapping reads relies on this.
-- **The middleware's `unset` after a stale `set` may remove a fresher entry** that a later read stored under the same key. That costs one miss, never wrong rows.
+- **A conditional `set` must be atomic against `unset`.** Comparing the version and writing the entry must be one step that no `unset` of the same key can fall between: one synchronous step in memory, or one script (for example a Lua script) on a server. The middleware's guard against overlapping reads relies on this.
+- **Keep a moved version at least as long as a read can take.** A version that falls back to 0 too early lets a read that started before the `unset` store its rows.
+- **A store that matches `meta` has one more duty.** `get` does not see the read's `meta`, so an `invalidate({ meta })` can match a read whose key the store has not indexed yet. Its conditional `set` must also refuse when the `meta` it receives was invalidated after `get` issued `version`. One way is to issue versions from one store-wide sequence and record, per tag, the sequence value of its last `unset`.
 - **`unset` must not run a query through the runtime that uses the middleware.**
 - **Compare `meta` by value.** The `meta` passed to `unset` is a different object from the one passed to `set`. A store shared between processes must serialise `meta` itself.
 
-The default store is per process and **not** coherent across replicas. For shared caching, supply a custom store:
+The default store lives in one process and is **not** shared across replicas. For shared caching, supply a custom store. The guard for overlapping reads then works across every process that uses the store, because the store owns the versions:
 
 ```typescript
 import type { CachedEntry, CacheStore } from '@internal/middleware-cache';
 
+const SET_IF_VERSION = `
+  if tonumber(redis.call('GET', KEYS[2]) or '0') ~= tonumber(ARGV[2]) then return 0 end
+  redis.call('SET', KEYS[1], ARGV[1], 'PX', 60000)
+  return 1`;
+
 const redis: CacheStore = {
   async get(key) {
-    const raw = await redisClient.get(key);
-    return raw ? (JSON.parse(raw) as CachedEntry) : undefined;
+    const [raw, version] = await redisClient.mget(`entry:${key}`, `version:${key}`);
+    return {
+      entry: raw ? (JSON.parse(raw) as CachedEntry) : undefined,
+      version: Number(version ?? 0),
+    };
   },
-  async set({ key, entry }) {
-    await redisClient.set(key, JSON.stringify(entry), 'PX', 60_000);
+  async set({ key, entry, version }) {
+    const value = JSON.stringify(entry);
+    if (version === undefined) {
+      await redisClient.set(`entry:${key}`, value, 'PX', 60_000);
+      return true;
+    }
+    const keys = [`entry:${key}`, `version:${key}`];
+    return (await redisClient.eval(SET_IF_VERSION, 2, ...keys, value, version)) === 1;
   },
   async unset({ keys, meta }) {
     if (meta !== undefined) {
       throw new Error('This store does not index meta');
     }
-    if (keys !== undefined) {
-      await redisClient.del(...keys);
+    for (const key of keys ?? []) {
+      await redisClient
+        .multi()
+        .del(`entry:${key}`)
+        .incr(`version:${key}`)
+        .pexpire(`version:${key}`, 60_000)
+        .exec();
     }
   },
 };
@@ -177,7 +200,7 @@ const cache = createCacheMiddleware({ store: redis });
 `createInMemoryCacheStore({ maxEntries?, ttlMs?, clock? })` is what `createCacheMiddleware()` uses when no `store` is given.
 
 - **Size.** At most `maxEntries` entries, a positive integer (default 1000). Reads and writes both count as a use; the least recently used entry is evicted first.
-- **Lifetime.** Every entry lives `ttlMs` after its `set`, a positive number of milliseconds (default 60 000). `ttlMs: Infinity` never expires. Any other `maxEntries` or `ttlMs`, such as `0` or `NaN`, throws `RUNTIME.ARGUMENT_INVALID`. Expiry is measured with `clock` (default `Date.now`); an expired entry reads as absent and is dropped.
+- **Lifetime.** Every entry lives `ttlMs` after its `set`, a positive number of milliseconds (default 60 000). `ttlMs: Infinity` never expires. A key's version is kept for `ttlMs` after the `unset` that moved it, so a key invalidated and never stored again costs one number until then. Any other `maxEntries` or `ttlMs`, such as `0` or `NaN`, throws `RUNTIME.ARGUMENT_INVALID`. Expiry is measured with `clock` (default `Date.now`); an expired entry reads as absent and is dropped.
 - **`meta`.** `set` ignores it. `unset({ keys })` removes those keys; `unset` with any `meta` other than `undefined`, including `null`, throws `RUNTIME.CACHE_STORE_META_UNSUPPORTED` and removes nothing.
 
 To change the defaults, create the store yourself:
@@ -216,7 +239,7 @@ interface TagMeta {
 }
 
 class TagStore implements CacheStore<TagMeta> {
-  // get, set({ key, meta, entry }), unset({ keys, meta }) with meta: TagMeta | undefined
+  // get, set({ key, meta, entry, version }), unset({ keys, meta }) with meta: TagMeta | undefined
 }
 
 const cache = createCacheMiddleware({ store: new TagStore() }); // CacheMiddleware<TagMeta>
@@ -241,12 +264,10 @@ export const cached = (o: CacheAnnotationOptions<TagMeta>) => cacheAnnotation<Ta
 Rules:
 
 - **Call it after the write has committed.** `invalidate` works from any scope, but if you call it inside a transaction, another request can read the old rows before the commit and put them back in the cache. Invalidate once the transaction has returned.
-- **Delete through `invalidate`.** Calling the store's `unset` on its own skips the guard for overlapping reads.
-- **Overlapping reads.** A read that missed the cache before an `invalidate` and finishes after it does not store its rows, because they may predate the write. `invalidate({ keys })` stops only the reads for those keys. `invalidate({ meta })` stops every read in flight, because only the store knows which entries `meta` matches, so frequent invalidation by `meta` lowers the hit rate. If an `invalidate` runs while a read's `store.set` is in flight, the middleware calls `store.unset({ keys: [key] })` once the `set` resolves. Each skipped store is logged at debug level as `middleware.cache.store-skipped` with the key.
-- **One process only.** The guard is per middleware instance. With a shared store such as Redis, a read in another process is not stopped, and can store rows that predate the write.
-- **Abandoned reads leave a small counter.** The guard keeps a counter per key while a miss for it is pending. A miss whose `afterQuery` never runs, because the consumer stopped reading the rows early or an earlier middleware's `afterQuery` threw, leaves that key's counter in memory. The number of leftover counters grows with the number of distinct keys, not with the number of reads; with content-hash keys, that means distinct parameter sets.
+- **Overlapping reads.** A read that missed the cache before an `invalidate` and finishes after it does not store its rows, because they may predate the write. The miss remembers the key's version from `store.get`, and its `store.set` is conditional on that version; the `unset` moved it, so `set` returns `false`. Only reads for keys the `unset` removes or would remove are affected. Each skipped store is logged at debug level as `middleware.cache.store-skipped` with the key.
+- **Across processes.** The guard works across processes that share a store, because the store owns the version. Calling the store's `unset` directly moves the versions too.
 - **Until `invalidate` resolves,** reads can still return entries it has not removed yet.
-- **Store errors propagate.** If `unset` rejects, `invalidate` rejects with that error. Overlapping reads still skip their store, which costs one extra miss.
+- **Store errors propagate.** If `unset` rejects, `invalidate` rejects with that error. Whether overlapping reads still store depends on how far the store got.
 
 ## Transaction-scope guard
 
@@ -272,7 +293,7 @@ This package is a read-through cache with a control surface. It carries data bet
 - `bypass` on the annotation;
 - the `CacheStore` interface, and the default in-memory store.
 
-How long an entry lives, and what `meta` means (tags, groups, per-entry lifetimes), are the store's business. Deciding what to invalidate and when, request coalescing, and routing between several stores are policy, and belong in extensions built on these primitives. Such extensions invalidate through `invalidate`, because only it stops overlapping reads from storing rows that predate the write.
+How long an entry lives, and what `meta` means (tags, groups, per-entry lifetimes), are the store's business. Deciding what to invalidate and when, request coalescing, and routing between several stores are policy, and belong in extensions built on these primitives. Such extensions invalidate through `invalidate` or the store's `unset`; either moves the versions that stop overlapping reads from storing rows that predate the write.
 
 What the primitives do not cover yet:
 
