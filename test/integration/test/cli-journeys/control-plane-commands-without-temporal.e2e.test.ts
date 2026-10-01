@@ -297,7 +297,7 @@ withTempDir(({ createTempDir }) => {
           ).toEqual([
             [
               'CREATE TABLE "public"."event" (',
-              `  "history" timestamp(3)[] DEFAULT ARRAY['2024-01-01T00:00:00', '2024-06-30T12:34:56.789']::timestamp(3)[] NOT NULL,`,
+              `  "history" timestamp(3)[] DEFAULT ARRAY['2024-01-01T00:00:00'::timestamp(3), '2024-06-30T12:34:56.789'::timestamp(3)]::timestamp(3)[] NOT NULL,`,
               '  "id" int4 NOT NULL,',
               `  "instantAt" timestamptz DEFAULT '2024-01-01T00:00:00Z'::timestamptz NOT NULL,`,
               `  "localAt" timestamp(3) DEFAULT '2024-01-01T00:00:00'::timestamp(3) NOT NULL,`,
