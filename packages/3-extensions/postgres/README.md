@@ -2,12 +2,12 @@
 
 One-package Postgres setup for Prisma 8. Install this single package to get config, runtime, and all transitive type dependencies.
 
-Two runtime facades ship under different entrypoints:
+Two runtime entry points create three kinds of object:
 
-- `@internal/postgres/runtime` — long-lived Node process facade with closure-cached `runtime()`, `orm`, and `transaction()`.
-- `@internal/postgres/serverless` — per-request facade for serverless / edge runtimes (Cloudflare Workers + Hyperdrive, AWS Lambda, Vercel, Deno Deploy, Bun edge). Each `connect()` returns a fresh `Runtime & AsyncDisposable`.
+- `@internal/postgres/runtime` — `postgres()` returns a **client** for a long-lived Node process, with closure-cached `runtime()`, `orm`, and `transaction()`.
+- `@internal/postgres/serverless` — for serverless / edge runtimes (Cloudflare Workers + Hyperdrive, AWS Lambda, Vercel, Deno Deploy, Bun edge). `postgresServerless()` returns a **serverless client**, which holds no database connection. Each `connect({ url })` on it opens a fresh database connection and returns a **connection** with the members of a `postgres()` client except `connect`.
 
-Pick the facade that matches your deployment lifecycle. The asymmetry is intentional: closure caching is unsafe across `fetch` invocations (stale connections after isolate idle, concurrent-query races, no clean shutdown), so the serverless facade deliberately omits `orm`, `runtime()`, and `transaction()`. See `docs/architecture docs/subsystems/4. Runtime & Middleware Framework.md` and the deployment guide for the rationale.
+Pick the entry point that matches your deployment lifecycle. A database connection kept at module scope fails across `fetch` invocations in the four ways ADR 207 lists, so on the serverless side everything bound to a database connection lives on the connection. Inside a request, `db` does everything the `db` from `postgres()` does. See [ADR 207](../../../docs/architecture%20docs/adrs/ADR%20207%20-%20A%20serverless%20Postgres%20connection%20has%20the%20same%20query%20interface%20as%20a%20postgres%20client.md) and the [Serverless Deployment Guide](../../../docs/Serverless%20Deployment%20Guide.md) for the rationale.
 
 ## Package Classification
 
@@ -46,24 +46,24 @@ export const db = postgres<Contract>({ contractJson });
 ### Serverless / per-request runtimes
 
 ```typescript
-// db.ts — module scope: only the static authoring surface is built here.
+// db.ts — module scope: the serverless client holds no database connection.
 import postgresServerless from '@internal/postgres/serverless';
 import type { Contract } from './contract.d';
 import contractJson from './contract.json' with { type: 'json' };
 
-export const db = postgresServerless<Contract>({ contractJson });
+export const postgres = postgresServerless<Contract>({ contractJson });
 
-// worker.ts — per-request: acquire a fresh Runtime, dispose with `await using`.
+// worker.ts — per request: open a connection, close it with `await using`.
 export default {
   async fetch(_req: Request, env: Env): Promise<Response> {
-    await using runtime = await db.connect({ url: env.HYPERDRIVE.connectionString });
-    const rows = await runtime.query(db.sql.from(/* ... */).build());
-    return Response.json(rows);
+    await using db = await postgres.connect({ url: env.HYPERDRIVE.connectionString });
+    const users = await db.orm.public.User.all();
+    return Response.json(users);
   },
 };
 ```
 
-The returned client exposes `sql`, `context`, `stack`, `contract`, and `connect()` — and intentionally nothing else. Construct ORM clients (or invoke `withTransaction` from `@internal/sql-runtime`) against the runtime returned by `connect()` instead of caching one on the closure.
+Inside a request, `db` does everything the `db` from `postgres()` does: `db.orm`, `db.sql`, `db.raw`, `db.transaction(...)`, `db.prepare(...)` and `db.runtime().query(...)` work unchanged. Await every query before the `await using` scope ends: the connection closes when the scope ends, so a query returned from the scope without `await` (`return db.orm...` instead of `return await db.orm...`) fails when its rows are read, with `CONTRACT.MARKER_READ_FAILED` (whose cause is `DRIVER.NOT_CONNECTED`) under the default options, or `DRIVER.NOT_CONNECTED` after an earlier awaited query or with `verifyMarker: false`. `connect` connects to the database before it returns and rejects with `DRIVER.CONNECTION_FAILED` when the database refuses the connection, rejects the credentials, or does not answer within 20 seconds. `db` is not a `Runtime`; anything that takes a runtime gets `db.runtime()`. Never call `connect` at module scope.
 
 ## Exports
 
@@ -71,9 +71,39 @@ The returned client exposes `sql`, `context`, `stack`, `contract`, and `connect(
 
 Simplified `defineConfig` that pre-wires all Postgres internals (family, target, adapter, driver, contract providers). Pass a contract path (`.prisma` or `.ts`) or a ready `ContractConfig`, and optional db/migrations/extensions config.
 
+#### A PSL source with a default control policy
+
+`defineConfig` has no option for the contract's `defaultControlPolicy`, and a PSL file cannot carry it. To set one on a PSL contract, such as the file `prisma contract print --output` writes for a contract that has one, build the source with `prismaContract` from `@prisma/orm-family-sql` (add that package to the project's dependencies) and pass it the Postgres settings `defineConfig` passes for a `.prisma` path:
+
+```typescript
+// prisma.config.ts
+import { definePrismaConfig } from 'prisma/config';
+import { prismaContract } from '@prisma/orm-family-sql/contract-psl/provider';
+import { defineConfig as ormConfig } from '@prisma/orm-postgres/config';
+import { PG_INT_CODEC_ID, PG_TEXT_CODEC_ID } from '@prisma/orm-postgres/target/codec-ids';
+import postgresPack from '@prisma/orm-postgres/target/pack';
+import { postgresCreateNamespace } from '@prisma/orm-postgres/target/types';
+
+export default definePrismaConfig({
+  orm: ormConfig({
+    contract: prismaContract('./prisma/contract.prisma', {
+      target: postgresPack,
+      createNamespace: postgresCreateNamespace,
+      enumInferenceCodecs: { text: PG_TEXT_CODEC_ID, int: PG_INT_CODEC_ID },
+      defaultControlPolicy: 'external',
+    }),
+    db: { connection: process.env['DATABASE_URL']! },
+  }),
+});
+```
+
+`contract emit` then writes `prisma/contract.json` and `prisma/contract.d.ts`.
+
 #### `prisma7Schema(path)`: adopt a Prisma 7 schema during the transition
 
 `prisma7Schema` reads a Prisma 7 `schema.prisma` as the contract source, so a project that still runs Prisma 7 can adopt Prisma 8 without a second schema file. It accepts one file or a directory of `.prisma` files (every file under it, nested directories included, as Prisma 7 reads a schema directory) and produces the same `ContractConfig` as a `.prisma` path does. `contract emit` writes `contract.json` and `contract.d.ts` into the directory that holds the schema file or the schema directory, whatever the file is named: `prisma7Schema('prisma/schema.prisma')` and `prisma7Schema('prisma/schema')` both write `prisma/contract.json` and `prisma/contract.d.ts`, never inside the schema directory. This differs from a Prisma 8 PSL source, which defaults to `<schema name>.json` beside the schema (`prisma/schema.prisma` writes `prisma/schema.json`). The `output` directory on `defineConfig` sets either explicitly, as for every other source: with `output: 'generated/prisma8'`, `contract emit` writes `generated/prisma8/contract.json` and `generated/prisma8/contract.d.ts`.
+
+`prisma contract format` treats this source as PSL: when `prisma7Schema` names one file, the command rewrites that file in place with the Prisma 8 formatter. To keep Prisma 7's own formatting, do not run `prisma contract format`; format the schema with Prisma 7's `prisma format` instead.
 
 ```typescript
 // prisma.config.ts
@@ -97,7 +127,9 @@ What the project needs around that file:
 - The Prisma 7 schema stays as Prisma 7 wants it: the `datasource` block carries `provider` only. Prisma 7 rejects `url` in the schema (it moved to `prisma.config.ts`), and this source ignores it.
 - The commands print prose to the terminal and JSON when stdout is not a terminal (a pipe, a file, or an agent). Pass `--json` to get JSON in a terminal too.
 
-During the transition Prisma 7 keeps owning the database and its migrations. Prisma 8 reads the schema and verifies it against what Prisma 7 built; it does not migrate. After every Prisma 7 migration, run `prisma contract emit` and then `prisma db sign` so the recorded contract matches the database again; `prisma db verify` reports nothing when they match. A database last migrated on Prisma 5 or earlier must migrate on Prisma 7 first: since Prisma 6.0.0 the implicit many-to-many junction tables carry a primary key on `(A, B)` instead of a unique index, and the source describes that shape.
+During the transition Prisma 7 keeps owning the database and its migrations. Prisma 8 reads the schema and verifies it against what Prisma 7 built; it does not migrate. After every Prisma 7 migration, run `prisma contract emit` and then `prisma db sign` so the recorded contract matches the database again; `prisma db verify` reports nothing when they match. When `db verify` or `db sign` finds the database behind the contract, apply the change with a Prisma 7 migration rather than the `prisma db update` the CLI suggests, then sign again. A database last migrated on Prisma 5 or earlier must migrate on Prisma 7 first: since Prisma 6.0.0 the implicit many-to-many junction tables carry a primary key on `(A, B)` instead of a unique index, and the source describes that shape.
+
+When the project is ready to stop reading the Prisma 7 file, `prisma contract print --output <path>` writes the Prisma 8 PSL that produces the same contract, with a header naming the schema it came from; without `--output` it prints the PSL instead. Point `contract` at the written file, run `prisma contract emit`, then take migration ownership: `prisma migration plan --name baseline`, `prisma db sign`, and `prisma migration ref set db <timestamp>_baseline`. Without an explicit `output`, `defineConfig` names the emitted files after the contract path it is given, so a written file with another name than the emitted files (for example `contract: './prisma/app.prisma'` where `contract emit` wrote `prisma/contract.json`) moves them to `prisma/app.json` and `prisma/app.d.ts` and leaves the old files on disk; `contract print` names both pairs in its next step when that happens. The command needs no database connection, and refuses rather than approximating, so the contract before and after the switch is the same one. Not every Prisma 7 schema prints yet: a schema that declares one model name in two `@@schema` namespaces exits `2` with `CONTRACT.PRINT_UNSUPPORTED` and prints and writes nothing.
 
 A construct is either described exactly or refused. There is no approximate lowering and no silent change. The source reads scalars and `@db.*` native types, `@map` and `@@map`, `@@schema`, enums as native enum types (with member `@map`), `@ignore` and `@@ignore`, defaults and ORM-side generators, `@updatedAt`, `@id`, `@@id`, `@unique`, `@@unique`, `@@index`, and explicit and implicit relations. Everything else is a hard error naming the file, the line, and what to change: views, `Unsupported(...)`, `@db.*` types Prisma 8 has no codec for, `relationMode = "prisma"`, and the handful of shapes in the table below that Prisma 8 cannot yet express. Prisma 7 still owns the database, so every edit below is a Prisma 7 schema change that Prisma 7's next migration applies; the table says what that migration does where it does anything:
 
@@ -110,12 +142,12 @@ A construct is either described exactly or refused. There is no approximate lowe
 | `PSL.PRISMA7_NATIVE_TYPE_UNSUPPORTED` | A `@db.*` type with no Prisma 8 codec (`Citext`, `Bit`, `VarBit`, `Xml`, `Oid`, `Money`). | If no key, index, or relation uses the field, add `@ignore` to it: Prisma 7's next migration is empty, the field disappears from the Prisma 7 client too, and a required field with no column default then accepts no inserts from either client. If one does, `@ignore` does not help, because Prisma 7 still creates that constraint over an `@ignore`d column; add `@@ignore` to the model instead: Prisma 7's next migration is empty, but the model disappears from the Prisma 7 client as well as from the contract, and every relation field in another model that points to it needs `@ignore`, which removes that field from the Prisma 7 client too. A relation field that already has `@ignore` does not count as a use. Changing the field's type instead changes the column type on Prisma 7's next migration. |
 | `PSL.PRISMA7_ENUM_NAMESPACE_MISMATCH` | A field uses an enum declared under a different `@@schema`. | Declare the enum in the model's schema, or move the model. |
 | `PSL.PRISMA7_RELATION_UNRESOLVED` | A relation field that cannot be paired, is ambiguous, or is required over an optional foreign key field. | Name both sides with `@relation("name")`, add the missing `fields`/`references`, or add `?` to a relation field one of whose fields is optional. |
-| `PSL.PRISMA7_REFERENTIAL_ACTION_UNSUPPORTED` | `SetNull` over a required foreign key field, or `SetDefault` over a required field with no column default (a client-side generator such as `uuid()` gives none). | Make the fields optional, which drops `NOT NULL` on Prisma 7's next migration and makes them nullable in the Prisma 7 client. Or give them a column default such as a literal or `dbgenerated("<expression>")`, which Prisma 7's next migration sets: a field without a `@default` then becomes optional when creating records with the Prisma 7 client, and a field with a client-side generator such as `@default(uuid())` must have that `@default` replaced, because a field takes only one, after which the Prisma 7 client stops generating its value. Or choose another action, which replaces the foreign key on Prisma 7's next migration and leaves the Prisma 7 client unchanged. |
+| `PSL.PRISMA7_REFERENTIAL_ACTION_UNSUPPORTED` | `SetNull` over a required foreign key field, or `SetDefault` over a required field with no column default (a client-side generator such as `uuid()` gives none). | Make the fields optional, which drops `NOT NULL` on Prisma 7's next migration and makes them nullable in the Prisma 7 client. Or give them a column default such as a literal or `dbgenerated("<expression>")` (in Prisma 7; in Prisma 8 the same default is written `` sql`<expression>` ``), which Prisma 7's next migration sets: a field without a `@default` then becomes optional when creating records with the Prisma 7 client, and a field with a client-side generator such as `@default(uuid())` must have that `@default` replaced, because a field takes only one, after which the Prisma 7 client stops generating its value. Or choose another action, which replaces the foreign key on Prisma 7's next migration and leaves the Prisma 7 client unchanged. |
 | `PSL.PRISMA7_JUNCTION_ID_UNSUPPORTED` | An implicit many-to-many relation on a model without a single-field `@id`. | Give the model a single-field `@id`, or write the junction model out. |
 | `PSL.PRISMA7_JUNCTION_NAME_COLLISION` | A model in the same schema as an implicit many-to-many junction has the junction model's name (`PostToTag`, or the relation name). | Rename the model and keep its table with `@@map("<table>")`; Prisma 7's next migration is empty. |
 | `PSL.PRISMA7_RELATION_NAME_SHARED` | Implicit many-to-many relations on different models in the same schema use the same relation name; Prisma 7 creates one `_<name>` table, wired to only one of them. The same name in two schemas is fine: Prisma 7 creates a table in each. | Give each relation its own name. Renaming a relation that table does not reference makes Prisma 7's next migration create its own table; renaming the one it references moves the table's foreign keys to another relation, which fails on rows whose ids that relation's models lack. |
 | `PSL.PRISMA7_TABLE_COLLISION` | Two models map to the same table in one schema, or a model maps to the table of an implicit many-to-many relation (`_PostToTag`). | Give each model its own table. For a relation's table, rename the model's table with `@@map`, which makes Prisma 7's next migration create the table it never created; renaming the relation instead rebuilds its table as the model's and loses the relation's rows. |
-| `PSL.PRISMA7_UNKNOWN_DEFAULT` | A `@default` value the source cannot read, or `dbgenerated()` with no expression on a required field, which is not supported yet. | Use a literal, an enum member, or one of `autoincrement()`, `now()`, `dbgenerated("<expression>")`, `uuid()`, `ulid()`, `nanoid()`, `cuid()`. For `dbgenerated()`, either remove the `@default`, which makes Prisma 7's next migration drop the column default (`ALTER COLUMN ... DROP DEFAULT`) and both clients require the value on create, or write the column's database default as the expression, which Prisma 7's next migration sets on the column. |
+| `PSL.PRISMA7_UNKNOWN_DEFAULT` | A `@default` value the source cannot read. | Use a literal, an enum member, or one of `autoincrement()`, `now()`, `dbgenerated("<expression>")`, `uuid()`, `ulid()`, `nanoid()`, `cuid()`. |
 | `PSL.PRISMA7_JSON_NULL_DEFAULT_UNSUPPORTED` | A `Json` default of `"null"`, which the contract cannot tell apart from SQL `NULL`. | Remove the `@default` or give it another JSON value; either changes the column default on Prisma 7's next migration. |
 | `PSL.PRISMA7_OPTIONAL_GENERATED_FIELD_UNSUPPORTED` | `@default(uuid())`, another generator, or `@updatedAt` on an optional field. | Remove `@updatedAt` or the generator `@default(...)` and keep the `?`. The database does not change, and both clients then stop filling the value. |
 | `PSL.PRISMA7_UPDATED_AT_WITH_DEFAULT_UNSUPPORTED` | `@updatedAt` combined with `@default`. | Remove the `@default`. `@updatedAt` still sets the value on create and on update, and Prisma 7's next migration removes the column default. |
@@ -153,6 +185,8 @@ When URL binding is used, pool timeouts are configurable via `poolOptions`:
 
 - `poolOptions.connectionTimeoutMillis` (default `20_000`)
 - `poolOptions.idleTimeoutMillis` (default `30_000`)
+
+Reads are buffered by default. Pass `cursor` (typed `PostgresCursorOptions`, `{ batchSize?: number | undefined }`) to read through a server-side cursor (`pg-cursor`): `{ batchSize: 50 }` streams in batches of 50; `{}` or `{ batchSize: undefined }` in batches of 100; a `batchSize` that is not a positive integer fails the factory call. There is no flag that turns cursors off; leaving the option out does that. A `cursor` value with any other key, or a `batchSize` that is not a positive integer, fails the factory call with `RUNTIME.ARGUMENT_INVALID`. `postgresServerless()` accepts the same option.
 
 ### Prepared SQL and ORM rows
 
@@ -215,33 +249,35 @@ Re-exports the Postgres target pack (the value passed as `target:` to `defineCon
 
 ### `@internal/postgres/serverless`
 
-`@internal/postgres/serverless` exposes `postgresServerless(...)` for per-request runtimes. The returned client exposes only:
+`@internal/postgres/serverless` exposes `postgresServerless(...)` for per-request runtimes. It returns the serverless client, which holds no database connection and exposes:
 
-- `db.sql`
-- `db.context`
-- `db.stack`
-- `db.contract`
-- `db.connect({ url })` — returns `Promise<Runtime & AsyncDisposable>`
+- `postgres.sql`, `postgres.raw`, `postgres.enums`, `postgres.nativeEnums`
+- `postgres.context`, `postgres.contract`, `postgres.stack`
+- `postgres.connect({ url })` — returns `Promise<PostgresServerlessConnection<Contract>>`
 
-Each `connect()` call constructs a fresh `pg.Client` and a fresh `Runtime`. No `pg.Pool` is allocated. `[Symbol.asyncDispose]` calls `runtime.close()`, which closes the underlying client. `pg-cursor` is enabled by default; opt out via `cursor: { disabled: true }`.
+`PostgresServerlessConnection<Contract>` is `PostgresClient<Contract>` without `connect`: `sql`, `raw`, `enums`, `nativeEnums`, `context`, `contract` and `stack` (the same objects as on the serverless client), plus `orm`, `runtime()`, `transaction(fn)`, `prepare(...)`, `close()` and `[Symbol.asyncDispose]`.
+
+Each `connect()` call creates a fresh `pg.Client`, connects it to the database, and wraps it in a fresh runtime. When the database refuses the connection, rejects the credentials, or does not answer within 20 seconds, `connect()` rejects with `DRIVER.CONNECTION_FAILED` and ends the `pg.Client`. No `pg.Pool` is allocated. `close()` and `[Symbol.asyncDispose]` close the runtime once, which ends its `pg.Client`. After that, `db.runtime()`, ORM queries, `db.transaction(...)` and `db.prepare(...)` fail with `DRIVER.NOT_CONNECTED`. A connection has one database connection, a `pg.Client`, so inside `db.transaction(async (tx) => ...)` run every query through `tx`. Reads are buffered by default. To stream on some paths only, create a second serverless client with `cursor: { batchSize }` and open connections from it only on those paths; they read through `pg-cursor` in batches. On such a connection, finish or `break` a `for await` over a read before sending another query through `db`: the cursor holds the only database connection until the loop ends, so a query inside the loop waits forever. Behind Cloudflare Hyperdrive, reads with cursors on hang, so those paths hang there and the paths whose connections come from the serverless client without the option do not.
 
 ## Responsibilities
 
 - Build a static Postgres execution stack from target, adapter, and driver descriptors
-- Build a typed SQL authoring surface from the execution context
-- Build a static ORM root from the execution context
-- Normalize runtime binding input (`binding`, `url`, `pg`)
-- Lazily instantiate runtime resources on first `db.runtime()` or `db.connect(...)` call
-- Connect the internal Postgres driver through `db.connect(...)` or from initial binding options
-- Memoize runtime so repeated `db.runtime()` calls return one instance
+- Build the static members (`sql`, `raw`, `enums`, `nativeEnums`, `context`, `contract`, `stack`) from the execution context, once per client or serverless client
+- Build the runtime-bound members (`orm`, `runtime()`, `transaction()`, `prepare()`) over a runtime, for a client and for each connection
+- Normalize runtime binding input (`binding`, `url`, `pg`) for `postgres()`
+- Lazily instantiate a client's runtime resources on the first `db.runtime()` or `db.connect(...)` call, and memoize the runtime so repeated `db.runtime()` calls return one instance
+- Open one `pg.Client` per `connect({ url })` on a serverless client, and close it with the connection
 
 ## Architecture
+
+The diagram shows `postgres()`. A connection from `postgresServerless()` has the same static and runtime-bound members over one `pg.Client` instead of a lazy pool.
 
 ```mermaid
 flowchart TD
     App[App Code] --> Client[postgres(...)]
-    Client --> Static[Roots: sql orm context stack]
-    Client --> Lazy[runtime()]
+    Client --> Static[Static members: sql raw enums nativeEnums context contract stack]
+    Client --> Bound[Runtime-bound members: orm runtime() transaction prepare]
+    Bound --> Lazy[runtime() on first use]
 
     Lazy --> Instantiate[instantiateExecutionStack]
     Lazy --> Bind[Resolve binding: url or pg]

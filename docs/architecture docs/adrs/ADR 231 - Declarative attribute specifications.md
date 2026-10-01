@@ -1,6 +1,6 @@
 # ADR 231 — Declarative attribute specifications: composable argument combinators with typed inference
 
-**Status:** Accepted
+**Status:** Accepted. Amended 2026-09-22: top-level extension-block member values are declared through this same combinator kit via block specs (`structBlock` / `mapBlock`), and the shared `jsonValue()` rule reads native JSON-compatible literals from the AST — see [ADR 255 — Block specs bind top-level block values](ADR%20255%20-%20Block%20specs%20bind%20top-level%20block%20values.md). Central spec discovery and language-server consumption, listed below as follow-up, are delivered by [ADR 249 — Central attribute-spec registry](ADR%20249%20-%20Central%20attribute-spec%20registry.md).
 **Date:** 2026-06-29
 **Accepted:** 2026-08-27
 
@@ -50,7 +50,7 @@ The SQL and Mongo family interpreters are the first consumers. They define their
 
 The kit consumes `ExpressionAst` directly. No intermediate argument representation is introduced, and no combinator reparses flattened source text except `json()`, the deliberate quoted-JSON-object exception.
 
-Attributes are a PSL authoring concern, so the kit is in `psl-parser` rather than framework core. Field, model, and block attributes are all constructed through it. A block descriptor declares which attributes its block accepts, and the generic block reconstruction interprets them at parse time.
+Attributes are a PSL authoring concern, so the kit is in `psl-parser` rather than framework core. Field, model, and block attributes are all constructed through it. A block descriptor declares which attributes its block accepts. Symbol-table construction collects declarations without interpreting blocks; consumers then bind references and interpret block values and attributes against the complete snapshot, as described in ADR 255.
 
 ---
 
@@ -83,8 +83,9 @@ A combinator declares what it reads. The contexts nest by what the site being pa
 
 ```ts
 interface AttributeCtx {
-  readonly sourceId: string;
-  readonly sourceFile: SourceFile;
+  readonly sources: PslSources;
+  readonly symbols: SymbolTable;
+  readonly binder: Binder;
 }
 
 interface ModelAttributeCtx extends AttributeCtx {
@@ -93,11 +94,10 @@ interface ModelAttributeCtx extends AttributeCtx {
 
 interface FieldAttributeCtx extends ModelAttributeCtx {
   readonly field: FieldSymbol;
-  resolveReferencedModel(): ModelSymbol | undefined;
 }
 ```
 
-A block has no model, so a block attribute is parsed with only the source context. A combinator is usable at any level that carries the facts it declares, and rejected where those facts do not exist.
+A block has no model, so a block attribute is parsed without a model context. A combinator is usable at any level that carries the facts it declares, and rejected where those facts do not exist. Checked references read committed resolutions through `ctx.binder.symbolForNode`, rather than deriving scope from expression ancestry. The binder must use the same symbol table, sources, and registries as interpretation. It owns unresolved-reference diagnostics; combinators own expression-shape and entity-selector diagnostics and fail without additional diagnostics for absent or unresolved bindings.
 
 A spec fixes the attribute level and name, declares its arguments, and may refine the parsed result:
 
@@ -136,6 +136,7 @@ Positionals are fixed slots with an output key. Variadic positionals are not sup
 - `numLiteral()` parses any number literal and keeps its source text, for consumers that must not round it through a JavaScript number.
 - `int({ min, max })` parses an integer with optional inclusive bounds.
 - `bool()` parses a boolean literal.
+- `identifier()` accepts any bare identifier and returns its name as a string.
 - `identifier(name)` matches one exact bare identifier and preserves its literal type.
 
 There is no enum-specific combinator. A fixed vocabulary is a `oneOf` over pinned matchers, making the source spelling explicit:
@@ -157,9 +158,20 @@ These leaves perform direct AST checks. They do not wrap arktype schemas.
 
 `fieldRef()` parses a field-name identifier and validates it against the declaring model, so it is available to model and field attributes alike. `referencedFieldRef()` validates against the relation target, which only a field can resolve; cross-space references may defer the existence check when no referenced model is locally available. Both return the authored field name as a string.
 
-`entityRef()` parses an unresolved model-name string. Existence and family semantics remain downstream concerns.
+`entityRef(expected)` checks that the referenced declaration exists and has the expected kind: `{ kind: 'model' }`, `{ kind: 'compositeType' }`, `{ kind: 'namedType' }`, or `{ kind: 'block', keyword }`. It returns the selected declaration plus its lexical namespace (undefined at top level). Resolution prefers the containing namespace's declaration, then top level, never a sibling namespace; forward references are allowed, and missing or wrong-kind targets produce source-anchored expression diagnostics.
 
-The current kit does not return declaration-bearing entity coordinates, provide a document-path scope, or include a codec reference combinator. Those would be separate additions if a future consumer requires them.
+```ts
+const baseSpec = modelAttribute('base', {
+  documentation: 'Declares the base model.',
+  positional: [
+    { key: 'base', type: entityRef({ kind: 'model' }), documentation: 'The model to inherit from.' },
+  ],
+});
+```
+
+`oneOf(entityRef(expected), identifier())` prefers a checked identity and otherwise returns an unchecked name, without leaking failed-alternative diagnostics.
+
+The current kit does not provide a document-path scope or include a codec reference combinator. Those would be separate additions if a future consumer requires them.
 
 ### Native collections
 
@@ -244,7 +256,7 @@ const indexFieldElement = oneOf(
   fieldRef(),
   funcCall('wildcard', {
     documentation: 'Indexes document fields using a wildcard index.',
-    positional: [{ key: 'scope', type: optional(entityRef()), documentation: 'The field path to index recursively. Omit for all document fields.' }],
+    positional: [{ key: 'scope', type: optional(identifier()), documentation: 'The field path to index recursively. Omit for all document fields.' }],
   }),
   ...fieldNames.map((name) => funcCall(name, sortSig)),
 );
@@ -320,7 +332,6 @@ The current implementation is sufficient for interpreter consumption but not yet
 ## Follow-up work
 
 - Add central spec discovery and traversable combinator metadata for language-tooling consumers.
-- Decide whether reference combinators should expose declaration-bearing results while preserving the interpreter's string-oriented lowering needs.
 - Revisit signature-derived `TypedFuncCall` output types if downstream code needs statically discriminated call unions.
 - Decide whether literal-to-field-type compatibility should remain in lowering or gain a dedicated field-context combinator.
 

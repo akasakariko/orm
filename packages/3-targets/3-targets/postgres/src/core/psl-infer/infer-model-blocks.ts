@@ -1,11 +1,15 @@
-import type { ColumnDefault } from '@internal/contract/types';
-import type {
-  DefaultMappingOptions,
-  PslPrinterOptions,
-  PslTypeMap,
-  RelationField,
-} from '@internal/family-sql/psl-infer';
-import { mapDefault, toFieldName, toModelName } from '@internal/family-sql/psl-infer';
+import {
+  type ColumnDefault,
+  type ColumnDefaultLiteralInputValue,
+  isColumnDefault,
+} from '@internal/contract/types';
+import {
+  type DefaultMappingOptions,
+  mapDefault,
+  type PslTypeMap,
+} from '@internal/family-sql/psl-build';
+import type { PslPrinterOptions, RelationField } from '@internal/family-sql/psl-infer';
+import { toFieldName, toModelName } from '@internal/family-sql/psl-infer';
 import type {
   PslAttributeArgument,
   PslField,
@@ -14,40 +18,37 @@ import type {
   PslModelAttribute,
   PslTypeConstructorCall,
 } from '@internal/framework-components/psl-ast';
+import { escapePslString } from '@internal/sql-relational-core/ast';
 import {
   composeCheckWirePrefix,
   computeCheckContentHash,
   formatWireName,
 } from '@internal/sql-schema-ir/naming';
-import type { SqlColumnIR, SqlTableIR } from '@internal/sql-schema-ir/types';
+import {
+  defaultInCanonicalForm,
+  type SqlColumnIR,
+  type SqlTableIR,
+} from '@internal/sql-schema-ir/types';
 import { ifDefined } from '@internal/utils/defined';
 import { postgresRenderCheckExpressions } from '../check-expressions';
-import { buildDanglingForeignKeyWarning, type DanglingForeignKeyInfo } from './infer-foreign-keys';
 import {
   buildCheckAttribute,
   buildIndexAttribute,
   buildModelConstraintAttribute,
-} from './infer-index-attributes';
-import {
-  createUniqueFieldName,
-  resolveColumnFieldName,
-  type TableColumnFieldNameMap,
-} from './infer-names';
+} from '../psl-build/index-attributes';
 import {
   buildAttribute,
   buildMapAttribute,
   buildSimpleConstraintFieldAttribute,
-  escapePslString,
-  formatPslListLiteralValue,
-  formatPslValue,
   namedArg,
-  type PslDefaultValueFormat,
-  parseColumnDefault,
   parseDefaultAttributeString,
   positionalArg,
-  pslDefaultValueFormat,
   SYNTHETIC_SPAN,
-} from './psl-literals';
+} from '../psl-build/psl-literals';
+import { createUniqueFieldName } from '../psl-build/unique-name';
+import type { InferredColumnDefaults } from './infer-default-codec';
+import { buildDanglingForeignKeyWarning, type DanglingForeignKeyInfo } from './infer-foreign-keys';
+import { resolveColumnFieldName, type TableColumnFieldNameMap } from './infer-names';
 
 export function buildModel(
   table: SqlTableIR,
@@ -56,6 +57,7 @@ export function buildModel(
   fieldNamesByTable: ReadonlyMap<string, TableColumnFieldNameMap>,
   defaultMapping: DefaultMappingOptions | undefined,
   rawDefaultParser: PslPrinterOptions['parseRawDefault'],
+  columnDefaults: InferredColumnDefaults,
   relationFields: readonly RelationField[],
   danglingForeignKeys: readonly DanglingForeignKeyInfo[],
   rlsEnabled = false,
@@ -92,6 +94,7 @@ export function buildModel(
         fieldNameMap,
         defaultMapping,
         rawDefaultParser,
+        columnDefaults,
         pkColumns,
         isSinglePk,
         singlePkConstraintName,
@@ -223,6 +226,7 @@ function buildScalarField(
   fieldNameMap: TableColumnFieldNameMap | undefined,
   defaultMapping: DefaultMappingOptions | undefined,
   rawDefaultParser: PslPrinterOptions['parseRawDefault'],
+  columnDefaults: InferredColumnDefaults,
   pkColumns: ReadonlySet<string>,
   isSinglePk: boolean,
   singlePkConstraintName: string | undefined,
@@ -281,11 +285,17 @@ function buildScalarField(
     attributes.push(buildSimpleConstraintFieldAttribute('id', singlePkConstraintName));
   }
 
+  const isEnumColumn = enumPslName !== undefined;
   const defaultAttribute = inferDefaultAttribute(
     column,
-    enumPslName === undefined ? pslDefaultValueFormat(resolution.pslType.name) : formatPslValue,
-    defaultMapping,
     rawDefaultParser,
+    {
+      ...defaultMapping,
+      ...ifDefined('columnDataType', columnDefaults.dataTypeOf(resolution.pslType, isEnumColumn)),
+      list: column.many === true,
+    },
+    (value) =>
+      columnDefaults.readsBack(value, resolution.pslType, isEnumColumn, column.many === true),
   );
   if (defaultAttribute !== undefined) {
     attributes.push(parseDefaultAttributeString(defaultAttribute));
@@ -338,15 +348,14 @@ function buildScalarField(
 }
 
 /**
- * A literal default prints as the PSL literal its codec accepts. A literal that has no such PSL
- * literal prints as `dbgenerated(...)` with the expression Postgres reported: `contract emit`
- * accepts that on a scalar column and rejects it at the field on a list column.
+ * A literal default prints as the PSL literal the column's data type takes. A literal that has no
+ * such PSL literal prints as a `sql` tagged literal holding the expression Postgres reported.
  */
 function inferDefaultAttribute(
   column: SqlColumnIR,
-  valueFormat: PslDefaultValueFormat,
-  defaultMapping: DefaultMappingOptions | undefined,
   rawDefaultParser: PslPrinterOptions['parseRawDefault'],
+  defaultMapping: DefaultMappingOptions,
+  readsBack: (value: ColumnDefaultLiteralInputValue) => boolean,
 ): string | undefined {
   if (
     column.default === undefined &&
@@ -364,9 +373,8 @@ function inferDefaultAttribute(
     // A list column's literal default prints from `resolvedDefault`: the raw
     // SQL text read against the element type only yields a function, which
     // the interpreter rejects on a list column.
-    const { value } = column.resolvedDefault;
-    return Array.isArray(value)
-      ? literalOrRawAttribute(formatPslListLiteralValue(value, valueFormat), column, defaultMapping)
+    return Array.isArray(column.resolvedDefault.value)
+      ? literalOrRawAttribute(column.resolvedDefault, column, defaultMapping, readsBack)
       : undefined;
   }
   const parsed = parseColumnDefault(column.default, column.nativeType, rawDefaultParser);
@@ -374,31 +382,49 @@ function inferDefaultAttribute(
     return undefined;
   }
   if (parsed.kind === 'literal') {
-    return literalOrRawAttribute(valueFormat(parsed.value), column, defaultMapping);
+    return literalOrRawAttribute(parsed, column, defaultMapping, readsBack);
   }
   return mappedAttribute(parsed, defaultMapping);
 }
 
+/**
+ * A literal no data type the column takes writes, or that the column's codec does not read back,
+ * has no PSL literal, so the raw database default prints instead.
+ */
 function literalOrRawAttribute(
-  literal: string | undefined,
+  columnDefault: ColumnDefault,
   column: SqlColumnIR,
-  defaultMapping: DefaultMappingOptions | undefined,
+  defaultMapping: DefaultMappingOptions,
+  readsBack: (value: ColumnDefaultLiteralInputValue) => boolean,
 ): string | undefined {
-  if (literal !== undefined) {
-    return `@default(${literal})`;
-  }
+  const printed: ColumnDefault =
+    columnDefault.kind === 'literal'
+      ? {
+          kind: 'literal',
+          value: defaultInCanonicalForm(
+            columnDefault.value,
+            defaultMapping.columnDataType === undefined
+              ? undefined
+              : defaultMapping.dataTypes?.get(defaultMapping.columnDataType)?.toCanonicalForm,
+            defaultMapping.list === true,
+          ).value,
+        }
+      : columnDefault;
+  const result =
+    printed.kind === 'literal' && !readsBack(printed.value)
+      ? undefined
+      : mapDefault(printed, defaultMapping);
+  if (result !== undefined) return result.attribute;
   return typeof column.default === 'string'
     ? mappedAttribute({ kind: 'function', expression: column.default }, defaultMapping)
     : undefined;
 }
 
-/** A default the mapping can only describe in a comment is dropped: a field AST node has no comment. */
 function mappedAttribute(
   columnDefault: ColumnDefault,
   defaultMapping: DefaultMappingOptions | undefined,
 ): string | undefined {
-  const result = mapDefault(columnDefault, defaultMapping);
-  return 'attribute' in result ? result.attribute : undefined;
+  return mapDefault(columnDefault, defaultMapping)?.attribute;
 }
 
 export function buildRelationField(
@@ -464,4 +490,23 @@ export function buildRelationField(
     attributes: attrs,
     span: SYNTHETIC_SPAN,
   };
+}
+
+/**
+ * Resolves a `SqlColumnIR.default` value into a normalized {@link ColumnDefault}.
+ *
+ * `SqlSchemaIR` types the column default as `string` (a raw database default
+ * expression). Some legacy fixtures and tests still pass already-normalized
+ * `ColumnDefault` objects in the same slot, so we accept either shape
+ * defensively at runtime.
+ */
+function parseColumnDefault(
+  value: unknown,
+  nativeType: string | undefined,
+  rawDefaultParser: PslPrinterOptions['parseRawDefault'],
+): ColumnDefault | undefined {
+  if (typeof value === 'string') {
+    return rawDefaultParser ? rawDefaultParser(value, nativeType) : undefined;
+  }
+  return isColumnDefault(value) ? value : undefined;
 }

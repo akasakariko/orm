@@ -1,3 +1,5 @@
+import { blindCast } from '@internal/utils/casts';
+
 export type TokenKind =
   | 'Ident'
   | 'StringLiteral'
@@ -66,7 +68,10 @@ export class Tokenizer {
       this.#buffer.push(token);
     }
 
-    return this.#buffer[offset] as Token;
+    return blindCast<
+      Token,
+      'For a nonnegative integer offset, the loop fills the buffer through that offset or returns EOF'
+    >(this.#buffer[offset]);
   }
 
   #scanNext(): Token {
@@ -74,6 +79,15 @@ export class Tokenizer {
     this.#pos += token.text.length;
     return token;
   }
+}
+
+/**
+ * Whether the tokenizer reads `text` as one identifier: a letter or `_`, then letters, `_`, ASCII
+ * digits or `-`, and not one of the number words `NaN` and `Infinity`.
+ */
+export function isPslIdentifier(text: string): boolean {
+  const token = scan(text, 0);
+  return token.kind === 'Ident' && token.text === text;
 }
 
 function scan(source: string, pos: number): Token {

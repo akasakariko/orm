@@ -50,9 +50,9 @@ import type { PostgresNativeEnumSchemaNode } from '../schema-ir/postgres-native-
 import type { PostgresTableSchemaNode } from '../schema-ir/postgres-table-schema-node';
 import { PostgresSchemaNodeKind } from '../schema-ir/schema-node-kinds';
 import {
+  buildSetDefaultColumn,
   renderColumnAlterType,
   renderColumnDdl,
-  renderColumnDefaultSql,
 } from './column-ddl-rendering';
 import { resolveNamespaceIdForDdlSchema } from './control-policy';
 import {
@@ -72,6 +72,7 @@ import {
   CreateNativeEnumTypeCall,
   CreateSchemaCall,
   CreateTableCall,
+  columnNameOfCall,
   DisableRowLevelSecurityCall,
   DropCheckConstraintCall,
   DropColumnCall,
@@ -196,13 +197,10 @@ function classifyCall(call: PostgresOpFactoryCall): CallCategory {
       // to preserve the codec-emitted label and precheck/postcheck.
       // Classification falls back to inspecting the underlying op's target
       // details (`objectType: 'type'`).
-      const op = (
-        call as {
-          op?: {
-            target?: { details?: { objectType?: string } };
-          };
-        }
-      ).op;
+      const op = blindCast<
+        { op?: { target?: { details?: { objectType?: string } } } },
+        'RawSqlCall exposes op details used only for sequencing type operations'
+      >(call).op;
       const objectType = op?.target?.details?.objectType;
       if (objectType === 'type') return 'dep';
       return 'alter';
@@ -252,18 +250,20 @@ function locationForCall(call: PostgresOpFactoryCall): SqlPlannerConflict['locat
   // Most Postgres call classes expose `tableName`/`columnName`/`indexName`/
   // `constraintName` as readonly fields. We avoid `toOp()` here because a
   // `DataTransformCall` intentionally throws from `toOp`.
-  const anyCall = call as unknown as {
-    tableName?: string;
-    columnName?: string;
-    indexName?: string;
-    newIndexName?: string;
-    constraintName?: string;
-    newConstraintName?: string;
-    typeName?: string;
-    policyName?: string;
-    newPolicyName?: string;
-    policy?: { readonly name?: string };
-  };
+  const anyCall = blindCast<
+    {
+      tableName?: string;
+      indexName?: string;
+      newIndexName?: string;
+      constraintName?: string;
+      newConstraintName?: string;
+      typeName?: string;
+      policyName?: string;
+      newPolicyName?: string;
+      policy?: { readonly name?: string };
+    },
+    'Postgres migration call classes expose location-bearing readonly properties without a shared interface'
+  >(call);
   const location: {
     entityKind?: string;
     entityName?: string;
@@ -279,7 +279,8 @@ function locationForCall(call: PostgresOpFactoryCall): SqlPlannerConflict['locat
     location.entityKind = 'native_enum';
     location.entityName = anyCall.typeName;
   }
-  if (anyCall.columnName) location.column = anyCall.columnName;
+  const columnName = columnNameOfCall(call);
+  if (columnName) location.column = columnName;
   // A rename call carries old/new index names; the new name is the index's
   // contract-side identity, so it is the conflict location.
   if (anyCall.indexName) location.index = anyCall.indexName;
@@ -293,7 +294,12 @@ function locationForCall(call: PostgresOpFactoryCall): SqlPlannerConflict['locat
   if (anyCall.policyName) location.rlsPolicy = anyCall.policyName;
   else if (anyCall.policy?.name) location.rlsPolicy = anyCall.policy.name;
   else if (anyCall.newPolicyName) location.rlsPolicy = anyCall.newPolicyName;
-  return Object.keys(location).length > 0 ? (location as SqlPlannerConflictLocation) : undefined;
+  return Object.keys(location).length > 0
+    ? blindCast<
+        SqlPlannerConflictLocation,
+        'non-empty conflict location has at least one valid discriminating property'
+      >(location)
+    : undefined;
 }
 
 export function conflictForDisallowedCall(
@@ -306,6 +312,7 @@ export function conflictForDisallowedCall(
     kind: conflictKindForCall(call),
     summary,
     why: 'Use `migration new` to author a custom migration for this change.',
+    refusedOperationClass: call.operationClass,
     ...(location ? { location } : {}),
   };
 }
@@ -713,14 +720,13 @@ function mapColumnDefaultNodeIssue(
     SqlColumnDefaultIR,
     'a not-found/not-equal column-default issue always carries the expected default node'
   >(issue.expected);
-  const defaultSql = renderColumnDefaultSql(defaultNode, codecHooks);
-  if (!defaultSql) return ok([]);
+  const column = buildSetDefaultColumn(columnName, defaultNode, codecHooks);
+  if (column === undefined) return ok([]);
   return ok([
     new SetDefaultCall(
       schemaName,
       tableName,
-      columnName,
-      defaultSql,
+      column,
       issueOutcome(issue) === 'not-equal' ? 'widening' : 'additive',
     ),
   ]);
@@ -1102,7 +1108,7 @@ export function planIssues(
     ...byCategory('index'),
     ...byCategory('foreignKey'),
     // Enablement changes run after all relational DDL (the table must exist)
-    // and before the policy calls the planner appends after `planIssues` —
+    // and before the policy creates the planner appends after `planIssues` —
     // the same position the retired imperative enable-on-first-policy used.
     ...byCategory('rlsEnable'),
   ];

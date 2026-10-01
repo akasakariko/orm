@@ -60,6 +60,27 @@ const posts = await db.Post
   .all();
 ```
 
+## Skipping rows that collide with a unique constraint
+
+`createAll` and `createAndCount` take an options object in second position that asks the database to skip rows colliding with a unique constraint instead of failing the whole statement.
+
+```ts
+// Skip on any unique constraint of the table.
+const inserted = await db.User.createAll(rows, { onConflict: 'skip' });
+
+// Skip only on the constraint over `email`.
+const added = await db.User.createAndCount(rows, {
+  onConflict: 'skip',
+  conflictOn: ['email'],
+});
+```
+
+`createAll` yields only the rows the database inserted; `createAndCount` returns its count. A collision on a constraint other than the one `conflictOn` names is not skipped — it surfaces as a unique violation.
+
+The option needs the contract capability `insertOnConflictSkip`, and `insertOnConflictWithoutTarget` as well when `conflictOn` is omitted. A contract emitted before the adapters reported these keys is refused with `ORM.CAPABILITY_MISSING`; re-emit it. MTI variant collections refuse the option with `ORM.OPERATION_UNSUPPORTED`. `create()` does not take it.
+
+The optional `configure` callback may still be passed in second position when there are no options.
+
 ## Prepared row descriptions
 
 Built-in collection chains expose terminal-only `.prepared.all(configure?)` and `.prepared.first(filter?, configure?)` views. They synchronously return a `Preparable<DbRow, Result>` without executing it: a description containing a SQL `plan` and a required `consume` function. The description is not itself a `SqlQueryPlan`. Filters, projection, includes, variants, first-row limit replacement and read annotations use the ordinary row pipeline.
@@ -105,6 +126,52 @@ const posts = await db.Post
   .limit(10)
   .all();
 ```
+
+Every `.asc()` / `.desc()` takes an optional `{ nulls: 'first' | 'last' }`, rendered as `NULLS FIRST` / `NULLS LAST` after the direction. Without it, the database's default null placement applies.
+
+### Ordering by a relation
+
+Inside `.orderBy(...)`, a relation offers more than `some` / `every` / `none`:
+
+- A to-one relation (`1:1`, `N:1`) exposes each orderable scalar field of the related model, with `.asc()` / `.desc()` and nothing else. A row whose related row is missing (a null foreign key) orders as `NULL`.
+- A to-many relation (`1:N`, `N:M`) exposes `count(predicate?)`, the number of related rows, optionally only those matching a predicate on the related model. An `N:M` count goes through the junction table.
+
+```ts
+// Posts by their author's name, then by id.
+const posts = await db.Post
+  .orderBy([(post) => post.author.name.asc(), (post) => post.id.asc()])
+  .all();
+
+// Users with the most posts first.
+const users = await db.User
+  .orderBy((user) => user.posts.count().desc())
+  .all();
+
+// Count only the posts with more than 10 views.
+const byPopularPosts = await db.User
+  .orderBy((user) => user.posts.count((post) => post.views.gt(10)).desc())
+  .all();
+
+// N:M: count tags through the junction table.
+const byTagCount = await db.User
+  .orderBy((user) => user.tags.count().desc())
+  .all();
+
+// Users with no inviter last, in either direction.
+const byInviter = await db.User
+  .orderBy((user) => user.invitedBy.name.desc({ nulls: 'last' }))
+  .all();
+```
+
+Each relation order is a correlated scalar subquery built from the same join the relation filters use, so the main query gains no join and its rows never multiply:
+
+```sql
+SELECT "users"."id" AS "id" FROM "public"."users" ORDER BY (SELECT COUNT(*) AS "count" FROM "public"."posts" WHERE "posts"."user_id" = "users"."id") DESC
+```
+
+The reach is one hop: the related model's own relations are not exposed. A to-one relation has no `count`, and a to-many relation exposes no fields. If a related field is named `some`, `every`, `none` or `count`, the relation method wins and that field cannot be ordered through the relation.
+
+`cursor()` builds its keyset from plain columns only. It throws `ORM.ARGUMENT_INVALID`, naming the `orderBy` position, when an active order is a relation column, a relation count, an extension-operation result, or sets `nulls`. `distinctOn()` throws the same error when one of its leading orders (as many as there are `distinctOn` columns) is not a plain column, because Postgres needs those orders to match the `DISTINCT ON` columns; a relation order after them is accepted. Paginate such orders with `.limit(...)` / `.offset(...)`.
 
 ## Codec Roundtrip
 

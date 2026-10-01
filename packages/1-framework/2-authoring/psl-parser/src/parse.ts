@@ -1,6 +1,8 @@
-import type { PslDiagnostic, PslDiagnosticCode } from '@internal/framework-components/psl-ast';
+import type { PslParserOptions } from '@internal/config/config-types';
+import type { PslDiagnosticCode } from '@internal/framework-components/psl-ast';
 import { UNSPECIFIED_PSL_NAMESPACE_ID } from '@internal/framework-components/psl-ast';
-import { type Range, SourceFile } from './source-file';
+import type { PslDiagnostic } from './diagnostic';
+import { PslSources, SourceFile } from './source-file';
 import { DocumentAst } from './syntax/ast/declarations';
 import type { GreenNode } from './syntax/green';
 import { GreenNodeBuilder } from './syntax/green-builder';
@@ -8,26 +10,12 @@ import { createSyntaxTree } from './syntax/red';
 import type { SyntaxKind } from './syntax/syntax-kind';
 import { isTerminatedStringLiteral, type Token, Tokenizer, type TokenKind } from './tokenizer';
 
-export interface ParseDiagnostic {
-  readonly code: PslDiagnostic['code'];
-  readonly message: string;
-  readonly range: Range;
-}
+export type ParseDiagnostic = PslDiagnostic;
 
 export interface ParseResult {
   readonly document: DocumentAst;
   readonly diagnostics: readonly ParseDiagnostic[];
-  readonly sourceFile: SourceFile;
-}
-
-export type PslGrammar = 'psl' | 'prisma7';
-
-export interface ParseOptions {
-  /**
-   * `prisma7` also reads two Prisma 7 constructs: `@` attributes after an `enum` member, and field
-   * lines in a `view` body. Defaults to `psl`, which reads neither.
-   */
-  readonly grammar?: PslGrammar;
+  readonly sources: PslSources;
 }
 
 const TRIVIA_KINDS: ReadonlySet<TokenKind> = new Set<TokenKind>([
@@ -46,7 +34,7 @@ export interface DiagnosticMark {
 }
 
 /**
- * The fault-tolerant parser substrate the grammars drive. Trivia is flushed
+ * The fault-tolerant parser substrate the parse functions below drive. Trivia is flushed
  * into the enclosing open node, so every child node spans exactly its first
  * through last significant token.
  */
@@ -58,9 +46,9 @@ export class Cursor {
   #offset = 0;
   #depth = 0;
 
-  constructor(source: string) {
+  constructor(filename: string, source: string) {
     this.#tokenizer = new Tokenizer(source);
-    this.#sourceFile = new SourceFile(source);
+    this.#sourceFile = new SourceFile(filename, source);
   }
 
   get diagnostics(): readonly ParseDiagnostic[] {
@@ -166,6 +154,7 @@ export class Cursor {
     const start = mark.offset;
     const end = start + mark.length;
     this.#diagnostics.push({
+      filename: this.#sourceFile.filename,
       code,
       message,
       range: {
@@ -198,6 +187,7 @@ export function parseExpression(cursor: Cursor): GreenNode | undefined {
     parseObjectLiteralExpr(cursor) ??
     parseTaggedLiteral(cursor) ??
     parseFunctionCall(cursor) ??
+    parsePathExpr(cursor) ??
     parseBooleanLiteralExpr(cursor) ??
     parseIdentifierExpr(cursor)
   );
@@ -399,33 +389,67 @@ export function parseObjectField(cursor: Cursor): GreenNode {
 }
 
 /**
- * Whether the next tokens open a call: a bare `Ident(` or a namespace-qualified
- * `Ident.Ident(`. The lookahead is deliberately bounded so a bare dotted
- * reference like `a.b` is not mistaken for a call, rather than scanning an
- * unbounded dotted chain ahead to find the paren.
+ * The number of significant tokens in the dotted chain `Ident ('.' Ident)*` at
+ * the cursor: 1 for `a`, 3 for `a.b`, 5 for `a.b.c`; 0 when no `Ident` is next.
  */
-function isCallAhead(cursor: Cursor): boolean {
-  if (cursor.peekKind() !== 'Ident') return false;
-  if (cursor.peekKind(1) === 'LParen') return true;
-  return (
-    cursor.peekKind(1) === 'Dot' &&
-    cursor.peekKind(2) === 'Ident' &&
-    cursor.peekKind(3) === 'LParen'
-  );
+function dottedChainLength(cursor: Cursor): number {
+  if (cursor.peekKind() !== 'Ident') return 0;
+  let length = 1;
+  while (cursor.peekKind(length) === 'Dot' && cursor.peekKind(length + 1) === 'Ident') {
+    length += 2;
+  }
+  return length;
 }
 
 /**
- * Parses a function/constructor call — bare `autoincrement()` or qualified
- * `temporal.updatedAt()`. Returns `undefined` unless {@link isCallAhead}
- * confirms a trailing `(`, so the `parseExpression` chain falls through to the
- * boolean and bare-identifier forms.
+ * Whether the next tokens open a call: a dotted chain followed by `(`, such as
+ * `autoincrement(`, `temporal.updatedAt(` or `address.geo.lat(`. A dotted chain
+ * with no `(` after it, like `a.b`, is a path, not a call.
+ */
+function isCallAhead(cursor: Cursor): boolean {
+  const chain = dottedChainLength(cursor);
+  return chain > 0 && cursor.peekKind(chain) === 'LParen';
+}
+
+/**
+ * Parses a function/constructor call — bare `autoincrement()` or dotted
+ * `address.city(sort: Asc)`. A dotted callee is a `PathExpr`, the node the same
+ * chain gets without the call, so `address.city` has one shape whether or not
+ * it is called; a bare callee is a `QualifiedName`. Returns `undefined` unless
+ * {@link isCallAhead} confirms a trailing `(`, so the `parseExpression` chain
+ * falls through to the path, boolean and bare-identifier forms.
  */
 export function parseFunctionCall(cursor: Cursor): GreenNode | undefined {
   if (!isCallAhead(cursor)) return undefined;
+  const chain = dottedChainLength(cursor);
   cursor.startNode('FunctionCall');
-  parseQualifiedName(cursor);
+  if (chain > 1) {
+    parsePath(cursor, chain);
+  } else {
+    parseQualifiedName(cursor);
+  }
   if (cursor.peekKind() === 'LParen') {
     parseParenArgs(cursor);
+  }
+  return cursor.finishNode();
+}
+
+/**
+ * Parses a member path `Ident ('.' Ident)+` that is neither a call nor the tag
+ * of a tagged literal, such as `address.city` in `@@index([address.city])`.
+ */
+export function parsePathExpr(cursor: Cursor): GreenNode | undefined {
+  const chain = dottedChainLength(cursor);
+  if (chain < 3) return undefined;
+  return parsePath(cursor, chain);
+}
+
+function parsePath(cursor: Cursor, chain: number): GreenNode {
+  cursor.startNode('PathExpr');
+  parseIdentifier(cursor);
+  for (let consumed = 1; consumed < chain; consumed += 2) {
+    cursor.bump();
+    parseIdentifier(cursor);
   }
   return cursor.finishNode();
 }
@@ -527,18 +551,23 @@ type MemberParser = (cursor: Cursor) => void;
  * Parses a full PSL document. Never throws — malformed input yields diagnostics
  * and a recovered tree, not an exception.
  */
-export function parse(source: string, options: ParseOptions = {}): ParseResult {
-  const cursor = new Cursor(source);
-  const green = parseDocument(cursor, options.grammar ?? 'psl');
+export function parse(
+  source: string,
+  filename: string,
+  options: PslParserOptions = {},
+): ParseResult {
+  const cursor = new Cursor(filename, source);
+  const green = parseDocument(cursor, options);
   const root = createSyntaxTree(green);
   const document = DocumentAst.cast(root) ?? new DocumentAst(root);
-  return { document, diagnostics: cursor.diagnostics, sourceFile: cursor.sourceFile };
+  const sources = new PslSources([[document.syntax, cursor.sourceFile]]);
+  return { document, diagnostics: cursor.diagnostics, sources };
 }
 
-function parseDocument(cursor: Cursor, grammar: PslGrammar): GreenNode {
+function parseDocument(cursor: Cursor, options: PslParserOptions): GreenNode {
   cursor.startNode('Document');
   while (cursor.peekKind() !== 'Eof') {
-    parseDeclaration(cursor, false, grammar);
+    parseDeclaration(cursor, false, options);
   }
   cursor.flushTrivia(); // attach trailing trivia so the round-trip stays lossless
   return cursor.finishNode();
@@ -561,7 +590,11 @@ function keywordIs(cursor: Cursor, keyword: string): boolean {
  * Recovery runs via the `if (!node)` tail rather than as a `??` arm, because it
  * appends raw tokens to the open parent instead of returning a child node.
  */
-function parseDeclaration(cursor: Cursor, insideNamespace: boolean, grammar: PslGrammar): void {
+function parseDeclaration(
+  cursor: Cursor,
+  insideNamespace: boolean,
+  options: PslParserOptions,
+): void {
   const name = cursor.peekKind(1) === 'Ident' ? cursor.peekToken(1).text : '';
   if (insideNamespace && keywordIs(cursor, 'namespace')) {
     cursor.diagnostic(
@@ -585,10 +618,10 @@ function parseDeclaration(cursor: Cursor, insideNamespace: boolean, grammar: Psl
 
   const node =
     parseModel(cursor) ??
-    parseNamespace(cursor, grammar) ??
+    parseNamespace(cursor, options) ??
     parseCompositeType(cursor) ??
     parseTypesBlock(cursor) ??
-    parseGenericBlock(cursor, grammar);
+    parseGenericBlock(cursor, options);
   if (!node) {
     parseUnsupportedTopLevel(cursor);
   }
@@ -639,14 +672,10 @@ export function parseModel(cursor: Cursor): GreenNode | undefined {
  * {` with no name) routed to its dedicated parser. The generic keyword set is
  * open, so a bare identifier with no brace (e.g. `oops`) is read as an unfinished
  * custom declaration rather than unsupported content.
- *
- * With the `prisma7` grammar, a `view` block stays a generic block (so interpreters keep rejecting
- * the keyword), but its body is read like a model body, so the field lines parse as
- * `FieldDeclaration` nodes with spans instead of mangled entries.
  */
 export function parseGenericBlock(
   cursor: Cursor,
-  grammar: PslGrammar = 'psl',
+  options: PslParserOptions,
 ): GreenNode | undefined {
   if (cursor.peekKind() !== 'Ident') return undefined;
   const keyword = cursor.peekToken().text;
@@ -658,7 +687,7 @@ export function parseGenericBlock(
     parseIdentifier(cursor);
   }
   if (cursor.peekKind() === 'LBrace') {
-    parseBlockBody(cursor, genericBlockMemberParser(keyword, grammar));
+    parseBlockBody(cursor, genericBlockMemberParser(keyword, options));
   } else {
     cursor.diagnostic(
       'PSL_INVALID_DECLARATION',
@@ -670,9 +699,9 @@ export function parseGenericBlock(
   return cursor.finishNode();
 }
 
-export function parseNamespace(cursor: Cursor, grammar: PslGrammar = 'psl'): GreenNode | undefined {
+export function parseNamespace(cursor: Cursor, options: PslParserOptions): GreenNode | undefined {
   if (!keywordIs(cursor, 'namespace')) return undefined;
-  return parseBlock(cursor, 'Namespace', true, (inner) => parseDeclaration(inner, true, grammar));
+  return parseBlock(cursor, 'Namespace', true, (inner) => parseDeclaration(inner, true, options));
 }
 
 export function parseCompositeType(cursor: Cursor): GreenNode | undefined {
@@ -745,13 +774,14 @@ function parseNamedTypeMember(cursor: Cursor): void {
 }
 
 /**
- * With the `prisma7` grammar, a `view` body is read like a model body and an `enum` member may
- * carry `@` attributes (`USER @map("user")`). Every other generic block, and every generic block
- * with the `psl` grammar, reads plain `key = value` entries.
+ * A generic block reads `key = value` entries and bare keys; in an `enum` block those may carry `@`
+ * attributes (`USER @map("user")`). In the `prisma-7` grammar, a `view` body is read like a model
+ * body. Each interpreter decides whether it accepts the block and its members.
  */
-function genericBlockMemberParser(keyword: string, grammar: PslGrammar): MemberParser {
-  if (grammar === 'prisma7' && keyword === 'view') return parseModelMember;
-  if (grammar === 'prisma7' && keyword === 'enum') return parseEnumMember;
+function genericBlockMemberParser(keyword: string, options: PslParserOptions): MemberParser {
+  // biome-ignore lint/plugin/no-family-vocabulary: the parser names the grammar versions it parses
+  if (keyword === 'view' && options.grammar === 'prisma-7') return parseModelMember;
+  if (keyword === 'enum') return parseEnumMember;
   return parseKeyValueMember;
 }
 
@@ -820,9 +850,9 @@ export function parseNamedType(cursor: Cursor): GreenNode | undefined {
 
 /**
  * A generic-block entry is either `key = value` or a bare `key` (committing a
- * `KeyValuePair` carrying only the key). With `memberAttributes` (enum blocks parsed with the
- * `prisma7` grammar) any number of `@` attributes may follow, as in `USER @map("user")`. A
- * `key =` with no following expression is flagged.
+ * `KeyValuePair` carrying only the key). With `memberAttributes` (enum blocks) any number of `@`
+ * attributes may follow, as in `USER @map("user")`. A `key =` with no following expression is
+ * flagged.
  */
 export function parseKeyValue(
   cursor: Cursor,

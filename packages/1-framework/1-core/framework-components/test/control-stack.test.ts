@@ -1,4 +1,5 @@
 import type { JsonValue } from '@internal/contract/types';
+import { InternalError } from '@internal/utils/internal-error';
 import type { StandardSchemaV1 } from '@standard-schema/spec';
 import { describe, expect, it } from 'vitest';
 import type { CreateControlStackInput } from '../src/control/control-stack';
@@ -16,6 +17,7 @@ import {
 import type { Codec } from '../src/shared/codec';
 import type { AnyCodecDescriptor } from '../src/shared/codec-descriptor';
 import type { CodecLookup } from '../src/shared/codec-types';
+import { dataTypeId } from '../src/shared/data-type';
 import type { ComponentDescriptor } from '../src/shared/framework-components';
 import { isRuntimeError } from '../src/shared/runtime-error';
 
@@ -49,7 +51,7 @@ describe('extractCodecTypeImports', () => {
         types: {
           codecTypes: {
             import: {
-              package: '@internal/adapter-mongo/codec-types',
+              package: '@test/mongo/codec-types',
               named: 'CodecTypes',
               alias: 'MongoCodecTypes',
             },
@@ -59,7 +61,7 @@ describe('extractCodecTypeImports', () => {
     ]);
     expect(result).toEqual([
       {
-        package: '@internal/adapter-mongo/codec-types',
+        package: '@test/mongo/codec-types',
         named: 'CodecTypes',
         alias: 'MongoCodecTypes',
       },
@@ -129,6 +131,7 @@ describe('assembleAuthoringContributions', () => {
   it('returns empty namespaces for descriptors without authoring', () => {
     const result = assembleAuthoringContributions([createDescriptor()]);
     expect(result).toEqual({
+      dataTypes: {},
       field: {},
       type: {},
       entityTypes: {},
@@ -603,9 +606,29 @@ describe('assembleAuthoringContributions', () => {
       keyword,
       discriminator,
       name: { required: true },
-      parameters: {},
+      spec: () => ({}),
     };
   }
+
+  it('rejects a pslBlockDescriptors entry whose spec is not callable', () => {
+    expect(() =>
+      assembleAuthoringContributions([
+        createDescriptor({
+          authoring: {
+            entityTypes: {
+              foo: { kind: 'entity', discriminator: 'fake-foo', output: { factory: () => ({}) } },
+            },
+            pslBlockDescriptors: {
+              fooBlock: {
+                ...makeDeclarativePslBlockDescriptor('fake-foo'),
+                spec: 'not-a-factory',
+              } as unknown as never,
+            },
+          },
+        }),
+      ]),
+    ).toThrow(/Malformed authoring pslBlock contribution at "fooBlock"/);
+  });
 
   it('merges pslBlockDescriptors namespaces from multiple descriptors', () => {
     const result = assembleAuthoringContributions([
@@ -1148,6 +1171,7 @@ describe('extractCodecLookup', () => {
 
   const stubDescriptor = (id: string): AnyCodecDescriptor => ({
     codecId: id,
+    dataType: dataTypeId('demo/stub'),
     traits: [],
     targetTypes: [],
     paramsSchema: {
@@ -1223,6 +1247,29 @@ describe('extractCodecLookup', () => {
     expect(lookup.renderValueLiteralFor?.('unknown@1', 'val', 'output')).toBeUndefined();
   });
 
+  it('skips a parameterized codec whose factory needs its params, but not one that throws an internal error', () => {
+    const needsParams: AnyCodecDescriptor = {
+      ...stubDescriptor('needs@1'),
+      isParameterized: true,
+      factory: () => {
+        throw new Error('length is required');
+      },
+    };
+    const broken: AnyCodecDescriptor = {
+      ...stubDescriptor('broken@1'),
+      isParameterized: true,
+      factory: () => {
+        throw new InternalError('a codec broke an invariant');
+      },
+    };
+    const lookupOf = (descriptor: AnyCodecDescriptor) =>
+      extractCodecLookup([
+        { id: 'desc', types: { codecTypes: { codecDescriptors: [descriptor] } } },
+      ]);
+    expect(lookupOf(needsParams).get('needs@1')).toBeUndefined();
+    expect(() => lookupOf(broken)).toThrow(InternalError);
+  });
+
   it('renderValueLiteralFor returns undefined when the codec has no renderValueLiteral', () => {
     const lookup = extractCodecLookup([
       { id: 'desc', types: { codecTypes: { codecDescriptors: [stubDescriptor('a@1')] } } },
@@ -1248,7 +1295,6 @@ describe('assembleControlMutationDefaults', () => {
       createDescriptor({
         id: 'desc-a',
         controlMutationDefaults: {
-          defaultLiteralTagRegistry: new Map(),
           defaultFunctionRegistry: new Map([['now', { lower: stubLower }]]),
           generatorDescriptors: [],
         },
@@ -1256,7 +1302,6 @@ describe('assembleControlMutationDefaults', () => {
       createDescriptor({
         id: 'desc-b',
         controlMutationDefaults: {
-          defaultLiteralTagRegistry: new Map(),
           defaultFunctionRegistry: new Map([['uuid', { lower: stubLower }]]),
           generatorDescriptors: [{ id: 'uuidv4', applicableCodecIds: ['pg/text@1'] }],
         },
@@ -1274,7 +1319,6 @@ describe('assembleControlMutationDefaults', () => {
         createDescriptor({
           id: 'desc-a',
           controlMutationDefaults: {
-            defaultLiteralTagRegistry: new Map(),
             defaultFunctionRegistry: new Map([['now', { lower: stubLower }]]),
             generatorDescriptors: [],
           },
@@ -1282,7 +1326,6 @@ describe('assembleControlMutationDefaults', () => {
         createDescriptor({
           id: 'desc-b',
           controlMutationDefaults: {
-            defaultLiteralTagRegistry: new Map(),
             defaultFunctionRegistry: new Map([['now', { lower: stubLower }]]),
             generatorDescriptors: [],
           },
@@ -1291,61 +1334,12 @@ describe('assembleControlMutationDefaults', () => {
     ).toThrow(/Duplicate mutation default function "now".*"desc-b".*"desc-a"/);
   });
 
-  it('merges literal tag registries from multiple descriptors', () => {
-    const entry = { usage: 'sql`...`', documentation: 'Raw SQL.', lower: stubLower };
-    const result = assembleControlMutationDefaults([
-      createDescriptor({
-        id: 'desc-a',
-        controlMutationDefaults: {
-          defaultFunctionRegistry: new Map(),
-          defaultLiteralTagRegistry: new Map([['sql', entry]]),
-          generatorDescriptors: [],
-        },
-      }),
-      createDescriptor({
-        id: 'desc-b',
-        controlMutationDefaults: {
-          defaultFunctionRegistry: new Map(),
-          defaultLiteralTagRegistry: new Map([['pg.sql', entry]]),
-          generatorDescriptors: [],
-        },
-      }),
-    ]);
-    expect([...result.defaultLiteralTagRegistry.keys()]).toEqual(['sql', 'pg.sql']);
-    expect(result.defaultLiteralTagRegistry.get('pg.sql')).toBe(entry);
-  });
-
-  it('throws on a duplicate literal tag, naming both descriptors', () => {
-    const entry = { usage: 'sql`...`', documentation: 'Raw SQL.', lower: stubLower };
-    expect(() =>
-      assembleControlMutationDefaults([
-        createDescriptor({
-          id: 'desc-a',
-          controlMutationDefaults: {
-            defaultFunctionRegistry: new Map(),
-            defaultLiteralTagRegistry: new Map([['sql', entry]]),
-            generatorDescriptors: [],
-          },
-        }),
-        createDescriptor({
-          id: 'desc-b',
-          controlMutationDefaults: {
-            defaultFunctionRegistry: new Map(),
-            defaultLiteralTagRegistry: new Map([['sql', entry]]),
-            generatorDescriptors: [],
-          },
-        }),
-      ]),
-    ).toThrow(/Duplicate default literal tag "sql".*"desc-b".*"desc-a"/);
-  });
-
   it('throws on duplicate generator id', () => {
     expect(() =>
       assembleControlMutationDefaults([
         createDescriptor({
           id: 'desc-a',
           controlMutationDefaults: {
-            defaultLiteralTagRegistry: new Map(),
             defaultFunctionRegistry: new Map(),
             generatorDescriptors: [{ id: 'uuidv4', applicableCodecIds: ['a@1'] }],
           },
@@ -1353,7 +1347,6 @@ describe('assembleControlMutationDefaults', () => {
         createDescriptor({
           id: 'desc-b',
           controlMutationDefaults: {
-            defaultLiteralTagRegistry: new Map(),
             defaultFunctionRegistry: new Map(),
             generatorDescriptors: [{ id: 'uuidv4', applicableCodecIds: ['b@1'] }],
           },
@@ -1432,7 +1425,7 @@ describe('createControlStack', () => {
           types: {
             codecTypes: {
               import: {
-                package: '@internal/adapter-mongo/codec-types',
+                package: '@test/mongo/codec-types',
                 named: 'CodecTypes',
                 alias: 'MongoCodecTypes',
               },
@@ -1457,6 +1450,7 @@ describe('createControlStack', () => {
     expect(state.queryOperationTypeImports).toEqual([]);
     expect(state.extensionIds).toEqual(['fam', 'tgt']);
     expect(state.authoringContributions).toEqual({
+      dataTypes: {},
       field: {},
       type: {},
       entityTypes: {},

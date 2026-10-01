@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createTestSqlNamespace } from '../../../1-core/contract/test/test-support';
 import { interpretPslDocumentToSqlContract as interpretPslDocumentToSqlContractInternal } from '../src/interpreter';
+import { fixtureDataTypeSupport } from './fixture-data-types';
 import {
   sqliteScalarColumnDescriptors,
   sqliteTarget,
@@ -71,7 +72,7 @@ describe('interpretPslDocumentToSqlContract field-preset default lowering', () =
     });
     expect(result.value.execution?.mutations.defaults).toEqual([
       {
-        ref: { namespace: 'public', table: 'Timestamped', column: 'updatedAt' },
+        ref: { namespace: 'public', entry: 'Timestamped', field: 'updatedAt' },
         onCreate: { kind: 'generator', id: 'timestampNow' },
         onUpdate: { kind: 'generator', id: 'timestampNow' },
       },
@@ -96,6 +97,7 @@ describe('interpretPslDocumentToSqlContract field-preset default lowering', () =
       controlMutationDefaults: builtinControlMutationDefaults,
       authoringContributions: sqliteTemporalContributions,
       createNamespace: createTestSqlNamespace,
+      dataTypeLookup: fixtureDataTypeSupport.lookup,
       capabilities: { sql: { scalarList: true } },
     });
 
@@ -110,7 +112,7 @@ describe('interpretPslDocumentToSqlContract field-preset default lowering', () =
     });
     expect(result.value.execution?.mutations.defaults).toEqual([
       {
-        ref: { namespace: '__unbound__', table: 'Timestamped', column: 'updatedAt' },
+        ref: { namespace: '__unbound__', entry: 'Timestamped', field: 'updatedAt' },
         onCreate: { kind: 'generator', id: 'timestampNow' },
         onUpdate: { kind: 'generator', id: 'timestampNow' },
       },
@@ -238,7 +240,7 @@ describe('interpretPslDocumentToSqlContract field-preset default lowering', () =
     // The synthetic preset declares a storage default only — no execution
     // mutation default should be emitted for the `example` column.
     const defaults = result.value.execution?.mutations.defaults ?? [];
-    expect(defaults.find((entry) => entry.ref.column === 'example')).toBeUndefined();
+    expect(defaults.find((entry) => entry.ref.field === 'example')).toBeUndefined();
   });
 
   it('uses nullable from field presets when lowering storage columns', () => {

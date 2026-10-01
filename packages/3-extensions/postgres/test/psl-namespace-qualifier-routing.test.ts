@@ -1,15 +1,19 @@
+import { createDataTypeLookup } from '@internal/framework-components/codec';
 import type { TargetPackRef } from '@internal/framework-components/components';
 import { UNBOUND_NAMESPACE_ID } from '@internal/framework-components/ir';
 import { buildSymbolTable } from '@internal/psl-parser';
 import { parse } from '@internal/psl-parser/syntax';
 import type { SqlStorage } from '@internal/sql-contract/types';
 import { interpretPslDocumentToSqlContract } from '@internal/sql-contract-psl';
+import { postgresDataTypes } from '@internal/target-postgres/data-types';
 import {
   PostgresSchema,
   PostgresUnboundSchema,
   postgresCreateNamespace,
 } from '@internal/target-postgres/types';
 import { describe, expect, it } from 'vitest';
+
+const postgresDataTypeLookup = createDataTypeLookup(postgresDataTypes);
 
 const postgresTargetPackRef: TargetPackRef<'sql', 'postgres'> = {
   kind: 'target',
@@ -25,13 +29,12 @@ const postgresScalarTypeDescriptors = new Map([
 ] as const);
 
 function symbolTableInput(schema: string) {
-  const { document, sourceFile } = parse(schema);
-  const { table } = buildSymbolTable({
-    document,
-    sourceFile,
-    pslBlockDescriptors: {},
+  const { document, sources } = parse(schema, 'psl-namespace-qualifier-routing.test.psl');
+  const { symbolTable } = buildSymbolTable({
+    documents: [document],
+    sources,
   });
-  return { symbolTable: table, sourceFile, sourceId: 'schema.prisma' };
+  return { documents: [document], sources, symbolTable };
 }
 
 /**
@@ -64,6 +67,7 @@ describe('PSL → SqlStorage.namespaces qualifier routing (FR15 slice 3 + FR16a 
 `);
 
     const result = interpretPslDocumentToSqlContract({
+      dataTypeLookup: postgresDataTypeLookup,
       ...document,
       target: postgresTargetPackRef,
       scalarColumnDescriptors: postgresScalarTypeDescriptors,
@@ -101,6 +105,7 @@ describe('PSL → SqlStorage.namespaces qualifier routing (FR15 slice 3 + FR16a 
 `);
 
     const result = interpretPslDocumentToSqlContract({
+      dataTypeLookup: postgresDataTypeLookup,
       ...document,
       target: postgresTargetPackRef,
       scalarColumnDescriptors: postgresScalarTypeDescriptors,
@@ -131,6 +136,7 @@ describe('PSL → SqlStorage.namespaces qualifier routing (FR15 slice 3 + FR16a 
 `);
 
     const result = interpretPslDocumentToSqlContract({
+      dataTypeLookup: postgresDataTypeLookup,
       ...document,
       target: postgresTargetPackRef,
       scalarColumnDescriptors: postgresScalarTypeDescriptors,

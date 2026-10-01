@@ -18,6 +18,7 @@ export type { SqlControlFamilyInstance } from '../core/control-instance';
 export type {
   SqlControlTargetDescriptor,
   SqlDescribedContractSpace,
+  SqlPslBuildContext,
 } from '../core/control-target-descriptor';
 export type {
   AppliedTableRename,
@@ -46,6 +47,8 @@ export {
   partitionCallsByControlPolicy,
   partitionIssuesByControlPolicy,
 } from '../core/migrations/control-policy';
+export type { DataTypeResolver } from '../core/migrations/data-type-resolver';
+export { buildDataTypeResolver } from '../core/migrations/data-type-resolver';
 export type { PlanFieldEventOperationsOptions } from '../core/migrations/field-event-planner';
 export { planFieldEventOperations } from '../core/migrations/field-event-planner';
 export { buildNativeTypeExpander } from '../core/migrations/native-type-expander';
@@ -104,16 +107,8 @@ export type {
   StorageTypePlanResult,
 } from '../core/migrations/types';
 export {
-  PSL_INVALID_DEFAULT_SQL,
-  sqlDefaultLiteralTagEntry,
-} from '../core/sql-default-literal-tag';
-export {
-  TIMESTAMP_NOW_GENERATOR_ID,
-  temporalAuthoringPresets,
-  temporalCodecPreset,
   temporalCodecPresetWithPrecision,
   temporalStringAuthoringPresets,
-  timestampNowControlDescriptor,
 } from '../core/timestamp-now-generator';
 
 export default new SqlFamilyDescriptor();

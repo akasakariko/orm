@@ -4,6 +4,8 @@ import type {
   ControlTargetInstance,
   MigrationRunner,
 } from '@internal/framework-components/control';
+import { blindCast } from '@internal/utils/casts';
+import { Temporal as fallbackTemporal } from 'temporal-polyfill/full/implementation';
 import { postgresTargetDescriptorMeta } from '../core/descriptor-meta';
 import { diffPostgresSchema } from '../core/migrations/diff-database-schema';
 import { createPostgresMigrationPlanner } from '../core/migrations/planner';
@@ -13,6 +15,8 @@ import { createPostgresMigrationRunner } from '../core/migrations/runner';
 import { PostgresContractSerializer } from '../core/postgres-contract-serializer';
 import { PostgresSchemaVerifier } from '../core/postgres-schema-verifier';
 import { inferPostgresPslContract } from '../core/psl-infer/infer-psl-contract';
+import { buildPostgresPslContract } from '../core/psl-print/psl-contract';
+import { setFallbackTemporal } from '../core/require-temporal';
 import { PostgresDatabaseSchemaNode } from '../core/schema-ir/postgres-database-schema-node';
 import {
   postgresDiffSubjectEntityKind,
@@ -21,14 +25,21 @@ import {
 
 export { postgresRenderDefault } from '../core/migrations/postgres-contract-to-schema';
 
-const postgresTargetDescriptor: SqlControlTargetDescriptor<'postgres', PostgresPlanTargetDetails> =
-  {
+function createPostgresTargetDescriptor(): SqlControlTargetDescriptor<
+  'postgres',
+  PostgresPlanTargetDetails
+> {
+  setFallbackTemporal(fallbackTemporal);
+  return {
     ...postgresTargetDescriptorMeta,
     contractSerializer: new PostgresContractSerializer(),
     schemaVerifier: new PostgresSchemaVerifier(),
-    inferPslContract(schema, describedContracts) {
+    inferPslContract(schema, context, describedContracts) {
       PostgresDatabaseSchemaNode.assert(schema);
-      return inferPostgresPslContract(schema, describedContracts);
+      return inferPostgresPslContract(schema, context, describedContracts);
+    },
+    buildPslContract(contract, context) {
+      return buildPostgresPslContract(contract, context);
     },
     diffSchema(input) {
       return diffPostgresSchema(input);
@@ -40,7 +51,10 @@ const postgresTargetDescriptor: SqlControlTargetDescriptor<'postgres', PostgresP
         return createPostgresMigrationPlanner(adapter);
       },
       createRunner(family) {
-        return createPostgresMigrationRunner(family) as MigrationRunner<'sql', 'postgres'>;
+        return blindCast<
+          MigrationRunner<'sql', 'postgres'>,
+          'Postgres migration runner implements the framework migration runner surface for sql/postgres'
+        >(createPostgresMigrationRunner(family));
       },
       contractToSchema(contract, frameworkComponents) {
         return postgresContractToSchema(contract, frameworkComponents);
@@ -67,6 +81,9 @@ const postgresTargetDescriptor: SqlControlTargetDescriptor<'postgres', PostgresP
       return createPostgresMigrationRunner(family);
     },
   };
+}
+
+const postgresTargetDescriptor = createPostgresTargetDescriptor();
 
 export {
   INSTANT_NOW_GENERATOR_ID,
@@ -77,5 +94,9 @@ export {
   PLAIN_DATE_TIME_NOW_GENERATOR_ID,
   plainDateTimeNowControlDescriptor,
 } from '../core/plain-date-time-now-generator';
+export {
+  postgresNativeAuthoringTypes,
+  postgresScalarAuthoringTypes,
+} from '../core/type-constructors';
 
 export default postgresTargetDescriptor;

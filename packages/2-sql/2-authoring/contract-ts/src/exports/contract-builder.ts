@@ -28,9 +28,22 @@ export type {
   ModelNode,
   PrimaryKeyNode,
   RelationNode,
+  ScalarMemberNode,
   UniqueConstraintNode,
+  ValueObjectFieldNode,
+  ValueObjectMemberNode,
+  ValueObjectNode,
 } from '../contract-definition';
-export type { CheckKind, TargetFieldRef } from '../contract-dsl';
+export { isValueObjectMember, storedAsListColumn } from '../contract-definition';
+export type {
+  CheckKind,
+  ColumnRef,
+  DeferredIndexColumn,
+  DeferredIndexExpression,
+  IndexConstraint,
+  IndexExpressionInput,
+  TargetFieldRef,
+} from '../contract-dsl';
 export { buildContractDefinition } from '../contract-lowering';
 export type { ExtractCodecTypesFromPack } from '../contract-types';
 export { autoincrement, now } from '../default-functions';

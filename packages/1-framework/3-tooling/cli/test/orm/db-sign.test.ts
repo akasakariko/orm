@@ -1,3 +1,4 @@
+import { writeRef } from '@internal/migration-tools/refs';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   CONNECTION,
@@ -12,10 +13,17 @@ import {
   mocks,
   ormConfig,
   projectDir,
+  refsDirOf,
   resetMocks,
   schemaResult,
   signResult,
 } from './db-sign-fixtures';
+import {
+  refusedConnection,
+  refusedWithDiagnostics,
+  reportedDiagnostics,
+  reportedRefusedConnection,
+} from './unreachable-database';
 
 beforeEach(resetMocks);
 afterEach(cleanupProjectDirs);
@@ -150,8 +158,37 @@ describe('db sign', () => {
       expect(diagnosticsOf(run)[0]?.nextActions).toEqual([
         {
           kind: 'run-command',
-          label: 'Bring the database up to the contract, then sign again',
-          command: '{bin} db update',
+          label: 'Change the database to match the contract, then sign again',
+          command: 'prisma-test db update',
+        },
+        {
+          kind: 'user-choice',
+          label:
+            'Or change the contract source to describe the database as it is, re-run contract emit, then sign again',
+        },
+      ]);
+    });
+
+    it('aims db update at the ref being signed, and the contract change at the emitted contract', async () => {
+      const dir = await projectDir();
+      await writeRef(refsDirOf(dir), 'staging', { hash: HASH_A, invariants: [] });
+      mocks.schemaVerify.mockResolvedValue(DRIFTED);
+
+      const run = await harness(ormConfig()).run(['db', 'sign', 'staging', '--json'], {
+        cwd: dir,
+      });
+
+      expect(run.exitCode).toBe(4);
+      expect(diagnosticsOf(run)[0]?.nextActions).toEqual([
+        {
+          kind: 'run-command',
+          label: 'Change the database to match the contract, then sign again',
+          command: 'prisma-test db update --to "staging"',
+        },
+        {
+          kind: 'user-choice',
+          label:
+            'Or change the contract source to describe the database as it is, re-run contract emit, then sign the emitted contract instead of "staging"',
         },
       ]);
     });
@@ -260,6 +297,30 @@ describe('db sign', () => {
         error: { code: 'MIGRATION.REF_NOT_FOUND' },
       });
       expect(mocks.schemaVerify).not.toHaveBeenCalled();
+    });
+
+    it('reports a refused connection as every command does, with its driver code', async () => {
+      const dir = await projectDir();
+      mocks.schemaVerify.mockRejectedValue(refusedConnection());
+
+      const run = await harness(ormConfig()).run(['db', 'sign', '--json'], { cwd: dir });
+
+      expect(run.exitCode).toBe(2);
+      expect(envelopeOf(run)?.error).toEqual(reportedRefusedConnection('db sign'));
+    });
+
+    it('keeps the diagnostics of a structured driver error, without the connection string', async () => {
+      const dir = await projectDir();
+      mocks.schemaVerify.mockRejectedValue(refusedWithDiagnostics());
+
+      const run = await harness(ormConfig()).run(['db', 'sign', '--json'], { cwd: dir });
+
+      expect(envelopeOf(run)).toMatchObject({
+        ok: false,
+        error: { code: 'DRIVER.CONNECTION_FAILED' },
+        diagnostics: reportedDiagnostics,
+      });
+      expect(JSON.stringify(run.json.at(-1))).not.toContain('secret');
     });
 
     it('errors at exit 2 when the driver throws, without leaking the connection string', async () => {

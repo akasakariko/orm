@@ -1,5 +1,5 @@
 import type {
-  AnyCodecDescriptor,
+  AnyCodecDescriptorTemplate,
   CodecInstanceContext,
 } from '@internal/framework-components/codec';
 import type { Codec, SqlCodecCallContext } from '@internal/sql-relational-core/ast';
@@ -30,6 +30,7 @@ import {
   pgNumericDescriptor,
   pgTextDescriptor,
   pgTimetzDescriptor,
+  pgTsqueryDescriptor,
   pgUuidDescriptor,
   pgVarbitDescriptor,
   pgVarcharDescriptor,
@@ -65,7 +66,7 @@ const descriptorByScalar = {
   jsonb: pgJsonbDescriptor,
   uuid: pgUuidDescriptor,
   inet: pgInetDescriptor,
-} as const satisfies Record<string, AnyCodecDescriptor>;
+} as const satisfies Record<string, AnyCodecDescriptorTemplate>;
 
 type ScalarName = keyof typeof descriptorByScalar;
 
@@ -309,10 +310,10 @@ describe('adapter-postgres codecs', () => {
 
     it('rejects JSON that is not base64 text', () => {
       expect(() => byteaCodec.decodeJson(42)).toThrow(
-        'pg/bytea@1 database JSON value must be a base64 string',
+        'pg/bytea@1 JSON value must be a base64 string',
       );
       expect(() => byteaCodec.decodeJson('not base64!')).toThrow(
-        'pg/bytea@1 database JSON value must be a base64 string',
+        'pg/bytea@1 JSON value must be a base64 string',
       );
     });
 
@@ -330,7 +331,7 @@ describe('adapter-postgres codecs', () => {
 
     it('throws on non-string input to decodeJson', () => {
       expect(() => byteaCodec.decodeJson(42)).toThrow(
-        'pg/bytea@1 database JSON value must be a base64 string',
+        'pg/bytea@1 JSON value must be a base64 string',
       );
     });
   });
@@ -397,7 +398,7 @@ describe('adapter-postgres codecs', () => {
 
       it('rejects a JSON number, which has already lost digits', () => {
         expect(() => codec.decodeJson(42)).toThrow(
-          'pg/int8@1 database JSON value must be a decimal string',
+          'pg/int8@1 JSON value must be a decimal integer string from -9223372036854775808 to 9223372036854775807',
         );
       });
 
@@ -438,6 +439,18 @@ describe('adapter-postgres codecs', () => {
     it('resolves pgInetDescriptor by codec id from the registry', () => {
       const resolved = postgresCodecRegistry.descriptorFor('pg/inet@1');
       expect(resolved).toBe(pgInetDescriptor);
+    });
+  });
+
+  describe('pg/tsquery@1 registry resolution', () => {
+    it('resolves pgTsqueryDescriptor by codec id, so a bound tsquery parameter renders', () => {
+      const resolved = postgresCodecRegistry.descriptorFor('pg/tsquery@1');
+      expect(resolved).toBe(pgTsqueryDescriptor);
+      expect(resolved?.targetTypes).toEqual(['tsquery']);
+    });
+
+    it('claims no traits, so no comparison, ordering or text operation applies to a tsquery', () => {
+      expect(postgresCodecRegistry.descriptorFor('pg/tsquery@1')?.traits).toEqual([]);
     });
   });
 });

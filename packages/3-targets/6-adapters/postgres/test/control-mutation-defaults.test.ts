@@ -4,15 +4,17 @@ import {
   instantiateAuthoringTypeConstructor,
   validateAuthoringHelperArguments,
 } from '@internal/framework-components/authoring';
-import { describe, expect, it } from 'vitest';
-import { createPostgresBuiltinCodecLookup } from '../src/core/codec-lookup';
+import { createPostgresBuiltinCodecLookup } from '@internal/target-postgres/codecs';
 import {
-  createPostgresDefaultFunctionRegistry,
-  createPostgresDefaultLiteralTagRegistry,
-  createPostgresMutationDefaultGeneratorDescriptors,
-  postgresAuthoringTypes,
   postgresNativeAuthoringTypes,
   postgresScalarAuthoringTypes,
+} from '@internal/target-postgres/control';
+import { postgresDataTypeEntries } from '@internal/target-postgres/data-types';
+import { describe, expect, it } from 'vitest';
+import {
+  createPostgresDefaultFunctionRegistry,
+  createPostgresMutationDefaultGeneratorDescriptors,
+  postgresAuthoringTypes,
 } from '../src/core/control-mutation-defaults';
 import postgresAdapterDescriptor from '../src/exports/control';
 import runtimeAdapterDescriptor from '../src/exports/runtime';
@@ -37,15 +39,7 @@ describe('createPostgresDefaultFunctionRegistry', () => {
 
   it('contains all builtin default function entries', () => {
     expect([...registry.keys()]).toEqual(
-      expect.arrayContaining([
-        'autoincrement',
-        'now',
-        'uuid',
-        'cuid',
-        'ulid',
-        'nanoid',
-        'dbgenerated',
-      ]),
+      expect.arrayContaining(['autoincrement', 'now', 'uuid', 'cuid', 'ulid', 'nanoid']),
     );
   });
 
@@ -150,79 +144,6 @@ describe('createPostgresDefaultFunctionRegistry', () => {
         kind: 'execution',
         generated: { kind: 'generator', id: 'nanoid', params: { size: 16 } },
       },
-    });
-  });
-
-  it('lowers dbgenerated("expr") to storage default', () => {
-    const handler = registry.get('dbgenerated')!;
-    const result = handler.lower({
-      call: makeCall('dbgenerated', { expression: 'gen_random_uuid()' }),
-      context: stubContext,
-    });
-    expect(result).toMatchObject({
-      ok: true,
-      value: {
-        kind: 'storage',
-        defaultValue: { kind: 'function', expression: 'gen_random_uuid()' },
-      },
-    });
-  });
-
-  it('rejects dbgenerated with empty string', () => {
-    const handler = registry.get('dbgenerated')!;
-    const result = handler.lower({
-      call: makeCall('dbgenerated', { expression: '' }),
-      context: stubContext,
-    });
-    expect(result).toMatchObject({ ok: false });
-  });
-
-  describe('dbgenerated keeps the raw expression verbatim, never resolving it', () => {
-    // `lowerDbgenerated` must not resolve the raw SQL text — a literal-shaped
-    // expression (e.g. `'{}'::jsonb`) is normalized once, at SchemaIR
-    // construction on the expected side (`contractToSchemaIR`'s
-    // target-supplied `resolveDefault` hook), not here. Rewriting here would
-    // also discard the user's original expression for cases like
-    // `nextval('my_seq')`, whose DDL must keep referencing the named sequence.
-    const handler = createPostgresDefaultFunctionRegistry().get('dbgenerated')!;
-
-    function lower(expression: string) {
-      return handler.lower({
-        call: makeCall('dbgenerated', { expression }),
-        context: stubContext,
-      });
-    }
-
-    it('keeps a jsonb literal expression as a function, unresolved', () => {
-      const expression = "'{}'::jsonb";
-      expect(lower(expression)).toMatchObject({
-        ok: true,
-        value: { kind: 'storage', defaultValue: { kind: 'function', expression } },
-      });
-    });
-
-    it('keeps a text[] literal expression as a function, unresolved', () => {
-      const expression = "'{}'::text[]";
-      expect(lower(expression)).toMatchObject({
-        ok: true,
-        value: { kind: 'storage', defaultValue: { kind: 'function', expression } },
-      });
-    });
-
-    it('keeps gen_random_uuid() a function', () => {
-      const expression = 'gen_random_uuid()';
-      expect(lower(expression)).toMatchObject({
-        ok: true,
-        value: { kind: 'storage', defaultValue: { kind: 'function', expression } },
-      });
-    });
-
-    it("keeps nextval(...) a function, unchanged (doesn't adopt the normalizer's autoincrement() rewrite)", () => {
-      const expression = "nextval('seq'::regclass)";
-      expect(lower(expression)).toMatchObject({
-        ok: true,
-        value: { kind: 'storage', defaultValue: { kind: 'function', expression } },
-      });
     });
   });
 
@@ -404,69 +325,19 @@ describe('postgresNativeAuthoringTypes', () => {
   });
 });
 
-describe('createPostgresDefaultLiteralTagRegistry', () => {
-  const tagRegistry = createPostgresDefaultLiteralTagRegistry();
+describe('the adapter descriptor authoring data types', () => {
+  const registered = postgresAdapterDescriptor.authoring?.dataTypes ?? {};
 
-  it('registers sql and pg.sql, in that order', () => {
-    expect([...tagRegistry.keys()]).toEqual(['sql', 'pg.sql']);
-    expect(tagRegistry.get('sql')?.usage).toBe('sql`...`');
-    expect(tagRegistry.get('pg.sql')?.usage).toBe('pg.sql`...`');
+  it('registers the entries the target declares', () => {
+    expect(Object.keys(registered)).toEqual(Object.keys(postgresDataTypeEntries()));
   });
 
-  it('lowers a body verbatim as a function default', () => {
-    const result = tagRegistry.get('pg.sql')!.lower({
-      literal: { tag: 'pg.sql', body: "'{}'::jsonb", span: stubSpan },
-      context: stubContext,
-    });
-    expect(result).toEqual({
-      ok: true,
-      value: { kind: 'storage', defaultValue: { kind: 'function', expression: "'{}'::jsonb" } },
-    });
-  });
-
-  it('is wired as the adapter descriptor tag registry', () => {
-    const registries = postgresAdapterDescriptor.controlMutationDefaults;
-    if (registries === undefined)
-      throw new Error('the adapter descriptor declares mutation defaults');
-    expect([...registries.defaultLiteralTagRegistry.keys()]).toEqual(['sql', 'pg.sql']);
-  });
-
-  it.each([
-    ['sql', 'now'],
-    ['pg.sql', 'autoincrement'],
-  ])('refuses %s`%s()`, which is a Prisma default function', (tag, name) => {
-    const result = tagRegistry.get(tag)!.lower({
-      literal: { tag, body: `${name}()`, span: stubSpan },
-      context: stubContext,
-    });
-    expect(result).toMatchObject({
-      ok: false,
-      diagnostic: {
-        code: 'PSL_INVALID_DEFAULT_SQL',
-        message: `Write @default(${name}()) instead of ${tag}\`${name}()\`; ${name}() is a Prisma default function, not raw SQL.`,
-      },
-    });
-  });
-
-  it('lowers sql`gen_random_uuid()` verbatim', () => {
-    const result = tagRegistry.get('sql')!.lower({
-      literal: { tag: 'sql', body: 'gen_random_uuid()', span: stubSpan },
-      context: stubContext,
-    });
-    expect(result).toEqual({
-      ok: true,
-      value: {
-        kind: 'storage',
-        defaultValue: { kind: 'function', expression: 'gen_random_uuid()' },
-      },
-    });
-  });
-
-  it("accepts sql`now() + interval '1 day'`", () => {
-    const result = tagRegistry.get('sql')!.lower({
-      literal: { tag: 'sql', body: "now() + interval '1 day'", span: stubSpan },
-      context: stubContext,
-    });
-    expect(result).toMatchObject({ ok: true });
+  it('registers the json tag and leaves sql/expression and its tag to the family', () => {
+    expect({
+      hasSqlExpression: Object.hasOwn(registered, 'sql/expression'),
+      tags: Object.values(registered).flatMap((entry) =>
+        entry.written.kind === 'tag' ? [entry.written.tag] : [],
+      ),
+    }).toEqual({ hasSqlExpression: false, tags: ['json'] });
   });
 });

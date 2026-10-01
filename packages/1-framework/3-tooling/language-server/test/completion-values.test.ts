@@ -22,6 +22,7 @@ import {
   type RejectingArgType,
   record,
   str,
+  structBlock,
 } from '@internal/psl-parser';
 import { parse, SourceFile } from '@internal/psl-parser/syntax';
 import { describe, expect, it, vi } from 'vitest';
@@ -45,6 +46,8 @@ const rejecting: RejectingArgType<never, AttributeCtx> = {
   message: 'No available values',
   parse: rejectedParse,
 };
+const unchecked = { ...identifier(), parse: rejectedParse };
+const checked = { ...entityRef({ kind: 'model' }), parse: rejectedParse };
 const direction = oneOf(
   identifier('Asc', { documentation: 'An accepted identifier in this test grammar.' }),
   identifier('Desc', { documentation: 'An accepted identifier in this test grammar.' }),
@@ -135,6 +138,8 @@ const signature = {
     all: {
       type: oneOf(
         str(),
+        unchecked,
+        checked,
         identifier('Alpha', { documentation: 'An accepted identifier in this test grammar.' }),
         bool(),
         num(),
@@ -143,13 +148,15 @@ const signature = {
       documentation: 'A scalar value with enumerated completion candidates.',
     },
     none: {
-      type: oneOf(str(), num(), int(), json(), entityRef(), rejecting),
+      type: oneOf(str(), num(), int(), json(), checked, unchecked, rejecting),
       documentation: 'A free-form value without enumerated candidates.',
     },
     rejected: { type: rejecting, documentation: 'A value that always fails interpretation.' },
     recordValues: { type: record(bool()), documentation: 'Boolean values keyed by name.' },
     unionLists: {
       type: oneOf(
+        list(unchecked),
+        list(checked),
         list(identifier('A', { documentation: 'An accepted identifier in this test grammar.' })),
         list(identifier('B', { documentation: 'An accepted identifier in this test grammar.' })),
         list(identifier('A', { documentation: 'An accepted identifier in this test grammar.' })),
@@ -189,7 +196,7 @@ const pslBlockDescriptors: AuthoringPslBlockDescriptorNamespace = {
     keyword: 'policy',
     discriminator: 'completion-policy',
     name: { required: true },
-    parameters: {},
+    spec: () => structBlock({ parameters: {} }),
     attributes: { probe: () => blockSpec },
   },
 };
@@ -198,8 +205,9 @@ function complete(markedSource: string, snippets = false, parameterHints = false
   const offset = markedSource.indexOf('|');
   expect(offset).toBeGreaterThanOrEqual(0);
   const source = markedSource.slice(0, offset) + markedSource.slice(offset + 1);
-  const { document, sourceFile } = parse(source);
-  const { table: symbolTable } = buildSymbolTable({ document, sourceFile, pslBlockDescriptors });
+  const { document, sources } = parse(source, 'language-server-test.psl');
+  const sourceFile = sources.sourceFileFor(document.syntax);
+  const { symbolTable } = buildSymbolTable({ documents: [document], sources });
   const items = providePslCompletionItems({
     context: classifyPslCompletionContext({
       document,
@@ -253,7 +261,7 @@ describe('classified positions without cursor AST', () => {
             existingNamedKeys: [],
             hasColon,
           },
-          sourceFile: new SourceFile('mode: Asc'),
+          sourceFile: new SourceFile('language-server-test.psl', 'mode: Asc'),
           clientSupportsSnippets: true,
           clientSupportsTriggerSuggestCommand: true,
         },
@@ -276,7 +284,7 @@ describe('classified positions without cursor AST', () => {
   );
 
   it('resolves all matching nested signatures using only a path and existing keys', () => {
-    const sourceFile = new SourceFile('');
+    const sourceFile = new SourceFile('language-server-test.psl', '');
     const items = provideAttributeNamedKeyCompletionItems(
       {
         context: {
@@ -315,7 +323,7 @@ describe('classified positions without cursor AST', () => {
           hasColon: false,
           positionalIndex: 0,
         },
-        sourceFile: new SourceFile(''),
+        sourceFile: new SourceFile('language-server-test.psl', ''),
         clientSupportsSnippets: false,
         fieldNames: () => [],
       },
@@ -347,7 +355,7 @@ describe('classified positions without cursor AST', () => {
           path: [{ kind: 'namedArgument', name: 'value' }],
           syntax: 'functionName',
         },
-        sourceFile: new SourceFile('f()'),
+        sourceFile: new SourceFile('language-server-test.psl', 'f()'),
         clientSupportsSnippets: true,
         fieldNames: () => [],
       },
@@ -363,7 +371,7 @@ describe('classified positions without cursor AST', () => {
   });
 
   it('renders a scalar edit from the supplied span without an attribute or owner AST', () => {
-    const sourceFile = new SourceFile('old');
+    const sourceFile = new SourceFile('language-server-test.psl', 'old');
     const items = provideAttributeValueCompletionItems(
       {
         context: {
@@ -474,6 +482,12 @@ describe('recursive attribute values', () => {
     );
   });
 
+  it('offers only pinned names when unchecked names and checked references are nested alternatives', () => {
+    expect(field('none: |').items).toEqual([]);
+    expect(field('unionLists: [|]').items.map((item) => item.label)).toEqual(['A', 'B']);
+    expect(rejectedParse).not.toHaveBeenCalled();
+  });
+
   it('never invokes combinator parsing to select alternatives', () => {
     expect(field('none: |').items).toEqual([]);
     expect(rejectedParse).not.toHaveBeenCalled();
@@ -530,8 +544,8 @@ describe('recursive attribute values', () => {
     const candidate = result.items[0];
     const edited = candidate === undefined ? result.source : result.apply(candidate.label);
     const source = `model Example {\n  value String @probe(${unchanged})\n}`;
-    expect(parse(source).diagnostics).toEqual([]);
-    expect(parse(edited).diagnostics).toEqual([]);
+    expect(parse(source, 'language-server-test.psl').diagnostics).toEqual([]);
+    expect(parse(edited, 'language-server-test.psl').diagnostics).toEqual([]);
     expect(edited).toBe(source);
     expect(result.items).toEqual([]);
   });
@@ -648,7 +662,7 @@ describe('recursive function arguments', () => {
           hasColon: false,
           positionalIndex: 0,
         },
-        sourceFile: new SourceFile(''),
+        sourceFile: new SourceFile('language-server-test.psl', ''),
         clientSupportsSnippets: true,
         clientSupportsTriggerParameterHintsCommand: true,
         fieldNames: () => [],

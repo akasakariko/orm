@@ -49,7 +49,7 @@
  * }
  * ```
  */
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { withClient } from '@repo/test-utils';
 import stripAnsi from 'strip-ansi';
@@ -133,12 +133,6 @@ CREATE TABLE "raw_list_defaults" (
 );
 `;
 
-/**
- * `db init` renders a `dbgenerated` timestamp default through a codec that needs a global
- * `Temporal`, which the CLI does not install.
- */
-const DB_INIT_UNSUPPORTED_FIELDS = ['stamp'] as const;
-
 interface VerifyIssue {
   readonly path: readonly string[];
 }
@@ -155,14 +149,13 @@ function output(run: EngineCommandResult): string {
   return `${stripAnsi(run.stderr)}\n${stripAnsi(run.stdout)}`;
 }
 
-function withoutFields(psl: string, fields: readonly string[]): string {
-  return psl
-    .split('\n')
-    .filter((line) => !fields.includes(line.trim().split(/\s+/)[0] ?? ''))
-    .join('\n');
+async function inferInto(ctx: JourneyContext): Promise<string> {
+  const psl = await inferPsl(ctx);
+  expect(psl).not.toContain('dbgenerated');
+  return psl;
 }
 
-async function inferInto(ctx: JourneyContext): Promise<string> {
+async function inferPsl(ctx: JourneyContext): Promise<string> {
   const infer = await runContractInfer(ctx);
   expect(infer.exitCode, `contract infer\n${output(infer)}`).toBe(0);
   return readContractPsl(ctx);
@@ -180,7 +173,7 @@ withTempDir(({ createTempDir }) => {
       const emptyDb = useDevDatabase();
 
       it(
-        'infer prints each default as the literal its codec accepts, or as dbgenerated when a scalar has none',
+        'infer prints each default as the literal its codec accepts, or as a sql tagged literal when a scalar has none',
         async () => {
           const ctx = setupJourney({
             connectionString: db.connectionString,
@@ -201,9 +194,9 @@ withTempDir(({ createTempDir }) => {
               emptyBigInts   BigInt[]?          @default([]) @noCheck(elementNotNull)
               hugeBigInts    BigInt[]?          @default([9007199254740993, -9007199254740993]) @noCheck(elementNotNull)
               negFloats      Float[]?           @default([-1.5, 2]) @noCheck(elementNotNull)
-              negDecimals    Numeric(65, 30)[]? @default(["-1.5", "2"]) @noCheck(elementNotNull)
-              longDecimals   Numeric(65, 30)[]? @default(["12345678901234567890.123456789", "0.000000000000000001"]) @noCheck(elementNotNull)
-              scaledDecimals Numeric(10, 2)[]?  @default(["-1.25", "2"]) @noCheck(elementNotNull)
+              negDecimals    Numeric(65, 30)[]? @default([-1.5, 2]) @noCheck(elementNotNull)
+              longDecimals   Numeric(65, 30)[]? @default([12345678901234567890.123456789, 0.000000000000000001]) @noCheck(elementNotNull)
+              scaledDecimals Numeric(10, 2)[]?  @default([-1.25, 2]) @noCheck(elementNotNull)
               emptyVarchars  VarChar(32)[]?     @default([]) @noCheck(elementNotNull)
 
               @@map("list_defaults")
@@ -216,29 +209,29 @@ withTempDir(({ createTempDir }) => {
               negFloat      Float           @default(-1.5)
               tinyFloat     Float           @default(0.0000001)
               negReal       Real            @default(-2.5)
-              negDecimal    Numeric(65, 30) @default("-0.5")
-              longDecimal   Numeric(65, 30) @default("12345678901234567890.123456789")
-              tinyDecimal   Numeric(65, 30) @default("0.000000000000000001")
-              scaleDecimal  Numeric(65, 30) @default("1.50")
-              wholeDecimal  Numeric(65, 30) @default("10")
-              scaledDecimal Numeric(10, 2)  @default("-1.25")
+              negDecimal    Numeric(65, 30) @default(-0.5)
+              longDecimal   Numeric(65, 30) @default(12345678901234567890.123456789)
+              tinyDecimal   Numeric(65, 30) @default(0.000000000000000001)
+              scaleDecimal  Numeric(65, 30) @default(1.50)
+              wholeDecimal  Numeric(65, 30) @default(10)
+              scaledDecimal Numeric(10, 2)  @default(-1.25)
               negSafeBigInt BigInt          @default(-5)
               negBigInt     BigInt          @default(-9007199254740993)
               hugeBigInt    BigInt          @default(9007199254740993)
-              stamp         Timestamp(3)    @default(dbgenerated("'2024-01-01 00:00:00'::timestamp without time zone"))
-              jsonNull      Jsonb?          @default(dbgenerated("'null'::jsonb"))
+              stamp         Timestamp(3)    @default("2024-01-01T00:00:00")
+              jsonNull      Jsonb?          @default(json\`null\`)
 
               @@map("number_defaults")
             }
 
             model SqlDefaults {
               id           Int          @id(map: "sql_defaults_pkey")
-              textNull     VarChar(32)? @default(dbgenerated("NULL::character varying"))
-              floatNaN     Float        @default("NaN")
-              floatNegInf  Float        @default("-Infinity")
-              realNaN      Real         @default("NaN")
-              decimalNaN   Numeric      @default("NaN")
-              timeWithZone Timetz       @default("12:34:56+00")
+              textNull     VarChar(32)? @default(sql\`NULL::character varying\`)
+              floatNaN     Float        @default(NaN)
+              floatNegInf  Float        @default(-Infinity)
+              realNaN      Real         @default(NaN)
+              decimalNaN   Numeric      @default(NaN)
+              timeWithZone Timetz       @default("12:34:56Z")
 
               @@map("sql_defaults")
             }
@@ -278,8 +271,7 @@ withTempDir(({ createTempDir }) => {
             createTempDir,
             contractMode: 'psl',
           });
-          const psl = withoutFields(await inferInto(ctx), DB_INIT_UNSUPPORTED_FIELDS);
-          writeFileSync(join(ctx.testDir, 'contract.prisma'), psl, 'utf-8');
+          await inferInto(ctx);
 
           const emit = await runContractEmit(ctx);
           expect(emit.exitCode, `contract emit\n${output(emit)}`).toBe(0);
@@ -301,13 +293,13 @@ withTempDir(({ createTempDir }) => {
       );
     });
 
-    describe('given list defaults with an element that has no PSL literal', () => {
+    describe('given a temporal list default', () => {
       const db = useDevDatabase({
         onReady: (cs) => withClient(cs, (client) => client.query(RAW_LIST_DEFAULTS_SQL)),
       });
 
       it(
-        'infer prints them as dbgenerated, which emit accepts: a list column takes any storage default',
+        'infer prints each element as the string its codec reads, which emit accepts',
         async () => {
           const ctx = setupJourney({
             connectionString: db.connectionString,
@@ -321,7 +313,7 @@ withTempDir(({ createTempDir }) => {
 
             model RawListDefaults {
               id         Int             @id(map: "raw_list_defaults_pkey")
-              timestamps Timestamp(3)[]? @default(dbgenerated("ARRAY['2024-01-01 00:00:00'::timestamp(3) without time zone]")) @noCheck(elementNotNull)
+              timestamps Timestamp(3)[]? @default(["2024-01-01T00:00:00"]) @noCheck(elementNotNull)
 
               @@map("raw_list_defaults")
             }

@@ -6,24 +6,8 @@ import type {
   Geometry,
 } from '@prisma/orm-extension-postgis/codec-types';
 import type { QueryOperationTypes as PostgisQueryOperationTypes } from '@prisma/orm-extension-postgis/operation-types';
-import type { QueryOperationTypes as PgAdapterQueryOps } from '@prisma/orm-postgres/adapter/operation-types';
-import type {
-  Bit,
-  Char,
-  CodecTypes as PgTypes,
-  Interval,
-  JsonValue,
-  Numeric,
-  Time,
-  TimeString,
-  Timestamp,
-  TimestampString,
-  Timestamptz,
-  TimestamptzString,
-  Timetz,
-  VarBit,
-  Varchar,
-} from '@prisma/orm-postgres/target/codec-types';
+import type { Char, CodecTypes as PgTypes } from '@prisma/orm-postgres/target/codec-types';
+import type { QueryOperationTypes as PgTargetQueryOps } from '@prisma/orm-postgres/target/operation-types';
 
 import type {
   ContractWithTypeMaps,
@@ -41,13 +25,13 @@ import type {
 export type StorageHash =
   StorageHashBase<'22e2633fb68e81380243a7fb492d650f4b45dcf990f2a3a146744fe8e2277423'>;
 export type ExecutionHash =
-  ExecutionHashBase<'47143d9289826bb6f4e6f1d14b77111d1e59175b581c9432def271e308f74c76'>;
+  ExecutionHashBase<'73426d737fd7fe88107a86f2a5602ff842560bf4a193aaf5ae7355b79f511658'>;
 export type ProfileHash =
   ProfileHashBase<'3916f444a8a17ad749191acf9e08dad97d1a327b88c2f1d45d12f240296aa8b2'>;
 
 export type CodecTypes = PgTypes & PostgisTypes;
 export type LaneCodecTypes = CodecTypes;
-export type QueryOperationTypes = PgAdapterQueryOps<CodecTypes> &
+export type QueryOperationTypes = PgTargetQueryOps<CodecTypes> &
   PostgisQueryOperationTypes<CodecTypes>;
 export type AggregateTypes = {
   readonly avg: {
@@ -495,7 +479,11 @@ type ContractBase = Omit<
               };
               readonly location: {
                 readonly nullable: false;
-                readonly type: { readonly kind: 'scalar'; readonly codecId: 'pg/geometry@1' };
+                readonly type: {
+                  readonly kind: 'scalar';
+                  readonly codecId: 'pg/geometry@1';
+                  readonly typeParams: { readonly srid: 4326 };
+                };
               };
               readonly name: {
                 readonly nullable: false;
@@ -517,7 +505,11 @@ type ContractBase = Omit<
             readonly fields: {
               readonly boundary: {
                 readonly nullable: false;
-                readonly type: { readonly kind: 'scalar'; readonly codecId: 'pg/geometry@1' };
+                readonly type: {
+                  readonly kind: 'scalar';
+                  readonly codecId: 'pg/geometry@1';
+                  readonly typeParams: { readonly srid: 4326 };
+                };
               };
               readonly id: {
                 readonly nullable: false;
@@ -559,7 +551,11 @@ type ContractBase = Omit<
               };
               readonly path: {
                 readonly nullable: false;
-                readonly type: { readonly kind: 'scalar'; readonly codecId: 'pg/geometry@1' };
+                readonly type: {
+                  readonly kind: 'scalar';
+                  readonly codecId: 'pg/geometry@1';
+                  readonly typeParams: { readonly srid: 4326 };
+                };
               };
             };
             readonly relations: Record<string, never>;
@@ -591,6 +587,8 @@ type ContractBase = Omit<
       readonly checkConstraint: true;
       readonly defaultInInsert: true;
       readonly enums: true;
+      readonly insertOnConflictSkip: true;
+      readonly insertOnConflictWithoutTarget: true;
       readonly lateral: true;
       readonly returning: true;
       readonly scalarList: true;
@@ -644,25 +642,25 @@ type ContractBase = Omit<
         {
           readonly onCreate: { readonly id: 'uuidv4'; readonly kind: 'generator' };
           readonly ref: {
-            readonly column: 'id';
+            readonly entry: 'cafe';
+            readonly field: 'id';
             readonly namespace: 'public';
-            readonly table: 'cafe';
           };
         },
         {
           readonly onCreate: { readonly id: 'uuidv4'; readonly kind: 'generator' };
           readonly ref: {
-            readonly column: 'id';
+            readonly entry: 'neighborhood';
+            readonly field: 'id';
             readonly namespace: 'public';
-            readonly table: 'neighborhood';
           };
         },
         {
           readonly onCreate: { readonly id: 'uuidv4'; readonly kind: 'generator' };
           readonly ref: {
-            readonly column: 'id';
+            readonly entry: 'route';
+            readonly field: 'id';
             readonly namespace: 'public';
-            readonly table: 'route';
           };
         },
       ];

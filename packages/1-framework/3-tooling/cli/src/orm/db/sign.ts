@@ -1,3 +1,4 @@
+import { ormConfigSection } from '@internal/config-loader';
 import type {
   SignDatabaseResult,
   VerifyDatabaseSchemaResult,
@@ -5,7 +6,7 @@ import type {
 import { MigrationToolsError } from '@internal/migration-tools/errors';
 import { readRef } from '@internal/migration-tools/refs';
 import { ifDefined } from '@internal/utils/defined';
-import { InternalError, isInternalError } from '@internal/utils/internal-error';
+import { InternalError } from '@internal/utils/internal-error';
 import type { Block, Presentations, Span } from '@prisma/cli-engine';
 import { flag, positional } from '@prisma/cli-engine';
 import { notOk, ok } from '@prisma/cli-engine/protocol';
@@ -18,21 +19,15 @@ import {
 } from '../../control-api/operations/ref-advancement';
 import { errorAdvanceRefArgConflict, errorContractArgConflict } from '../../utils/cli-errors';
 import { closeQuietly, maskConnectionUrl } from '../../utils/command-helpers';
-import { runCommandAction } from '../../utils/next-actions';
-import { ormConfigSection } from '../config-section';
 import { defineOrmCommand } from '../define-command';
 import { dbFlag } from '../flags';
-import {
-  appRefsDirFor,
-  displayPath,
-  migrationsDirFor,
-  projectConfigPathFor,
-} from '../migration/paths';
+import { appRefsDirFor, baseDirFor, displayPath, migrationsDirFor } from '../migration/paths';
 import { normalizeError } from '../normalize-error';
 import { controlProgressReporter } from '../progress';
 import {
   readEmittedContract,
   requireVerifyConnection,
+  schemaDriftNextActions,
   schemaFindingBlocks,
   schemaVerdictDiagnostic,
   verificationThrow,
@@ -267,7 +262,7 @@ export function createDbSignCommand(
         return notOk(emitted.failure);
       }
 
-      const migrationsDir = migrationsDirFor(ctx.config, ctx.cwd);
+      const migrationsDir = migrationsDirFor(ctx.config);
       let contractInput: unknown = emitted.value.contract;
       let signedSource: SignedContractSource;
       if (contractRef !== undefined) {
@@ -307,7 +302,7 @@ export function createDbSignCommand(
           name: refName,
           contractJson: signedSource.json,
           contractJsonPath: signedSource.jsonPath,
-          configPath: projectConfigPathFor(ctx.cwd),
+          projectDir: baseDirFor(ctx.config),
           client,
         });
         if (!preflight.ok) {
@@ -350,12 +345,11 @@ export function createDbSignCommand(
                   schemaVerdictDiagnostic({
                     result: verified,
                     space: undefined,
-                    nextActions: [
-                      runCommandAction(
-                        'Bring the database up to the contract, then sign again',
-                        '{bin} db update',
-                      ),
-                    ],
+                    nextActions: schemaDriftNextActions({
+                      verb: 'sign',
+                      contractRef,
+                      issues: verified.schema.issues,
+                    }),
                   }),
                 ],
               },
@@ -389,7 +383,7 @@ export function createDbSignCommand(
           );
         }
 
-        const refsDir = appRefsDirFor(ctx.config, ctx.cwd);
+        const refsDir = appRefsDirFor(ctx.config);
         const previousHash = await previousRefHash(refsDir, advancement.name);
         const advanced = await advanceRefSafely({
           refsDir,
@@ -414,9 +408,6 @@ export function createDbSignCommand(
           ),
         );
       } catch (error) {
-        if (isInternalError(error)) {
-          throw error;
-        }
         return notOk(verificationThrow({ error, invocation: 'db sign', connection: dbConnection }));
       } finally {
         await closeQuietly(client);

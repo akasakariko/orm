@@ -1,4 +1,14 @@
 export type {
+  AuthoringTypeConstructorCall,
+  AuthoringTypeConstructorOutput,
+} from '../shared/authoring-type-constructor-call';
+export { findAuthoringTypeConstructorCall } from '../shared/authoring-type-constructor-call';
+export {
+  checkUncomposedNamespace,
+  fieldPresetSpellings,
+  getAuthoringFieldPreset,
+} from '../shared/field-preset-resolution';
+export type {
   AuthoringArgRef,
   AuthoringArgumentDescriptor,
   AuthoringAttributeSpecContributions,
@@ -16,6 +26,8 @@ export type {
   AuthoringModelAttributeContext,
   AuthoringModelAttributeDescriptor,
   AuthoringModelAttributeDescriptorNamespace,
+  AuthoringModelAttributeEntityOutput,
+  AuthoringModelAttributeIndexOutput,
   AuthoringModelAttributeLoweringOutput,
   AuthoringPslBlockDescriptor,
   AuthoringPslBlockDescriptorNamespace,
@@ -27,6 +39,8 @@ export type {
   AuthoringTypeNamespace,
   AuthoringWarning,
   AuthoringWarningSink,
+  DataTypeAuthoringEntry,
+  DataTypeWrittenForm,
   ScalarTypeConstructorOutput,
 } from '../shared/framework-authoring';
 export {
@@ -35,6 +49,7 @@ export {
   classifyEnumMemberType,
   collectScalarTypeConstructors,
   flushAuthoringWarnings,
+  getAuthoringTypeConstructor,
   hasRegisteredFieldNamespace,
   instantiateAuthoringEntityType,
   instantiateAuthoringFieldPreset,
@@ -52,16 +67,18 @@ export {
 } from '../shared/framework-authoring';
 export type { AuthoringOption } from '../shared/option-descriptor';
 export type {
-  PslBlockParam,
-  PslBlockParamList,
-  PslBlockParamOption,
-  PslBlockParamRef,
-  PslBlockParamValue,
+  ParsedPslExtensionBlock,
   PslExtensionBlock,
-  PslExtensionBlockParamList,
-  PslExtensionBlockParamOption,
-  PslExtensionBlockParamRef,
-  PslExtensionBlockParamScalarValue,
-  PslExtensionBlockParamValue,
   PslExtensionBlockParsedAttribute,
+  PslExtensionBlockPrintEntry,
 } from '../shared/psl-extension-block';
+export { printTaggedLiteral } from '../shared/tagged-literal';
+export type { PresetStorageTemplate } from '../shared/temporal-presets';
+export {
+  TEMPORAL_ON_CREATE_ARG,
+  TEMPORAL_ON_UPDATE_ARG,
+  TIMESTAMP_NOW_GENERATOR_ID,
+  temporalAuthoringPresets,
+  temporalCodecPreset,
+  temporalPhaseTemplate,
+} from '../shared/temporal-presets';

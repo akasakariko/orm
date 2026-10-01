@@ -1,9 +1,11 @@
+import { ormConfigSection } from '@internal/config-loader';
 import { ifDefined } from '@internal/utils/defined';
 import { isStructuredError } from '@internal/utils/structured-error';
 import type { Block, Presentations } from '@prisma/cli-engine';
 import { flag } from '@prisma/cli-engine';
 import { notOk, ok } from '@prisma/cli-engine/protocol';
 import { createControlClient } from '../../control-api/client';
+import { errorFromCaught } from '../../control-api/operations/caught-errors';
 import {
   buildRefAdvancementFields,
   type ContractIR,
@@ -12,18 +14,13 @@ import {
   preflightRefAdvancement,
 } from '../../control-api/operations/ref-advancement';
 import type { CreateControlClient, DbInitSuccess } from '../../control-api/types';
-import {
-  CliStructuredError,
-  errorContractValidationFailed,
-  errorUnexpected,
-} from '../../utils/cli-errors';
-import { closeQuietly, sanitizeErrorMessage } from '../../utils/command-helpers';
+import { CliStructuredError, errorContractValidationFailed } from '../../utils/cli-errors';
+import { closeQuietly } from '../../utils/command-helpers';
 import { mapDbInitFailure } from '../../utils/db-init-failure';
 import type { MigrationCommandResult } from '../../utils/formatters/migrations';
-import { ormConfigSection } from '../config-section';
 import { defineOrmCommand } from '../define-command';
 import { dbFlag } from '../flags';
-import { projectConfigPathFor } from '../migration/paths';
+import { baseDirFor } from '../migration/paths';
 import { normalizeError } from '../normalize-error';
 import { controlProgressReporter } from '../progress';
 import { migrationResultBlocks, migrationResultNextActions } from './migration-blocks';
@@ -156,7 +153,7 @@ export function createDbInitCommand(createClient: CreateControlClient) {
           name: refName,
           contractJson,
           contractJsonPath: contractPath,
-          configPath: projectConfigPathFor(ctx.cwd),
+          projectDir: baseDirFor(ctx.config),
           client,
         });
         if (!preflight.ok) {
@@ -206,10 +203,11 @@ export function createDbInitCommand(createClient: CreateControlClient) {
           startedAt,
         });
       } catch (error) {
-        if (CliStructuredError.is(error)) {
-          return notOk(normalizeError(error));
-        }
-        if (isStructuredError(error) && error.code === 'CONTRACT.VALIDATION_FAILED') {
+        if (
+          !CliStructuredError.is(error) &&
+          isStructuredError(error) &&
+          error.code === 'CONTRACT.VALIDATION_FAILED'
+        ) {
           return notOk(
             normalizeError(
               errorContractValidationFailed(`Contract validation failed: ${error.message}`, {
@@ -218,14 +216,10 @@ export function createDbInitCommand(createClient: CreateControlClient) {
             ),
           );
         }
-        const safeMessage = sanitizeErrorMessage(
-          error instanceof Error ? error.message : String(error),
-          typeof dbConnection === 'string' ? dbConnection : undefined,
-        );
         return notOk(
           normalizeError(
-            errorUnexpected(safeMessage, {
-              why: `Unexpected error during db init: ${safeMessage}`,
+            errorFromCaught(error, (message) => `Unexpected error during db init: ${message}`, {
+              connection: typeof dbConnection === 'string' ? dbConnection : undefined,
             }),
           ),
         );

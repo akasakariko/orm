@@ -22,20 +22,27 @@ export function describeTaggedLiteralFailure(reason: 'nul' | 'too-large'): strin
   }
 }
 
-const BACKTICK_ESCAPES: ReadonlySet<string> = new Set(['`', '\\']);
+const PSL_BACKTICK_ESCAPES: ReadonlySet<string> = new Set(['`', '\\']);
+const TEMPLATE_TAG_ESCAPES: ReadonlySet<string> = new Set(['`', '\\', '$']);
 
-/**
- * Resolves the escapes a backtick string understands, in PSL and in the TypeScript `sql` tag's raw
- * text: `` \` `` is a backtick and `\\` one backslash. Every other backslash sequence is kept as
- * written, both characters, so a SQL body may contain `E'\n'` unchanged.
- */
-export function resolveBacktickEscapes(raw: string): string {
+/** The escapes a PSL backtick string resolves: `` \` `` and `\\`. PSL has no interpolation, so `${` is ordinary text. */
+export function resolvePslBacktickEscapes(raw: string): string {
+  return resolveEscapes(raw, PSL_BACKTICK_ESCAPES);
+}
+
+/** The escapes a TypeScript template tag resolves: the PSL two plus `\$`, the only way to write `${` in a template literal. */
+export function resolveTemplateTagEscapes(raw: string): string {
+  return resolveEscapes(raw, TEMPLATE_TAG_ESCAPES);
+}
+
+/** Every other backslash sequence is kept as written, both characters, so a SQL body may contain `E'\n'` unchanged. */
+function resolveEscapes(raw: string, escapes: ReadonlySet<string>): string {
   let out = '';
   let i = 0;
   while (i < raw.length) {
     const ch = raw.charAt(i);
     const next = raw.charAt(i + 1);
-    if (ch === '\\' && BACKTICK_ESCAPES.has(next)) {
+    if (ch === '\\' && escapes.has(next)) {
       out += next;
       i += 2;
       continue;
@@ -131,4 +138,24 @@ function utf8Length(codePoint: number): number {
   if (codePoint < 0x800) return 2;
   if (codePoint < 0x10000) return 3;
   return 4;
+}
+
+function escapeQuotedText(text: string): string {
+  return text
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r');
+}
+
+/**
+ * The PSL text of a tagged literal whose canonical text is `text`: the backtick form, or the double-quote form when the
+ * text holds a backtick, which reads better than escaping each backtick. A multi-line text starts on the line after
+ * the opening backtick, so indentation a printer adds to an enclosing block is common to every line and the
+ * canonicalization removes it. ADR 129.
+ */
+export function printTaggedLiteral(tag: string, text: string): string {
+  if (text.includes('`')) return `${tag}"${escapeQuotedText(text)}"`;
+  const fenced = text.replace(/\\/g, '\\\\');
+  return text.includes('\n') ? `${tag}\`\n${fenced}\n\`` : `${tag}\`${fenced}\``;
 }

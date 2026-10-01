@@ -1,17 +1,26 @@
+import type { JsonValue } from '@internal/contract/types';
 import type { TaggedLiteralCanonicalization } from '@internal/framework-components/control';
-import type { PslDiagnostic, PslSpan } from '@internal/framework-components/psl-ast';
+import type { PslSpan } from '@internal/framework-components/psl-ast';
 import type { Result } from '@internal/utils/result';
 import type { Simplify, UnionToIntersection } from '@internal/utils/types';
-import type { SourceFile } from '../source-file';
-import type { FieldSymbol, ModelSymbol } from '../symbol-table';
+import type { Binder } from '../binder';
+import type { PslDiagnostic } from '../diagnostic';
+import type {
+  EntityDeclaration,
+  EntitySelector,
+  ResolvedEntityReference,
+} from '../entity-reference';
+import type { PslSources } from '../source-file';
+import type { FieldSymbol, ModelSymbol, SymbolTable } from '../symbol-table';
 import type { ExpressionAst } from '../syntax/ast/expressions';
 import type { AstNode } from '../syntax/ast-helpers';
 
 export type AttributeLevel = 'field' | 'model' | 'block';
 
 export interface AttributeCtx {
-  readonly sourceId: string;
-  readonly sourceFile: SourceFile;
+  readonly sources: PslSources;
+  readonly symbols: SymbolTable;
+  readonly binder: Binder;
 }
 
 export interface ModelAttributeCtx extends AttributeCtx {
@@ -20,7 +29,6 @@ export interface ModelAttributeCtx extends AttributeCtx {
 
 export interface FieldAttributeCtx extends ModelAttributeCtx {
   readonly field: FieldSymbol;
-  resolveReferencedModel(): ModelSymbol | undefined;
 }
 
 export type ArgTypeKind =
@@ -31,6 +39,7 @@ export type ArgTypeKind =
   | 'identifier'
   | 'int'
   | 'json'
+  | 'null'
   | 'list'
   | 'num'
   | 'oneOf'
@@ -53,9 +62,12 @@ export interface BoolArgType<Ctx extends AttributeCtx = AttributeCtx>
   readonly kind: 'bool';
 }
 
-export interface EntityRefArgType<Ctx extends AttributeCtx = AttributeCtx>
-  extends ArgTypeOutput<string, Ctx> {
+export interface EntityRefArgType<
+  D extends EntityDeclaration = EntityDeclaration,
+  Ctx extends AttributeCtx = AttributeCtx,
+> extends ArgTypeOutput<ResolvedEntityReference<D>, Ctx> {
   readonly kind: 'entityRef';
+  readonly expected: EntitySelector;
 }
 
 export interface FieldRefArgType<Ctx extends ModelAttributeCtx = ModelAttributeCtx>
@@ -90,7 +102,7 @@ export interface FuncCallArgType<
   readonly signature: Signature;
 }
 
-export interface IdentifierArgType<
+export interface FixedIdentifierArgType<
   Name extends string = string,
   Ctx extends AttributeCtx = AttributeCtx,
 > extends ArgTypeOutput<Name, Ctx> {
@@ -98,6 +110,17 @@ export interface IdentifierArgType<
   readonly name: Name;
   readonly documentation: string;
 }
+
+export interface UnrestrictedIdentifierArgType<Ctx extends AttributeCtx = AttributeCtx>
+  extends ArgTypeOutput<string, Ctx> {
+  readonly kind: 'identifier';
+  readonly name: undefined;
+}
+
+export type IdentifierArgType<
+  Name extends string = string,
+  Ctx extends AttributeCtx = AttributeCtx,
+> = FixedIdentifierArgType<Name, Ctx> | UnrestrictedIdentifierArgType<Ctx>;
 
 export interface IntArgType<Ctx extends AttributeCtx = AttributeCtx>
   extends ArgTypeOutput<number, Ctx> {
@@ -109,6 +132,24 @@ export interface IntArgType<Ctx extends AttributeCtx = AttributeCtx>
 export interface JsonArgType<Ctx extends AttributeCtx = AttributeCtx>
   extends ArgTypeOutput<Record<string, unknown>, Ctx> {
   readonly kind: 'json';
+}
+
+export interface JsonValueArgType<Ctx extends AttributeCtx = AttributeCtx>
+  extends ArgTypeOutput<JsonValue, Ctx> {
+  readonly kind: 'oneOf';
+  readonly alternatives: readonly [
+    UnrestrictedStrArgType<Ctx>,
+    UnrestrictedNumArgType<Ctx>,
+    BoolArgType<Ctx>,
+    NullArgType<Ctx>,
+    ListArgType<JsonValue, Ctx>,
+    RecordArgType<JsonValue, Ctx>,
+  ];
+}
+
+export interface NullArgType<Ctx extends AttributeCtx = AttributeCtx>
+  extends ArgTypeOutput<null, Ctx> {
+  readonly kind: 'null';
 }
 
 export interface ListArgType<T = unknown, Ctx extends AttributeCtx = AttributeCtx>
@@ -149,9 +190,14 @@ export type NumArgType<
 export interface OneOfArgType<
   Alts extends readonly [AnyArgType, ...AnyArgType[]],
   Ctx extends AttributeCtx = ContextForRequirement<RequiredContextFor<CtxOf<Alts[number]>>>,
-> extends ArgTypeOutput<OutOf<Alts[number]>, Ctx> {
-  readonly kind: 'oneOf';
+> extends ArgTypeOutput<OutOf<Alts[number]>, Ctx>,
+    OneOfMetadata {
   readonly alternatives: Alts;
+}
+
+interface OneOfMetadata {
+  readonly kind: 'oneOf';
+  readonly alternatives: readonly [AnyArgType, ...AnyArgType[]];
 }
 
 export interface RecordArgType<T = unknown, Ctx extends AttributeCtx = AttributeCtx>
@@ -200,9 +246,12 @@ export interface TaggedLiteralArgType<Ctx extends AttributeCtx = AttributeCtx>
   readonly documentation: string;
 }
 
-export interface ArgType<T, Ctx extends AttributeCtx> extends ArgTypeOutput<T, Ctx> {
-  readonly kind: ArgTypeKind;
-}
+type ArgTypeMetadata<Type> = Type extends object
+  ? Omit<Type, keyof ArgTypeOutput<unknown, never>>
+  : never;
+
+export type ArgType<T, Ctx extends AttributeCtx> = ArgTypeOutput<T, Ctx> &
+  ArgTypeMetadata<ArgTypeVariant<Ctx>>;
 
 export type AnyArgType =
   | ArgType<unknown, AttributeCtx>
@@ -225,19 +274,22 @@ export type ContextForRequirement<Req extends ArgTypeContext> = Req extends 'fie
     ? ModelAttributeCtx
     : AttributeCtx;
 
-export type InspectableArgType<Ctx extends AttributeCtx> =
+export type InspectableArgType<Ctx extends AttributeCtx> = ArgType<unknown, Ctx>;
+
+type ArgTypeVariant<Ctx extends AttributeCtx> =
   | BoolArgType<Ctx>
-  | EntityRefArgType<Ctx>
+  | EntityRefArgType<EntityDeclaration, Ctx>
   | FieldRefArgType<ModelAttributeCtx & Ctx>
   | FuncCallArgType<string, Ctx>
   | IdentifierArgType<string, Ctx>
   | IntArgType<Ctx>
   | JsonArgType<Ctx>
+  | NullArgType<Ctx>
   | ListArgType<unknown, Ctx>
   | FixedNumArgType<number, Ctx>
   | UnrestrictedNumArgType<Ctx>
   | NumLiteralArgType<Ctx>
-  | OneOfArgType<readonly [AnyArgType, ...AnyArgType[]], Ctx>
+  | OneOfMetadata
   | RecordArgType<unknown, Ctx>
   | ReferencedFieldRefArgType<FieldAttributeCtx & Ctx>
   | RejectingArgType<never, Ctx>

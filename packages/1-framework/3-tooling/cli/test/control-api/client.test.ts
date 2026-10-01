@@ -1,3 +1,5 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import type { ContractSourceProvider } from '@internal/config/config-types';
 import type { Contract, LedgerEntryRecord } from '@internal/contract/types';
 import type {
@@ -15,6 +17,7 @@ import type { EmissionSpi } from '@internal/framework-components/emission';
 import { ifDefined } from '@internal/utils/defined';
 import { notOk, ok } from '@internal/utils/result';
 import { timeouts } from '@repo/test-utils';
+import { join } from 'pathe';
 import { describe, expect, it, vi } from 'vitest';
 import { createControlClient } from '../../src/control-api/client';
 import type { ControlProgressEvent } from '../../src/control-api/types';
@@ -46,6 +49,7 @@ function createSourceProvider(
   inputs?: readonly string[],
 ): ContractSourceProvider {
   return {
+    format: 'typescript',
     ...ifDefined('inputs', inputs),
     load,
   };
@@ -466,33 +470,41 @@ describe('ControlClient progress emission', () => {
     );
 
     it(
-      'passes declared source inputs to the provider',
+      'passes the expanded source inputs to the provider',
       async () => {
-        const { mockFamily, mockTarget, mockAdapter } = createMockComponents();
-        const load = vi.fn<ContractSourceProvider['load']>(async () => ok(emittableContract()));
-        const source = createSourceProvider(load, ['/tmp/schema.prisma']);
+        const dir = await mkdtemp(join(tmpdir(), 'control-client-emit-'));
+        try {
+          const schemaPath = join(dir, 'schema.prisma');
+          await writeFile(schemaPath, 'model User {}\n', 'utf-8');
 
-        const client = createControlClient({
-          family: mockFamily,
-          target: mockTarget,
-          adapter: mockAdapter,
-        });
+          const { mockFamily, mockTarget, mockAdapter } = createMockComponents();
+          const load = vi.fn<ContractSourceProvider['load']>(async () => ok(emittableContract()));
+          const source = createSourceProvider(load, [schemaPath]);
 
-        const result = await client.emit({
-          contractConfig: {
-            source,
-            output: '/tmp/contract.json',
-          },
-        });
+          const client = createControlClient({
+            family: mockFamily,
+            target: mockTarget,
+            adapter: mockAdapter,
+          });
 
-        await client.close();
+          const result = await client.emit({
+            contractConfig: {
+              source,
+              output: '/tmp/contract.json',
+            },
+          });
 
-        expect(result.ok).toBe(true);
-        expect(load).toHaveBeenCalledWith(
-          expect.objectContaining({
-            resolvedInputs: ['/tmp/schema.prisma'],
-          }),
-        );
+          await client.close();
+
+          expect(result.ok).toBe(true);
+          expect(load).toHaveBeenCalledWith(
+            expect.objectContaining({
+              resolvedInputs: [schemaPath],
+            }),
+          );
+        } finally {
+          await rm(dir, { recursive: true, force: true });
+        }
       },
       timeouts.databaseOperation,
     );
@@ -559,15 +571,9 @@ describe('ControlClient progress emission', () => {
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.failure.code).toBe('CONTRACT_SOURCE_INVALID');
-        expect(result.failure.diagnostics).toEqual({
-          summary: 'Contract source provider threw an exception',
-          diagnostics: [
-            {
-              code: 'PROVIDER_THROW',
-              message: 'Source load error',
-            },
-          ],
-        });
+        expect(result.failure.summary).toBe('Failed to resolve contract source');
+        expect(result.failure.why).toBe('Source load error');
+        expect(result.failure).not.toHaveProperty('diagnostics');
       }
 
       // Should emit resolveSource span with error outcome
@@ -609,8 +615,42 @@ describe('ControlClient progress emission', () => {
       if (!result.ok) {
         expect(result.failure.code).toBe('CONTRACT_SOURCE_INVALID');
         expect(result.failure.diagnostics?.summary).toBe('Provider failed');
-        expect(result.failure.diagnostics?.diagnostics).toHaveLength(1);
+        expect(result.failure.diagnostics?.diagnostics).toEqual([
+          {
+            code: 'PSL_INVALID_MODEL',
+            message: 'Model declaration is invalid',
+            sourceId: 'schema.prisma',
+          },
+        ]);
       }
+    });
+
+    it('rejects a malformed source result with the check contract emit runs', async () => {
+      const { mockFamily, mockTarget, mockAdapter } = createMockComponents();
+      const client = createControlClient({
+        family: mockFamily,
+        target: mockTarget,
+        adapter: mockAdapter,
+      });
+
+      const result = await client.emit({
+        contractConfig: {
+          source: createSourceProvider(
+            async () => ({}) as unknown as Awaited<ReturnType<ContractSourceProvider['load']>>,
+          ),
+          output: '/tmp/contract.json',
+        },
+      });
+
+      await client.close();
+
+      expect(result.ok).toBe(false);
+      expect(result.ok ? undefined : result.failure).toEqual({
+        code: 'CONTRACT_SOURCE_INVALID',
+        summary: 'Failed to resolve contract source',
+        why: 'Contract source provider returned malformed result shape.',
+        meta: undefined,
+      });
     });
 
     it('emits error outcome when emit throws', async () => {

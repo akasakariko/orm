@@ -3,8 +3,15 @@ import { tmpdir } from 'node:os';
 import type { ContractSourceContext } from '@internal/config/config-types';
 import type { JsonValue } from '@internal/contract/types';
 import { enumType, member } from '@internal/contract-authoring';
-import type { PslExtensionBlock } from '@internal/framework-components/authoring';
-import { type Codec, emptyCodecLookup } from '@internal/framework-components/codec';
+import type { ParsedPslExtensionBlock } from '@internal/framework-components/authoring';
+import {
+  type AnyCodecDescriptor,
+  type Codec,
+  type CodecLookupWithDescriptors,
+  createDataTypeLookup,
+  emptyCodecLookup,
+} from '@internal/framework-components/codec';
+import { jsonValue, mapBlock } from '@internal/psl-parser';
 import { join } from 'pathe';
 import { afterEach, describe, expect, it } from 'vitest';
 import { mongoContract } from '../src/exports/provider';
@@ -28,15 +35,26 @@ const stringCodec: Codec = {
   decodeJson: (json) => json,
 };
 
+function codecLookupOf(codec: Codec): CodecLookupWithDescriptors {
+  return {
+    ...emptyCodecLookup,
+    get: (id) => (id === codec.id ? codec : undefined),
+    descriptorFor: (id) =>
+      id === codec.id
+        ? ({ codecId: id, factory: () => () => codec } as unknown as AnyCodecDescriptor)
+        : undefined,
+  };
+}
+
 const enumEntityType = {
   kind: 'entity',
   discriminator: 'enum',
   output: {
-    factory: (block: PslExtensionBlock) =>
+    factory: (block: ParsedPslExtensionBlock) =>
       enumType(
         block.name,
         { codecId: stringCodec.id, nativeType: 'string' },
-        ...Object.keys(block.parameters).map((name) => member(name)),
+        ...Object.keys(block.values).map((name) => member(name)),
       ),
   },
 } as const;
@@ -46,15 +64,20 @@ const enumBlockDescriptor = {
   keyword: 'enum',
   discriminator: 'enum',
   name: { required: true },
-  parameters: {},
-  variadicParameters: true,
+  spec: () =>
+    mapBlock({
+      value: { type: jsonValue(), documentation: 'The member value.' },
+      allowBare: true,
+    }),
 } as const;
 
 function createMongoTestContext(overrides?: Partial<ContractSourceContext>): ContractSourceContext {
   return {
     composedExtensions: [],
     composedExtensionContracts: new Map(),
+    dataTypeLookup: createDataTypeLookup([]),
     authoringContributions: {
+      dataTypes: {},
       field: {},
       type: mongoScalarAuthoringTypes,
       entityTypes: {},
@@ -62,9 +85,8 @@ function createMongoTestContext(overrides?: Partial<ContractSourceContext>): Con
       modelAttributes: {},
       attributeSpecs: { model: {}, field: {} },
     },
-    codecLookup: emptyCodecLookup,
+    codecLookup: { ...emptyCodecLookup, descriptorFor: () => undefined },
     controlMutationDefaults: {
-      defaultLiteralTagRegistry: new Map(),
       defaultFunctionRegistry: new Map(),
       generatorDescriptors: [],
     },
@@ -97,12 +119,20 @@ describe('mongoContract provider helper', () => {
     expect(config.source.format).toBe('psl');
   });
 
-  it('throws InternalError when resolvedInputs is empty', async () => {
+  it('errors naming the configured pattern when resolvedInputs is empty', async () => {
     const contract = mongoContract('./schema.prisma');
+    const result = await contract.source.load(createMongoTestContext());
 
-    await expect(contract.source.load(createMongoTestContext())).rejects.toMatchObject({
-      isPrismaInternalError: true,
-    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.failure.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: 'PSL_NO_SCHEMA_FILES_MATCHED',
+          message: expect.stringContaining('./schema.prisma'),
+        }),
+      ]),
+    );
   });
 
   it('resolves relative schema paths from configDir when cwd differs', async () => {
@@ -112,7 +142,8 @@ describe('mongoContract provider helper', () => {
     const schemaPath = join(configDir, 'schema.prisma');
     await writeFile(
       schemaPath,
-      `model User {
+      `// use prisma-8
+model User {
   id ObjectId @id @map("_id")
   email String
 }
@@ -147,37 +178,34 @@ describe('mongoContract provider helper', () => {
   it('returns read failure diagnostics with the resolved absolute schema path', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'mongo-psl-provider-'));
     tempDirs.push(tempDir);
+    const missingSchemaPath = join(tempDir, 'missing.prisma');
     const contract = mongoContract('./missing.prisma');
     const result = await contract.source.load(
-      createMongoTestContext({ resolvedInputs: [join(tempDir, 'missing.prisma')] }),
+      createMongoTestContext({ resolvedInputs: [missingSchemaPath] }),
     );
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
 
     expect(result.failure).toMatchObject({
-      summary: 'Failed to read Prisma schema at "./missing.prisma"',
+      summary: 'Failed to read Prisma schema files',
       diagnostics: [
         expect.objectContaining({
           code: 'PSL_SCHEMA_READ_FAILED',
-          sourceId: './missing.prisma',
+          sourceId: missingSchemaPath,
         }),
       ],
-      meta: {
-        schemaPath: './missing.prisma',
-        absoluteSchemaPath: expect.stringMatching(/missing\.prisma$/),
-        cause: expect.any(String),
-      },
     });
   });
 
-  it('fails with an invalid block entry diagnostic at an enum member attribute and produces no contract', async () => {
+  it('reports the attribute on the enum member and produces no contract', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'mongo-psl-provider-'));
     tempDirs.push(tempDir);
     const schemaPath = join(tempDir, 'schema.prisma');
     await writeFile(
       schemaPath,
-      `enum Role {
+      `// use prisma-8
+enum Role {
   USER  @map("user")
   ADMIN
 }
@@ -195,10 +223,7 @@ model User {
     const result = await contract.source.load(
       createMongoTestContext({
         resolvedInputs: [schemaPath],
-        codecLookup: {
-          ...emptyCodecLookup,
-          get: (id) => (id === stringCodec.id ? stringCodec : undefined),
-        },
+        codecLookup: codecLookupOf(stringCodec),
         authoringContributions: {
           ...baseContributions,
           entityTypes: { enum: enumEntityType },
@@ -210,18 +235,149 @@ model User {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.failure).toEqual({
-      summary: 'Schema has 1 error',
+      summary: 'PSL to Mongo contract interpretation failed',
+      diagnostics: [
+        {
+          code: 'PSL_UNSUPPORTED_ENUM_MEMBER_ATTRIBUTE',
+          message:
+            'enum "Role": member "USER" carries @map, but an enum member takes no attributes',
+          sourceId: schemaPath,
+          span: {
+            start: { offset: 36, line: 3, column: 9 },
+            end: { offset: 48, line: 3, column: 21 },
+          },
+        },
+      ],
+    });
+  });
+
+  it('reports each attributed field line of a view as an invalid entry, then the view as an unsupported block', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'mongo-psl-provider-'));
+    tempDirs.push(tempDir);
+    const schemaPath = join(tempDir, 'schema.prisma');
+    await writeFile(
+      schemaPath,
+      `// use prisma-8
+view ActiveUsers {
+  id    ObjectId @id @map("_id")
+  email String
+}
+
+model User {
+  id ObjectId @id @map("_id")
+}
+`,
+      'utf-8',
+    );
+
+    const result = await mongoContract('./schema.prisma').source.load(
+      createMongoTestContext({ resolvedInputs: [schemaPath] }),
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.failure).toEqual({
+      summary: 'Schema has 2 errors',
       diagnostics: [
         {
           code: 'PSL_INVALID_EXTENSION_BLOCK_MEMBER',
           message: 'Invalid block entry',
-          sourceId: './schema.prisma',
+          sourceId: schemaPath,
           span: {
-            start: { offset: 20, line: 2, column: 9 },
-            end: { offset: 21, line: 2, column: 10 },
+            start: { offset: 52, line: 3, column: 18 },
+            end: { offset: 53, line: 3, column: 19 },
+          },
+        },
+        {
+          code: 'PSL_UNSUPPORTED_TOP_LEVEL_BLOCK',
+          message: 'Unsupported top-level block "view"',
+          sourceId: schemaPath,
+          span: {
+            start: { offset: 16, line: 2, column: 1 },
+            end: { offset: 20, line: 2, column: 5 },
           },
         },
       ],
+    });
+  });
+
+  describe('membership set', () => {
+    async function writeMultiFileFixture(dir: string): Promise<{
+      readonly user: string;
+      readonly post: string;
+      readonly excluded: string;
+    }> {
+      const user = join(dir, 'user.prisma');
+      const post = join(dir, 'post.prisma');
+      const excluded = join(dir, 'draft.prisma');
+      await writeFile(
+        user,
+        '// use prisma-8\nmodel User {\n  id ObjectId @id @map("_id")\n}\n',
+        'utf-8',
+      );
+      await writeFile(
+        post,
+        '// use prisma-8\nmodel Post {\n  id ObjectId @id @map("_id")\n  authorId ObjectId\n  author User @relation(fields: [authorId], references: [id])\n}\n',
+        'utf-8',
+      );
+      await writeFile(excluded, 'model Draft {\n  id ObjectId @id @map("_id")\n}\n', 'utf-8');
+      return { user, post, excluded };
+    }
+
+    it('emits one contract from every member and excludes a matched file without the directive', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'mongo-psl-provider-membership-'));
+      tempDirs.push(dir);
+      const { user, post, excluded } = await writeMultiFileFixture(dir);
+
+      const contract = mongoContract('./schema.prisma');
+      const result = await contract.source.load(
+        createMongoTestContext({ resolvedInputs: [user, post, excluded] }),
+      );
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const models = result.value.domain.namespaces['__unbound__']?.models ?? {};
+      expect(Object.keys(models).sort()).toEqual(['Post', 'User']);
+    });
+
+    it('emits a byte-identical contract regardless of resolvedInputs order', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'mongo-psl-provider-membership-'));
+      tempDirs.push(dir);
+      const { user, post } = await writeMultiFileFixture(dir);
+      const contract = mongoContract('./schema.prisma');
+
+      const forward = await contract.source.load(
+        createMongoTestContext({ resolvedInputs: [user, post] }),
+      );
+      const reversed = await contract.source.load(
+        createMongoTestContext({ resolvedInputs: [post, user] }),
+      );
+
+      expect(forward.ok).toBe(true);
+      expect(reversed.ok).toBe(true);
+      if (!forward.ok || !reversed.ok) return;
+      expect(JSON.stringify(reversed.value)).toBe(JSON.stringify(forward.value));
+    });
+
+    it('errors listing the candidates when none carries the directive', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'mongo-psl-provider-membership-'));
+      tempDirs.push(dir);
+      const a = join(dir, 'a.prisma');
+      await writeFile(a, 'model A {\n  id ObjectId @id @map("_id")\n}\n', 'utf-8');
+
+      const contract = mongoContract('./schema.prisma');
+      const result = await contract.source.load(createMongoTestContext({ resolvedInputs: [a] }));
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.failure.diagnostics).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            code: 'PSL_NO_OPTED_IN_SCHEMA_FILES',
+            message: expect.stringContaining(a),
+          }),
+        ]),
+      );
     });
   });
 });

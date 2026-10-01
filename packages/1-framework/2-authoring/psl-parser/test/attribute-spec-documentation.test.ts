@@ -10,8 +10,10 @@ import {
   str,
 } from '../src/exports';
 import { Cursor, parseAttribute } from '../src/parse';
+import { PslSources } from '../src/source-file';
 import { ModelAttributeAst } from '../src/syntax/ast/attributes';
 import { createSyntaxTree } from '../src/syntax/red';
+import { supportBinder } from './support';
 
 describe('declaration documentation', () => {
   it.each([
@@ -56,12 +58,18 @@ describe('declaration documentation', () => {
       documentation: 'Sets the default.',
       positional: [{ key: 'value', type: call, documentation: 'The default expression.' }],
     });
-    const cursor = new Cursor(`@@default(${source})`);
-    const node = ModelAttributeAst.cast(createSyntaxTree(parseAttribute(cursor)));
+    const cursor = new Cursor('schema.prisma', `@@default(${source})`);
+    const root = createSyntaxTree(parseAttribute(cursor));
+    const node = ModelAttributeAst.cast(root);
     if (!node) throw new Error('expected a block attribute');
+    const sources = new PslSources([[root, cursor.sourceFile]]);
+    const symbols = {
+      topLevel: { namespaces: {}, models: {}, compositeTypes: {}, namedTypes: {}, blocks: {} },
+    };
     const result = interpretAttribute(node, spec, {
-      sourceId: 'schema.prisma',
-      sourceFile: cursor.sourceFile,
+      sources,
+      symbols,
+      binder: supportBinder({ sources, symbolTable: symbols }),
     });
     expect(result.assertOk()).toStrictEqual({
       value: {

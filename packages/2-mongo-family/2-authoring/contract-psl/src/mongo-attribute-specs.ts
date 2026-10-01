@@ -1,9 +1,15 @@
-import type { ContractSourceDiagnostic } from '@internal/config/config-types';
+import type {
+  AuthoringContributions,
+  AuthoringTypeConstructorDescriptor,
+} from '@internal/framework-components/authoring';
+import type { ControlDefaultRegistries } from '@internal/framework-components/control';
 import type {
   ArgType,
   AttributeSpec,
   AttributeSpecContext,
   AttributeSpecNamespace,
+  Binder,
+  DescribeUnsupportedAttribute,
   FieldAttributeCtx,
   FieldAttributeSpecContext,
   FieldSymbol,
@@ -11,10 +17,15 @@ import type {
   InferAttr,
   ModelAttributeCtx,
   ModelSymbol,
+  PslDiagnostic,
+  ResolvedAttribute,
+  SymbolTable,
   TypedFuncCall,
 } from '@internal/psl-parser';
 import {
   bool,
+  createBinder,
+  diagnosticSource,
   entityRef,
   fieldAttribute,
   fieldRef,
@@ -28,11 +39,12 @@ import {
   num,
   oneOf,
   optional,
+  type PslDiagnosticCollector,
   record,
   referencedFieldRef,
   str,
 } from '@internal/psl-parser';
-import type { FieldAttributeAst, ModelAttributeAst, SourceFile } from '@internal/psl-parser/syntax';
+import type { FieldAttributeAst, ModelAttributeAst, PslSources } from '@internal/psl-parser/syntax';
 
 export function findModelAttributeNode(
   model: ModelSymbol,
@@ -55,55 +67,118 @@ export function findFieldAttributeNode(
 }
 
 function buildModelAttributeCtx(input: {
+  readonly symbols: SymbolTable;
   readonly selfModel: ModelSymbol;
-  readonly sourceFile: SourceFile;
-  readonly sourceId: string;
+  readonly sources: PslSources;
+  readonly binder: Binder;
 }): ModelAttributeCtx {
   return {
-    sourceId: input.sourceId,
-    sourceFile: input.sourceFile,
+    sources: input.sources,
     selfModel: input.selfModel,
+    binder: input.binder,
+    symbols: input.symbols,
   };
 }
 
 function buildFieldAttributeCtx(input: {
+  readonly symbols: SymbolTable;
   readonly selfModel: ModelSymbol;
   readonly field: FieldSymbol;
-  readonly sourceFile: SourceFile;
-  readonly sourceId: string;
-  readonly resolveReferencedModel?: (() => ModelSymbol | undefined) | undefined;
+  readonly sources: PslSources;
+  readonly binder: Binder;
 }): FieldAttributeCtx {
   return {
-    sourceId: input.sourceId,
-    sourceFile: input.sourceFile,
+    sources: input.sources,
     selfModel: input.selfModel,
-    resolveReferencedModel: input.resolveReferencedModel ?? (() => undefined),
     field: input.field,
+    binder: input.binder,
+    symbols: input.symbols,
   };
+}
+
+const UNLOWERED_FIELD_ATTRIBUTE_HINTS: ReadonlyMap<string, string> = new Map([
+  [
+    'updatedAt',
+    'To fill the timestamp on create and update, use `temporal.updatedAt()` as the field type.',
+  ],
+]);
+
+const DEFAULT_NOW_HINT =
+  'To fill the timestamp on create, use `temporal.createdAt()` as the field type.';
+
+function unloweredAttributeHint(attribute: ResolvedAttribute): string | undefined {
+  if (attribute.name === 'default' && attribute.args[0]?.value.replace(/\s/g, '') === 'now()') {
+    return DEFAULT_NOW_HINT;
+  }
+  return UNLOWERED_FIELD_ATTRIBUTE_HINTS.get(attribute.name);
+}
+
+function describeUnsupportedMongoAttribute(sources: PslSources): DescribeUnsupportedAttribute {
+  return ({ attribute, level, owner, field }) => {
+    if (level === 'model') {
+      return {
+        code: 'PSL_UNSUPPORTED_MODEL_ATTRIBUTE',
+        message: `Model "${owner.name}" uses unsupported attribute "@@${attribute.name}"`,
+        ...diagnosticSource(sources, owner.node.syntax).at(attribute.span),
+      };
+    }
+    if (field === undefined) return undefined;
+    const base = `Field "${owner.name}.${field.name}" uses unsupported attribute "@${attribute.name}"`;
+    const hint = unloweredAttributeHint(attribute);
+    return {
+      code: 'PSL_UNSUPPORTED_FIELD_ATTRIBUTE',
+      message: hint === undefined ? base : `${base}. ${hint}`,
+      ...diagnosticSource(sources, field.node.syntax).at(attribute.span),
+    };
+  };
+}
+
+export function createMongoBinder(input: {
+  readonly symbolTable: SymbolTable;
+  readonly sources: PslSources;
+  readonly scalarTypeCodecIds: ReadonlyMap<string, string>;
+  readonly controlMutationDefaults: ControlDefaultRegistries;
+  readonly authoringContributions?: AuthoringContributions | undefined;
+}): { readonly binder: Binder; readonly diagnostics: readonly PslDiagnostic[] } {
+  const scalars: Record<string, AuthoringTypeConstructorDescriptor> = {};
+  for (const [name, codecId] of input.scalarTypeCodecIds) {
+    scalars[name] = { kind: 'typeConstructor', output: { codecId } };
+  }
+  return createBinder({
+    sources: input.sources,
+    symbolTable: input.symbolTable,
+    typeConstructors: { ...scalars, ...(input.authoringContributions?.type ?? {}) },
+    attributeSpecs: mongoAttributeSpecs,
+    controlMutationDefaults: input.controlMutationDefaults,
+    pslBlockDescriptors: input.authoringContributions?.pslBlockDescriptors ?? {},
+    describeUnsupportedAttribute: describeUnsupportedMongoAttribute(input.sources),
+  });
 }
 
 // Interpret a model-level attribute node against its spec, draining any parse
 // failures into `diagnostics`. Returns the typed value, or `undefined` on
 // failure so the caller can apply its own default/absence handling.
 export function interpretModelAttribute<Out>(input: {
+  readonly symbols: SymbolTable;
   readonly node: ModelAttributeAst;
   readonly spec: AttributeSpec<Out, ModelAttributeCtx>;
   readonly model: ModelSymbol;
-  readonly sourceFile: SourceFile;
-  readonly sourceId: string;
-  readonly diagnostics: ContractSourceDiagnostic[];
+  readonly sources: PslSources;
+  readonly binder: Binder;
+  readonly diagnostics: PslDiagnosticCollector;
 }): Out | undefined {
   const result = interpretAttribute(
     input.node,
     input.spec,
     buildModelAttributeCtx({
+      symbols: input.symbols,
       selfModel: input.model,
-      sourceFile: input.sourceFile,
-      sourceId: input.sourceId,
+      sources: input.sources,
+      binder: input.binder,
     }),
   );
   if (!result.ok) {
-    for (const failure of result.failure) input.diagnostics.push(failure);
+    input.diagnostics.push(...result.failure);
     return undefined;
   }
   return result.value;
@@ -113,28 +188,28 @@ export function interpretModelAttribute<Out>(input: {
 // failures into `diagnostics`. Returns the typed value, or `undefined` on
 // failure so the caller can apply its own default/absence handling.
 export function interpretFieldAttribute<Out>(input: {
+  readonly symbols: SymbolTable;
   readonly node: FieldAttributeAst;
   readonly spec: AttributeSpec<Out, FieldAttributeCtx>;
   readonly model: ModelSymbol;
   readonly field: FieldSymbol;
-  readonly sourceFile: SourceFile;
-  readonly sourceId: string;
-  readonly diagnostics: ContractSourceDiagnostic[];
-  readonly resolveReferencedModel?: () => ModelSymbol | undefined;
+  readonly sources: PslSources;
+  readonly binder: Binder;
+  readonly diagnostics: PslDiagnosticCollector;
 }): Out | undefined {
   const result = interpretAttribute(
     input.node,
     input.spec,
     buildFieldAttributeCtx({
+      symbols: input.symbols,
       selfModel: input.model,
       field: input.field,
-      sourceFile: input.sourceFile,
-      sourceId: input.sourceId,
-      resolveReferencedModel: input.resolveReferencedModel,
+      sources: input.sources,
+      binder: input.binder,
     }),
   );
   if (!result.ok) {
-    for (const failure of result.failure) input.diagnostics.push(failure);
+    input.diagnostics.push(...result.failure);
     return undefined;
   }
   return result.value;
@@ -191,17 +266,23 @@ export const discriminatorModelSpec = modelAttribute('discriminator', {
     { key: 'field', type: fieldRef(), documentation: 'The discriminator field on this model.' },
   ],
 });
-export const baseModelSpec = modelAttribute('base', {
-  documentation: 'Declares this model as a variant of a base model.',
-  positional: [
-    { key: 'base', type: entityRef(), documentation: 'The base model to inherit from.' },
-    {
-      key: 'value',
-      type: str(),
-      documentation: 'The discriminator value identifying this variant.',
-    },
-  ],
-});
+export function baseModelSpec() {
+  return modelAttribute('base', {
+    documentation: 'Declares this model as a variant of a base model.',
+    positional: [
+      {
+        key: 'base',
+        type: entityRef({ kind: 'model' }),
+        documentation: 'The base model to inherit from.',
+      },
+      {
+        key: 'value',
+        type: str(),
+        documentation: 'The discriminator value identifying this variant.',
+      },
+    ],
+  });
+}
 
 const sortSig = {
   documentation: 'Selects an index field with an explicit sort direction.',
@@ -229,7 +310,7 @@ function indexFieldElement(
       positional: [
         {
           key: 'scope',
-          type: optional(entityRef()),
+          type: optional(identifier()),
           documentation: 'The field path to index recursively. Omit to index all document fields.',
         },
       ],
@@ -392,7 +473,7 @@ export const mongoAttributeSpecs = {
   model: {
     map: staticModelSpec(mapModelSpec),
     discriminator: staticModelSpec(discriminatorModelSpec),
-    base: staticModelSpec(baseModelSpec),
+    base: baseModelSpec,
     index: (ctx) => buildIndexModelSpec('index', modelFieldElement(ctx)),
     unique: (ctx) => buildIndexModelSpec('unique', modelFieldElement(ctx)),
     textIndex: (ctx) => buildTextIndexModelSpec(modelFieldElement(ctx)),

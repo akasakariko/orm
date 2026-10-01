@@ -139,28 +139,39 @@ export async function seedDbRef(options: {
 /**
  * The planner the fake target hands back. `plan` replays whatever operations
  * the test asked for; `emptyMigration` renders the stub `migration new` writes.
+ * With `throwOnOperations`, any scripted `operations` still resolve alongside
+ * the rejection — mirroring a real plan where some operations resolve and a
+ * placeholder op rejects.
  */
 export interface FakePlannerScript {
   readonly operations?: readonly MigrationPlanOperation[];
   readonly conflicts?: ReadonlyArray<{ readonly kind: string; readonly summary: string }>;
   readonly throwOnOperations?: unknown;
+  readonly throwOnPlan?: unknown;
 }
 
 function fakePlanner(script: FakePlannerScript): Record<string, unknown> {
   return {
-    plan: () =>
-      script.conflicts === undefined
+    plan: () => {
+      if (script.throwOnPlan !== undefined) {
+        throw script.throwOnPlan;
+      }
+      return script.conflicts === undefined
         ? {
             kind: 'success',
             plan: {
               operations:
                 script.throwOnOperations === undefined
                   ? (script.operations ?? [ADDITIVE_OP]).map((op) => Promise.resolve(op))
-                  : [Promise.reject(script.throwOnOperations)],
+                  : [
+                      ...(script.operations ?? []).map((op) => Promise.resolve(op)),
+                      Promise.reject(script.throwOnOperations),
+                    ],
               renderTypeScript: () => '// planned migration\n',
             },
           }
-        : { kind: 'failure', conflicts: script.conflicts },
+        : { kind: 'failure', conflicts: script.conflicts };
+    },
     emptyMigration: () => ({ renderTypeScript: () => '// empty migration\n' }),
   };
 }

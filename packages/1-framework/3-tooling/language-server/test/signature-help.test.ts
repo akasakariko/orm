@@ -15,6 +15,7 @@ import {
   optional,
   record,
   str,
+  structBlock,
 } from '@internal/psl-parser';
 import { parse } from '@internal/psl-parser/syntax';
 import { describe, expect, it, vi } from 'vitest';
@@ -113,7 +114,7 @@ const pslBlockDescriptors: AuthoringPslBlockDescriptorNamespace = {
     keyword: 'policy',
     discriminator: 'signature-policy',
     name: { required: true },
-    parameters: {},
+    spec: () => structBlock({ parameters: {} }),
     attributes: { probe: () => blockSpec },
   },
 };
@@ -121,8 +122,9 @@ const pslBlockDescriptors: AuthoringPslBlockDescriptorNamespace = {
 function help(markedSource: string, labelOffsets = true) {
   const offset = markedSource.indexOf('|');
   expect(offset).toBeGreaterThanOrEqual(0);
-  const { document, sourceFile } = parse(markedSource.replace('|', ''));
-  const { table: symbolTable } = buildSymbolTable({ document, sourceFile, pslBlockDescriptors });
+  const { document, sources } = parse(markedSource.replace('|', ''), 'language-server-test.psl');
+  const sourceFile = sources.sourceFileFor(document.syntax);
+  const { symbolTable } = buildSymbolTable({ documents: [document], sources });
   parseArgument.mockClear();
   const result = providePslSignatureHelp({
     document,

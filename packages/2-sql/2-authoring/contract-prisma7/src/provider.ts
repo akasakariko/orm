@@ -2,7 +2,6 @@ import { readdir, readFile, stat } from 'node:fs/promises';
 import type { ContractConfig, ContractSourceDiagnostic } from '@internal/config/config-types';
 import type { Contract, ControlPolicy } from '@internal/contract/types';
 import { validateContractDomain } from '@internal/contract/validate-domain';
-import { rangeToPslSpan } from '@internal/psl-parser';
 import type { ParseDiagnostic, SourceFile } from '@internal/psl-parser/syntax';
 import { parse } from '@internal/psl-parser/syntax';
 import type { SqlStorage } from '@internal/sql-contract/types';
@@ -39,7 +38,7 @@ function mapParseDiagnostics(
     code: diagnostic.code,
     message: diagnostic.message,
     sourceId,
-    span: rangeToPslSpan(diagnostic.range, sourceFile),
+    span: sourceFile.rangeToPslSpan(diagnostic.range),
   }));
 }
 
@@ -87,32 +86,41 @@ function validateInterpretedContract(contract: Contract): void {
   validateModelStorageReferences(sqlContract);
 }
 
+function isMissingPath(error: unknown): boolean {
+  return error instanceof Error && Reflect.get(error, 'code') === 'ENOENT';
+}
+
 export function prisma7Contract(
   schemaPath: string,
   options: Prisma7ContractOptions,
 ): ContractConfig {
+  const parserOptions = { grammar: 'prisma-7' } as const;
   return {
     source: {
-      format: 'prisma7',
+      format: 'psl',
       inputs: [schemaPath],
+      parserOptions,
       async load(context) {
         const [absolutePath] = context.resolvedInputs;
         if (absolutePath === undefined) {
           throw new InternalError(
-            'prisma7Contract: context.resolvedInputs is empty. The CLI config loader should populate it positional-matched with source.inputs.',
+            'prisma7Contract: context.resolvedInputs is empty. The CLI config loader should populate it from source.inputs.',
           );
         }
         let files: SchemaFile[];
         try {
           files = await listSchemaFiles(absolutePath, schemaPath);
         } catch (error) {
-          const message = String(error);
+          const cause = String(error);
+          const message = isMissingPath(error)
+            ? `There is no file or directory at "${schemaPath}". Fix the path passed to prisma7Schema() in prisma.config.ts.`
+            : cause;
           return notOk({
             summary: `Failed to read Prisma 7 schema at "${schemaPath}"`,
             diagnostics: [
               prisma7Diagnostic('PSL.PRISMA7_SCHEMA_READ_FAILED', message, schemaPath, undefined),
             ],
-            meta: { schemaPath, absolutePath, cause: message },
+            meta: { schemaPath, absolutePath, cause },
           });
         }
         if (files.length === 0) {
@@ -154,9 +162,10 @@ export function prisma7Contract(
               },
             });
           }
-          const { document, sourceFile, diagnostics } = parse(schema, { grammar: 'prisma7' });
+          const { document, sources, diagnostics } = parse(schema, file.sourceId, parserOptions);
+          const sourceFile = sources.sourceFileFor(document.syntax);
           seedDiagnostics.push(...mapParseDiagnostics(diagnostics, sourceFile, file.sourceId));
-          documents.push({ document, sourceFile, sourceId: file.sourceId });
+          documents.push({ document, sources, sourceFile, sourceId: file.sourceId });
         }
 
         let contract: Contract;
@@ -168,6 +177,7 @@ export function prisma7Contract(
             controlMutationDefaults: context.controlMutationDefaults,
             authoringContributions: context.authoringContributions,
             codecLookup: context.codecLookup,
+            dataTypeLookup: context.dataTypeLookup,
             composedExtensions: context.composedExtensions,
           });
           if (!interpreted.ok) return interpreted;

@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import type { JsonValue } from '@internal/contract/types';
-import type { Codec, CodecLookup } from '@internal/framework-components/codec';
+import type { Codec, CodecLookupWithDescriptors } from '@internal/framework-components/codec';
 import { join } from 'pathe';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createTestSqlNamespace } from '../../../1-core/contract/test/test-support';
@@ -28,7 +28,7 @@ async function loadWithEnumSupport(schemaPath: string) {
     createNamespace: createTestSqlNamespace,
   });
   const baseContext = createPostgresTestContext();
-  const codecLookup: CodecLookup = {
+  const codecLookup: CodecLookupWithDescriptors = {
     ...postgresCodecLookup,
     get: (id) => (id === textCodec.id ? textCodec : postgresCodecLookup.get(id)),
   };
@@ -54,13 +54,14 @@ describe('prismaContract given an attribute on an enum member', () => {
     tempDirs.length = 0;
   });
 
-  it('fails with an invalid block entry diagnostic at the attribute and produces no contract', async () => {
+  it('reports the attribute on the enum member and produces no contract', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'psl-provider-enum-'));
     tempDirs.push(tempDir);
     const schemaPath = join(tempDir, 'schema.prisma');
     await writeFile(
       schemaPath,
-      `enum Role {
+      `// use prisma-8
+enum Role {
   @@type("pg/text@1")
   USER  @map("user")
   ADMIN
@@ -79,15 +80,16 @@ model User {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.failure).toEqual({
-      summary: 'Schema has 1 error',
+      summary: 'PSL to SQL contract interpretation failed',
       diagnostics: [
         {
-          code: 'PSL_INVALID_EXTENSION_BLOCK_MEMBER',
-          message: 'Invalid block entry',
-          sourceId: './schema.prisma',
+          code: 'PSL_UNSUPPORTED_ENUM_MEMBER_ATTRIBUTE',
+          message:
+            'enum "Role": member "USER" carries @map, but an enum member takes no attributes',
+          sourceId: schemaPath,
           span: {
-            start: { offset: 42, line: 3, column: 9 },
-            end: { offset: 43, line: 3, column: 10 },
+            start: { offset: 58, line: 4, column: 9 },
+            end: { offset: 70, line: 4, column: 21 },
           },
         },
       ],

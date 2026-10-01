@@ -1,4 +1,4 @@
-import type { PslDiagnostic } from '@internal/framework-components/psl-ast';
+import type { PslDiagnostic } from '../diagnostic';
 import type { AstNode } from '../syntax/ast-helpers';
 import type {
   AttributeOut,
@@ -34,7 +34,7 @@ export function modelAttribute<
     name,
     documentation: config.documentation,
     positional: config.positional ?? [],
-    named: config.named ?? {},
+    named: Object.assign(Object.create(null), config.named),
     ...(config.refine !== undefined ? { refine: config.refine } : {}),
   };
 }

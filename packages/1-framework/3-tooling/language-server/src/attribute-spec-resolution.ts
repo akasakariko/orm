@@ -16,7 +16,7 @@ import type {
   ModelDeclarationAst,
 } from '@internal/psl-parser/syntax';
 import { blindCast } from '@internal/utils/casts';
-import { fieldSymbolForNode, modelSymbolForNode } from './completion-symbols';
+import { blockSymbolForNode, fieldSymbolForNode, modelSymbolForNode } from './completion-symbols';
 
 export interface AttributeSpecSource {
   readonly pslBlockDescriptors: AuthoringPslBlockDescriptorNamespace;
@@ -45,13 +45,15 @@ export function attributeSpecResolver(
   switch (context.ownerKind) {
     case 'block': {
       const descriptor = findBlockDescriptor(source.pslBlockDescriptors, context.blockKeyword);
+      const block = blockSymbolForNode(source.symbolTable, context.block);
+      if (block === undefined) return () => undefined;
       return (name) => {
         const factory = descriptor?.attributes?.[name];
         if (factory === undefined) return undefined;
         return blindCast<
           BlockAttributeSpecFactory,
           'block descriptor attributes are validated as factories at control-stack assembly but exposed through framework-components as unknown to avoid a parser dependency'
-        >(factory)();
+        >(factory)({ symbols: source.symbolTable, block });
       };
     }
     case 'model': {
@@ -64,7 +66,10 @@ export function attributeSpecResolver(
       const specContext = {
         symbols: source.symbolTable,
         model,
-        controlMutationDefaults: source.controlMutationDefaults,
+        controlMutationDefaults: {
+          ...source.controlMutationDefaults,
+          dataTypeEntries: source.authoringContributions.dataTypes ?? {},
+        },
       };
       return (name) => specs.model[name]?.(specContext);
     }
@@ -80,7 +85,10 @@ export function attributeSpecResolver(
       const specContext = {
         symbols: source.symbolTable,
         model,
-        controlMutationDefaults: source.controlMutationDefaults,
+        controlMutationDefaults: {
+          ...source.controlMutationDefaults,
+          dataTypeEntries: source.authoringContributions.dataTypes ?? {},
+        },
       };
       return (name) => specs.field[name]?.({ ...specContext, field });
     }

@@ -12,42 +12,38 @@ import {
   type AuthoringEntityContext,
   type AuthoringEntityTypeNamespace,
   type AuthoringFieldPresetDescriptor,
-  type AuthoringPslBlockDescriptorNamespace,
   type AuthoringTypeNamespace,
   collectScalarTypeConstructors,
-  type PslExtensionBlock,
+  type ParsedPslExtensionBlock,
   resolveEnumCodecId,
 } from '@internal/framework-components/authoring';
-import type { CodecLookup } from '@internal/framework-components/codec';
 import type { ExtensionPackRef, TargetPackRef } from '@internal/framework-components/components';
 import type {
-  ControlDefaultLiteralTagEntry,
   ControlMutationDefaultEntry,
   ControlMutationDefaults,
-  DefaultFunctionLoweringContext,
-  TypedDefaultFunctionCall,
 } from '@internal/framework-components/control';
-import type { FuncCallSig, SymbolTable } from '@internal/psl-parser';
+import type { FuncCallSig, PslBlockSpecDescriptor, SymbolTable } from '@internal/psl-parser';
 import {
   blockAttribute,
   buildSymbolTable,
   int,
+  jsonValue,
+  mapBlock,
   num,
   oneOf,
   optional,
-  rangeToPslSpan,
   str,
 } from '@internal/psl-parser';
-import type { SourceFile } from '@internal/psl-parser/syntax';
+import type { DocumentAst, PslSources, SourceFile } from '@internal/psl-parser/syntax';
 import { parse } from '@internal/psl-parser/syntax';
 import type { SqlNamespaceBase, SqlNamespaceInput } from '@internal/sql-contract/types';
-import { checkSqlDefaultBody, reservedSqlDefaultBody } from '@internal/sql-contract/validators';
 import { type EnumTypeHandle, enumType } from '@internal/sql-contract-ts/contract-builder';
-import { blindCast } from '@internal/utils/casts';
 import { createTestSqlNamespace } from '../../../1-core/contract/test/test-support';
+import { postgresCodecLookup } from './fixture-codec-descriptors';
+import { fixtureDataTypeSupport } from './fixture-data-types';
 
 function testEnumFactory(
-  block: PslExtensionBlock,
+  block: ParsedPslExtensionBlock,
   ctx: AuthoringEntityContext,
 ): EnumTypeHandle | undefined {
   const sourceId = ctx.sourceId ?? 'unknown';
@@ -84,9 +80,10 @@ function testEnumFactory(
   let memberError = false;
   const seenValues = new Set<string>();
 
-  for (const [memberName, paramValue] of Object.entries(block.parameters)) {
+  for (const [memberName, memberValue] of Object.entries(block.values)) {
+    const span = block.parameterSpans[memberName] ?? block.span;
     let value: unknown;
-    if (paramValue.kind === 'bare') {
+    if (memberValue === undefined) {
       try {
         value = codec.decodeJson(memberName as unknown as JsonValue);
       } catch {
@@ -94,42 +91,25 @@ function testEnumFactory(
           code: 'PSL_ENUM_BARE_MEMBER_NON_STRING_CODEC',
           message: `enum "${block.name}" member "${memberName}" has no value and codec "${codecId}" does not accept a bare name as input`,
           sourceId,
-          span: paramValue.span,
+          span,
         });
         memberError = true;
         continue;
       }
-    } else if (paramValue.kind === 'value') {
-      let jsonValue: unknown;
+    } else {
       try {
-        jsonValue = JSON.parse(paramValue.raw);
-      } catch {
-        diagnostics?.push({
-          code: 'PSL_EXTENSION_INVALID_VALUE',
-          message: `enum "${block.name}" member "${memberName}" value "${paramValue.raw}" is not valid JSON`,
-          sourceId,
-          span: paramValue.span,
-        });
-        memberError = true;
-        continue;
-      }
-      try {
-        value = codec.decodeJson(
-          blindCast<JsonValue, 'JSON.parse returns JsonValue-compatible value'>(jsonValue),
-        );
+        value = codec.decodeJson(memberValue as JsonValue);
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
         diagnostics?.push({
           code: 'PSL_EXTENSION_INVALID_VALUE',
           message: `enum "${block.name}" member "${memberName}" was rejected by codec "${codecId}": ${reason}`,
           sourceId,
-          span: paramValue.span,
+          span,
         });
         memberError = true;
         continue;
       }
-    } else {
-      continue;
     }
     const valueKey = String(value);
     if (seenValues.has(valueKey)) {
@@ -137,7 +117,7 @@ function testEnumFactory(
         code: 'PSL_ENUM_DUPLICATE_MEMBER_VALUE',
         message: `enum "${block.name}": duplicate member value "${valueKey}"`,
         sourceId,
-        span: paramValue.span,
+        span,
       });
       memberError = true;
       continue;
@@ -170,8 +150,11 @@ export const testEnumPslBlockDescriptor = {
   keyword: 'enum',
   discriminator: 'enum',
   name: { required: true },
-  parameters: {},
-  variadicParameters: true,
+  spec: () =>
+    mapBlock({
+      value: { type: jsonValue(), documentation: 'The explicit member value.' },
+      allowBare: true,
+    }),
   attributes: {
     type: () =>
       blockAttribute('type', {
@@ -185,7 +168,7 @@ export const testEnumPslBlockDescriptor = {
         ],
       }),
   },
-};
+} satisfies PslBlockSpecDescriptor;
 
 export const testEnumEntityContributions = {
   enum: {
@@ -194,22 +177,6 @@ export const testEnumEntityContributions = {
     output: { factory: testEnumFactory },
   },
 } as const satisfies AuthoringEntityTypeNamespace;
-
-function invalidArgumentDiagnostic(input: {
-  readonly context: DefaultFunctionLoweringContext;
-  readonly span: TypedDefaultFunctionCall['span'];
-  readonly message: string;
-}) {
-  return {
-    ok: false as const,
-    diagnostic: {
-      code: 'PSL_INVALID_DEFAULT_FUNCTION_ARGUMENT',
-      message: input.message,
-      sourceId: input.context.sourceId,
-      span: input.span,
-    },
-  };
-}
 
 function executionGenerator(id: string, params?: Record<string, unknown>) {
   return {
@@ -378,7 +345,14 @@ export const postgresScalarAuthoringTypes: AuthoringTypeNamespace = {
     kind: 'typeConstructor',
     args: [
       { kind: 'number', name: 'precision', integer: true, minimum: 1, optional: true },
-      { kind: 'number', name: 'scale', integer: true, minimum: 0, optional: true },
+      {
+        kind: 'number',
+        name: 'scale',
+        integer: true,
+        minimum: -1000,
+        maximum: 1000,
+        optional: true,
+      },
     ],
     output: {
       codecId: 'pg/numeric@1',
@@ -435,6 +409,7 @@ export const postgresNativeScalarTypeDescriptors = collectScalarTypeConstructors
  * Controlled test-only descriptor — intentionally uses pg/vector@1 with maximum: 2000 rather than importing the real pgvector pack, so interpreter unit tests stay layer-isolated. Real-pack parity is covered by `test/integration/test/authoring/parity/ts-psl-parity.real-packs.test.ts`.
  */
 export const pgvectorAuthoringContributions = {
+  dataTypes: {},
   entityTypes: {},
   field: {},
   pslBlockDescriptors: {},
@@ -462,31 +437,30 @@ export function buildSymbolTableInput(
   schema: string,
   options?: {
     readonly sourceId?: string;
-    readonly pslBlockDescriptors?: AuthoringPslBlockDescriptorNamespace;
   },
 ): {
+  documents: readonly DocumentAst[];
   symbolTable: SymbolTable;
+  sources: PslSources;
   sourceFile: SourceFile;
   sourceId: string;
   seedDiagnostics: ContractSourceDiagnostic[];
   enumInferenceCodecs: { readonly text: string; readonly int: string };
 } {
   const sourceId = options?.sourceId ?? 'schema.prisma';
-  const pslBlockDescriptors = options?.pslBlockDescriptors ?? {};
-  const { document, sourceFile } = parse(schema);
-  const { table, diagnostics } = buildSymbolTable({
-    document,
-    sourceFile,
-    pslBlockDescriptors,
-  });
+  const { document, sources } = parse(schema, sourceId);
+  const sourceFile = sources.sourceFileFor(document.syntax);
+  const { symbolTable, diagnostics } = buildSymbolTable({ documents: [document], sources });
   const seedDiagnostics: ContractSourceDiagnostic[] = diagnostics.map((diagnostic) => ({
     code: diagnostic.code,
     message: diagnostic.message,
     sourceId,
-    span: rangeToPslSpan(diagnostic.range, sourceFile),
+    span: sourceFile.rangeToPslSpan(diagnostic.range),
   }));
   return {
-    symbolTable: table,
+    documents: [document],
+    symbolTable,
+    sources,
     sourceFile,
     sourceId,
     seedDiagnostics,
@@ -497,9 +471,10 @@ export function buildSymbolTableInput(
 export function symbolTableInputFromParseArgs(args: {
   readonly schema: string;
   readonly sourceId?: string;
-  readonly pslBlockDescriptors?: AuthoringPslBlockDescriptorNamespace;
 }): {
+  documents: readonly DocumentAst[];
   symbolTable: SymbolTable;
+  sources: PslSources;
   sourceFile: SourceFile;
   sourceId: string;
   seedDiagnostics: ContractSourceDiagnostic[];
@@ -507,9 +482,6 @@ export function symbolTableInputFromParseArgs(args: {
 } {
   return buildSymbolTableInput(args.schema, {
     ...(args.sourceId !== undefined ? { sourceId: args.sourceId } : {}),
-    ...(args.pslBlockDescriptors !== undefined
-      ? { pslBlockDescriptors: args.pslBlockDescriptors }
-      : {}),
   });
 }
 
@@ -538,37 +510,7 @@ export const sqliteScalarColumnDescriptors = collectScalarTypeConstructors(
   sqliteScalarAuthoringTypes,
 );
 
-const targetTypesByCodecId: Record<string, readonly string[]> = {
-  'pg/text@1': ['text'],
-  'pg/int@1': ['int4'],
-  'pg/bool@1': ['bool'],
-  'pg/int4@1': ['int4'],
-  'pg/int8@1': ['int8'],
-  'pg/float8@1': ['float8'],
-  'pg/numeric@1': ['numeric'],
-  'pg/timestamptz-temporal@1': ['timestamptz'],
-  'pg/jsonb@1': ['jsonb'],
-  'pg/bytea@1': ['bytea'],
-  'sql/char@1': ['character'],
-  'sql/varchar@1': ['character varying'],
-  'pg/int2@1': ['int2'],
-  'pg/float4@1': ['float4'],
-  'pg/timestamp-temporal@1': ['timestamp'],
-  'pg/date-temporal@1': ['date'],
-  'pg/time-temporal@1': ['time'],
-  'pg/timetz@1': ['timetz'],
-  'pg/json@1': ['json'],
-  'pg/vector@1': ['vector'],
-};
-
-export const postgresCodecLookup: CodecLookup = {
-  get: (id: string) => {
-    if (!targetTypesByCodecId[id]) return undefined;
-    return { id } as ReturnType<CodecLookup['get']>;
-  },
-  targetTypesFor: (id: string) => targetTypesByCodecId[id],
-  renderOutputTypeFor: () => undefined,
-};
+export { postgresCodecLookup } from './fixture-codec-descriptors';
 
 export function createPostgresTestContext(
   overrides?: Partial<ContractSourceContext>,
@@ -577,6 +519,7 @@ export function createPostgresTestContext(
     composedExtensions: [],
     composedExtensionContracts: new Map(),
     authoringContributions: {
+      dataTypes: fixtureDataTypeSupport.entries,
       field: {},
       type: postgresScalarAuthoringTypes,
       entityTypes: {},
@@ -587,6 +530,7 @@ export function createPostgresTestContext(
     },
     codecLookup: postgresCodecLookup,
     controlMutationDefaults: createBuiltinLikeControlMutationDefaults(),
+    dataTypeLookup: fixtureDataTypeSupport.lookup,
     resolvedInputs: [],
     capabilities: { sql: { scalarList: true } },
     ...overrides,
@@ -627,51 +571,6 @@ const nanoidSig: FuncCallSig = {
     },
   ],
 };
-const dbgeneratedSig: FuncCallSig = {
-  documentation: 'Uses a database SQL expression as the default value.',
-  positional: [
-    {
-      key: 'expression',
-      type: str(),
-      documentation: 'The nonempty SQL expression evaluated by the database.',
-    },
-  ],
-};
-
-// Mirrors the SQL family's `sqlDefaultLiteralTagEntry`; the authoring layer's tests cannot import the family.
-function sqlLiteralTagEntry(usage: string): ControlDefaultLiteralTagEntry {
-  return {
-    usage,
-    documentation: "Uses the SQL in the string, verbatim, as the column's default expression.",
-    lower: ({ literal, context }) => {
-      const reject = (message: string) => ({
-        ok: false as const,
-        diagnostic: {
-          code: 'PSL_INVALID_DEFAULT_SQL',
-          message,
-          sourceId: context.sourceId,
-          span: literal.span,
-        },
-      });
-      const reserved = reservedSqlDefaultBody(literal.body);
-      if (reserved !== undefined) {
-        return reject(
-          `Write @default(${reserved}()) instead of ${literal.tag}\`${reserved}()\`; ${reserved}() is a Prisma default function, not raw SQL.`,
-        );
-      }
-      const unsafe = checkSqlDefaultBody(literal.body);
-      if (unsafe !== undefined) return reject(unsafe);
-      return {
-        ok: true as const,
-        value: {
-          kind: 'storage' as const,
-          defaultValue: { kind: 'function' as const, expression: literal.body },
-        },
-      };
-    },
-  };
-}
-
 export function createBuiltinLikeControlMutationDefaults(): ControlMutationDefaults {
   return {
     defaultFunctionRegistry: new Map<string, ControlMutationDefaultEntry>([
@@ -743,34 +642,6 @@ export function createBuiltinLikeControlMutationDefaults(): ControlMutationDefau
           usageSignatures: ['nanoid()', 'nanoid(<2-255>)'],
         },
       ],
-      [
-        'dbgenerated',
-        {
-          signature: dbgeneratedSig,
-          lower: ({ call, context }) => {
-            const expression = call.args['expression'];
-            if (typeof expression !== 'string' || expression.trim().length === 0) {
-              return invalidArgumentDiagnostic({
-                context,
-                span: call.span,
-                message: 'Default function "dbgenerated" argument cannot be empty.',
-              });
-            }
-            return {
-              ok: true as const,
-              value: {
-                kind: 'storage' as const,
-                defaultValue: { kind: 'function' as const, expression },
-              },
-            };
-          },
-          usageSignatures: ['dbgenerated("...")'],
-        },
-      ],
-    ]),
-    defaultLiteralTagRegistry: new Map<string, ControlDefaultLiteralTagEntry>([
-      ['sql', sqlLiteralTagEntry('sql`...`')],
-      ['pg.sql', sqlLiteralTagEntry('pg.sql`...`')],
     ]),
     generatorDescriptors: [
       {

@@ -1,4 +1,4 @@
-import type { SqlDescribedContractSpace } from '@internal/family-sql/control';
+import type { SqlDescribedContractSpace, SqlPslBuildContext } from '@internal/family-sql/control';
 import type { EnumInfo, PslPrinterOptions } from '@internal/family-sql/psl-infer';
 import { inferRelations, toModelName } from '@internal/family-sql/psl-infer';
 import { coordinateKey } from '@internal/framework-components/ir';
@@ -16,8 +16,11 @@ import {
 import { SqlSchemaIR, SqlTableIR } from '@internal/sql-schema-ir/types';
 import { parsePostgresDefault } from '../default-normalizer';
 import { postgresError } from '../errors';
+import { createPostgresTypeMap } from '../psl-build/postgres-type-map';
+import { SYNTHETIC_SPAN } from '../psl-build/psl-literals';
 import type { PostgresDatabaseSchemaNode } from '../schema-ir/postgres-database-schema-node';
 import type { PostgresPolicySchemaNode } from '../schema-ir/postgres-policy-schema-node';
+import { type InferredColumnDefaults, inferredColumnDefaults } from './infer-default-codec';
 import { buildNativeEnumBlocks, PSL_SCALAR_TYPE_NAMES } from './infer-enum-blocks';
 import {
   describedContractOwners,
@@ -26,10 +29,8 @@ import {
 } from './infer-foreign-keys';
 import { buildModel } from './infer-model-blocks';
 import { buildFieldNamesByTable, buildTopLevelNameMap, topologicalSort } from './infer-names';
-import { buildPolicyBlocks } from './infer-policy-blocks';
+import { buildIntrospectedPolicyBlocks } from './infer-policy-blocks';
 import { createPostgresDefaultMapping } from './postgres-default-mapping';
-import { createPostgresTypeMap } from './postgres-type-map';
-import { SYNTHETIC_SPAN } from './psl-literals';
 
 /**
  * Infers a PSL AST (for `printPsl`) from an introspected Postgres schema tree.
@@ -62,6 +63,7 @@ import { SYNTHETIC_SPAN } from './psl-literals';
  */
 export function inferPostgresPslContract(
   tree: PostgresDatabaseSchemaNode,
+  context: SqlPslBuildContext,
   describedContracts?: readonly SqlDescribedContractSpace[],
 ): PslDocumentAst {
   const namespaces = Object.values(tree.namespaces);
@@ -216,10 +218,11 @@ export function inferPostgresPslContract(
     typeNames: enumTypeNames,
     definitions: enumDefinitions,
   };
-  const options: PslPrinterOptions = {
+  const options: PostgresPslInferOptions = {
     typeMap: createPostgresTypeMap(enumInfo.typeNames),
     defaultMapping: createPostgresDefaultMapping(),
     parseRawDefault: parsePostgresDefault,
+    columnDefaults: inferredColumnDefaults(context),
     ...(enumDefinitions.size > 0 ? { enumInfo } : {}),
   };
 
@@ -242,6 +245,11 @@ export interface RlsEmissionExtras {
   readonly policiesByTable: ReadonlyMap<string, readonly PostgresPolicySchemaNode[]>;
 }
 
+/** The printer options, and how a column's literal default is checked to read back. */
+export type PostgresPslInferOptions = PslPrinterOptions & {
+  readonly columnDefaults: InferredColumnDefaults;
+};
+
 /**
  * Builds the PSL document for one introspected schema.
  *
@@ -261,7 +269,7 @@ export interface RlsEmissionExtras {
  */
 export function buildPslDocumentAst(
   schemaIR: SqlSchemaIR,
-  options: PslPrinterOptions,
+  options: PostgresPslInferOptions,
   foreignKeyExtras: Pick<
     ForeignKeyResolution,
     'extraRelationsByTable' | 'crossSpaceFieldNamesByTable' | 'danglingForeignKeysByTable'
@@ -310,7 +318,7 @@ export function buildPslDocumentAst(
   ]);
   const { relationsByTable } = inferRelations(schemaIR.tables, modelNameMap);
 
-  const policyEmission = buildPolicyBlocks(
+  const policyEmission = buildIntrospectedPolicyBlocks(
     rlsExtras?.policiesByTable ?? new Map(),
     modelNameMap,
     new Set([
@@ -357,6 +365,7 @@ export function buildPslDocumentAst(
         fieldNamesByTable,
         defaultMapping,
         rawDefaultParser,
+        options.columnDefaults,
         [
           ...(relationsByTable.get(table.name) ?? []),
           ...(extraRelationsByTable.get(table.name) ?? []),

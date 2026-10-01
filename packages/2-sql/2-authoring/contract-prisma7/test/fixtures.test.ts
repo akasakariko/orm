@@ -44,13 +44,17 @@ const cases = readdirSync(fixturesDir, { withFileTypes: true })
 describe('Prisma 7 fixtures', () => {
   it('has a case per rule row', () => {
     expect(cases).toEqual([
+      'block-dotted-value',
       'datetime-defaults',
       'dbgenerated-without-expression',
       'dbgenerated-without-expression-optional',
       'defaults',
       'enum-default-member',
+      'enum-default-member-unmapped-type',
+      'enum-default-quoted-string',
       'enum-namespace-mismatch',
       'enum-native',
+      'enum-unreferenced',
       'explicit-relations',
       'generator-optional',
       'generators',

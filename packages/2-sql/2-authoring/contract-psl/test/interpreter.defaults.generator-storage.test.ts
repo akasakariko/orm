@@ -6,6 +6,7 @@ import { collectScalarTypeConstructors } from '@internal/framework-components/au
 import { describe, expect, it } from 'vitest';
 import { createTestSqlNamespace } from '../../../1-core/contract/test/test-support';
 import { interpretPslDocumentToSqlContract as interpretPslDocumentToSqlContractInternal } from '../src/interpreter';
+import { fixtureDataTypeSupport } from './fixture-data-types';
 import {
   postgresScalarAuthoringTypes,
   postgresTarget,
@@ -40,6 +41,7 @@ describe('generator defaults never mutate storage — the type position is the o
 
   const interpret = (schema: string) =>
     interpretPslDocumentToSqlContractInternal({
+      dataTypeLookup: fixtureDataTypeSupport.lookup,
       ...symbolTableInputFromParseArgs({ schema, sourceId: 'schema.prisma' }),
       target: postgresTarget,
       scalarColumnDescriptors: collectScalarTypeConstructors(authoringTypes),
@@ -66,7 +68,7 @@ id Uuid @id @default(uuid())
     });
     expect(result.value.execution?.mutations.defaults).toEqual([
       {
-        ref: { namespace: 'public', table: 'F', column: 'id' },
+        ref: { namespace: 'public', entry: 'F', field: 'id' },
         onCreate: { kind: 'generator', id: 'uuidv4' },
       },
     ]);
@@ -110,7 +112,7 @@ id Char(30) @id @default(cuid(2))
     });
     expect(result.value.execution?.mutations.defaults).toEqual([
       {
-        ref: { namespace: 'public', table: 'M', column: 'id' },
+        ref: { namespace: 'public', entry: 'M', field: 'id' },
         onCreate: { kind: 'generator', id: 'cuid2' },
       },
     ]);
@@ -132,7 +134,7 @@ id String @id @default(uuid())
     });
     expect(result.value.execution?.mutations.defaults).toEqual([
       {
-        ref: { namespace: 'public', table: 'L', column: 'id' },
+        ref: { namespace: 'public', entry: 'L', field: 'id' },
         onCreate: { kind: 'generator', id: 'uuidv4' },
       },
     ]);
@@ -184,7 +186,7 @@ ref String @default(cuid(2))
     expect(result.value.execution?.mutations.defaults).toEqual(
       expect.arrayContaining([
         {
-          ref: { namespace: 'public', table: 'N', column: 'sized' },
+          ref: { namespace: 'public', entry: 'N', field: 'sized' },
           onCreate: { kind: 'generator', id: 'nanoid', params: { size: 16 } },
         },
       ]),

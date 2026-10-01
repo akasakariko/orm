@@ -1,4 +1,5 @@
 import type {
+  ContractSourceDiagnostic,
   ContractSourceDiagnostics,
   ContractSourceProvider,
   PrismaNextConfig,
@@ -572,6 +573,8 @@ export interface EmitSuccess {
   readonly contractJson: string;
   /** The emitted contract TypeScript declarations */
   readonly contractDts: string;
+  /** Warnings the contract source reported while producing the contract. Undefined when there were none. */
+  readonly sourceWarnings?: readonly ContractSourceDiagnostic[];
 }
 
 /**
@@ -788,13 +791,13 @@ export interface ContractEmitOptions {
   /** Directory the caller was invoked from. */
   readonly cwd: string;
   /**
-   * Path to the prisma.config.ts file. Used to find the project manifest
-   * whose dependencies decide the import specifiers in emitted files; the
-   * config itself is never read from it. Omit it and the manifest is looked up
-   * from the directory the artifacts are written to, which is the package that
+   * The project's directory, normally the validated config's `baseDir`. Used
+   * to find the project manifest whose dependencies decide the import
+   * specifiers in emitted files. Omit it and the manifest is looked up from
+   * the directory the artifacts are written to, which is the package that
    * will import them.
    */
-  readonly configPath?: string;
+  readonly projectDir?: string;
   /**
    * Directory to write contract artifacts into. When set, `contract.json` and
    * `contract.d.ts` are written inside this directory, taking precedence over
@@ -835,6 +838,8 @@ export interface ContractEmitResult {
    * not write to stderr itself. Undefined when no warning was raised.
    */
   readonly validationWarning?: string;
+  /** Warnings the contract source reported while producing the contract. Undefined when there were none. */
+  readonly sourceWarnings?: readonly ContractSourceDiagnostic[];
 }
 
 // ============================================================================

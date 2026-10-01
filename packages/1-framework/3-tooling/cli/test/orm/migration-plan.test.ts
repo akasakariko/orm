@@ -2,11 +2,15 @@ import { existsSync } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
 import { contractSnapshotDir } from '@internal/migration-tools/contract-snapshot-store';
 import { computeMigrationHash } from '@internal/migration-tools/hash';
+import { writeRef } from '@internal/migration-tools/refs';
 import { notOk } from '@internal/utils/result';
+import { structuredError } from '@internal/utils/structured-error';
 import { createTestCli } from '@prisma/cli-engine/testing';
-import { join } from 'pathe';
+import { basename, dirname, join } from 'pathe';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { BIN_GROUPS } from '../../src/orm/cli';
+import { errorUnfilledPlaceholder } from '../../src/utils/cli-errors';
+import { createOrmTestCli } from '../helpers/orm-test-cli';
 import {
   ADDITIVE_OP,
   contractJson,
@@ -38,14 +42,12 @@ function harness(
     readonly overrides?: Record<string, unknown>;
   } = {},
 ) {
-  return createTestCli({
+  return createOrmTestCli({
     commands: OFFLINE_COMMANDS,
     groups: BIN_GROUPS,
-    config: {
-      orm: {
-        ...offlineConfig({ project, ...(options.script ? { script: options.script } : {}) }),
-        ...options.overrides,
-      },
+    orm: {
+      ...offlineConfig({ project, ...(options.script ? { script: options.script } : {}) }),
+      ...options.overrides,
     },
   });
 }
@@ -81,6 +83,65 @@ async function upToDateProject(): Promise<OfflineProject> {
   await seedDbRef({ appMigrationsDir: project.appMigrationsDir, storageHash: HASH_TO });
   return project;
 }
+
+describe('migration plan --config naming a file in a subdirectory', () => {
+  it('reads the contract from and plans into the config file directory', async () => {
+    const project = await plannableProject();
+    const cli = createTestCli({
+      commands: OFFLINE_COMMANDS,
+      groups: BIN_GROUPS,
+      // The engine's own loader: the file's sections exactly as written.
+      loadConfig: async (configPath) => ({
+        files: [
+          {
+            path: join(
+              project.dir,
+              configPath === undefined ? 'prisma.config.ts' : basename(configPath),
+            ),
+            sections: {
+              orm: {
+                ...offlineConfig({ project }),
+                contract: {
+                  source: {
+                    format: 'typescript',
+                    inputs: [],
+                    load: async () => contractJson('unused'),
+                  },
+                  output: './output/contract.json',
+                },
+                migrations: { dir: './migrations' },
+              },
+            },
+          },
+        ],
+        diagnostics: [],
+      }),
+    });
+
+    const run = await cli.run(
+      [
+        'migration',
+        'plan',
+        '--name',
+        'add-users',
+        '--config',
+        join(basename(project.dir), 'prisma.config.ts'),
+      ],
+      { cwd: dirname(project.dir) },
+    );
+    const dirs = await plannedDirs(project);
+
+    expect(run.exitCode).toBe(0);
+    expect(run.presented?.data).toMatchObject({
+      ok: true,
+      noOp: false,
+      from: HASH_FROM,
+      to: HASH_TO,
+    });
+    expect(dirs).toHaveLength(2);
+    expect(dirs.at(-1)).toMatch(/_add_users$/);
+  });
+});
 
 describe('migration plan', () => {
   it('settles as a completed envelope carrying the plan document', async () => {
@@ -174,7 +235,7 @@ describe('migration plan', () => {
 
     expect(run.presented?.presentation.next).toEqual([
       { kind: 'edit-file', label: `Review ${dir}` },
-      { kind: 'run-command', label: 'Apply the migration', command: '{bin} db migrate' },
+      { kind: 'run-command', label: 'Apply the migration', command: 'prisma-test db migrate' },
     ]);
   });
 
@@ -214,6 +275,318 @@ describe('migration plan', () => {
     });
   });
 
+  it('warns when the default origin ref already has outgoing edges', async () => {
+    const HASH_MID = `abba${'4'.repeat(60)}`;
+    const project = await createOfflineProject({ storageHash: HASH_TO });
+    await seedMigrationPackage({
+      appMigrationsDir: project.appMigrationsDir,
+      dirName: '20260101T0000_initial',
+      from: null,
+      to: HASH_FROM,
+    });
+    await seedMigrationPackage({
+      appMigrationsDir: project.appMigrationsDir,
+      dirName: '20260102T0000_second',
+      from: HASH_FROM,
+      to: HASH_MID,
+    });
+    await seedContractSnapshot({ migrationsDir: project.migrationsDir, storageHash: HASH_FROM });
+    await seedDbRef({ appMigrationsDir: project.appMigrationsDir, storageHash: HASH_FROM });
+
+    const run = await harness(project).run(['migration', 'plan'], {
+      cwd: project.dir,
+      isTty: { stdout: true },
+    });
+
+    expect(run.exitCode).toBe(0);
+    const data = run.presented?.data as { warnings?: readonly string[] } | undefined;
+    const warnings = data?.warnings ?? [];
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("'db'");
+    expect(warnings[0]).toContain(HASH_FROM);
+    expect(warnings[0]).toContain(HASH_MID);
+    expect(run.presented?.presentation.human).toContainEqual({
+      kind: 'summary',
+      status: 'warn',
+      text: warnings[0],
+    });
+  });
+
+  it('does not warn when the default origin ref has no outgoing edges', async () => {
+    const project = await plannableProject();
+
+    const run = await harness(project).run(['migration', 'plan'], { cwd: project.dir });
+
+    expect(run.exitCode).toBe(0);
+    expect(run.presented?.data).not.toHaveProperty('warnings');
+  });
+
+  describe('forked graph', () => {
+    const HASH_OTHER = `dead${'2'.repeat(60)}`;
+
+    /** Two migrations planned off the empty database: HASH_FROM and HASH_OTHER are both tips. */
+    async function forkedProject(): Promise<OfflineProject> {
+      const project = await createOfflineProject({ storageHash: HASH_TO });
+      await seedMigrationPackage({
+        appMigrationsDir: project.appMigrationsDir,
+        dirName: '20260101T0000_left',
+        from: null,
+        to: HASH_FROM,
+      });
+      await seedMigrationPackage({
+        appMigrationsDir: project.appMigrationsDir,
+        dirName: '20260102T0000_right',
+        from: null,
+        to: HASH_OTHER,
+      });
+      await seedContractSnapshot({ migrationsDir: project.migrationsDir, storageHash: HASH_FROM });
+      return project;
+    }
+
+    it('plans from an explicit ref and writes the edge from that tip', async () => {
+      const project = await forkedProject();
+      await writeRef(join(project.appMigrationsDir, 'refs'), 'topic', {
+        hash: HASH_FROM,
+        invariants: [],
+      });
+
+      const run = await harness(project).run(
+        ['migration', 'plan', '--from', 'topic', '--name', 'delta'],
+        { cwd: project.dir },
+      );
+      const dirs = await plannedDirs(project);
+      const planned = dirs.find((dir) => dir.endsWith('_delta'));
+
+      expect(run.exitCode).toBe(0);
+      expect(planned).toBeDefined();
+      expect(
+        JSON.parse(
+          await readFile(join(project.appMigrationsDir, planned ?? '', 'migration.json'), 'utf-8'),
+        ),
+      ).toMatchObject({ from: HASH_FROM, to: HASH_TO });
+    });
+
+    it('plans from the db ref without warning when that tip has no outgoing edges', async () => {
+      const project = await forkedProject();
+      await seedDbRef({ appMigrationsDir: project.appMigrationsDir, storageHash: HASH_FROM });
+
+      const run = await harness(project).run(['migration', 'plan', '--name', 'delta'], {
+        cwd: project.dir,
+      });
+
+      expect(run.exitCode).toBe(0);
+      expect(run.presented?.data).toMatchObject({ from: HASH_FROM, to: HASH_TO });
+      expect(run.presented?.data).not.toHaveProperty('warnings');
+    });
+
+    it('refuses with PLAN_ORIGIN_UNKNOWN when neither --from nor a db ref is given', async () => {
+      const project = await forkedProject();
+
+      const run = await harness(project).run(['migration', 'plan', '--name', 'delta', '--json'], {
+        cwd: project.dir,
+      });
+
+      expect(run.exitCode).toBe(2);
+      expect(run.json.at(-1)).toMatchObject({
+        kind: 'result',
+        envelope: { ok: false, error: { code: 'MIGRATION.PLAN_ORIGIN_UNKNOWN' } },
+      });
+    });
+  });
+
+  describe('auto-baseline consent', () => {
+    /** An empty graph whose db ref demands a destructive baseline. */
+    async function destructiveBaselineProject(): Promise<OfflineProject> {
+      const project = await createOfflineProject({ storageHash: HASH_TO });
+      await seedContractSnapshot({ migrationsDir: project.migrationsDir, storageHash: HASH_FROM });
+      await seedDbRef({ appMigrationsDir: project.appMigrationsDir, storageHash: HASH_FROM });
+      return project;
+    }
+    const destructiveScript = { operations: [ADDITIVE_OP, DESTRUCTIVE_OP] } as const;
+
+    it('refuses non-interactively without --confirm and writes nothing', async () => {
+      const project = await destructiveBaselineProject();
+
+      const run = await harness(project, { script: destructiveScript }).run(
+        ['migration', 'plan', '--json'],
+        { cwd: project.dir },
+      );
+
+      expect(run.exitCode).toBe(2);
+      const terminal = run.json.at(-1);
+      const envelope =
+        terminal !== undefined && terminal.kind === 'result' ? terminal.envelope : undefined;
+      expect(envelope).toMatchObject({
+        ok: false,
+        error: { code: 'CLI.CONSENT_REQUIRED', meta: { consentToken: basename(project.dir) } },
+      });
+      expect(await plannedDirs(project)).toEqual([]);
+    });
+
+    it('names every destructive operation in the question', async () => {
+      const project = await destructiveBaselineProject();
+
+      const run = await harness(project, { script: destructiveScript }).run(['migration', 'plan'], {
+        cwd: project.dir,
+        isTty: { stdin: true, stdout: true, stderr: true },
+        stdin: `${basename(project.dir)}\n`,
+      });
+
+      expect(run.stderr).toContain('Drop table "legacy"');
+    });
+
+    it('writes the baseline once consent is typed', async () => {
+      const project = await destructiveBaselineProject();
+
+      const run = await harness(project, { script: destructiveScript }).run(
+        ['migration', 'plan', '--name', 'delta', '--json'],
+        { cwd: project.dir, isTty: { stdin: true }, answers: [basename(project.dir)] },
+      );
+      const dirs = await plannedDirs(project);
+
+      expect(run.exitCode).toBe(0);
+      expect(dirs.map((entry) => entry.replace(/^\d+T\d+_/, ''))).toEqual(['baseline', 'delta']);
+    });
+
+    it('writes the baseline when --confirm carries the project directory name', async () => {
+      const project = await destructiveBaselineProject();
+
+      const run = await harness(project, { script: destructiveScript }).run(
+        ['migration', 'plan', '--confirm', basename(project.dir), '--json'],
+        { cwd: project.dir },
+      );
+
+      expect(run.exitCode).toBe(0);
+      expect((await plannedDirs(project)).length).toBe(2);
+    });
+
+    it('still asks when the destructive baseline also carries a placeholder', async () => {
+      const project = await destructiveBaselineProject();
+
+      const run = await harness(project, {
+        script: {
+          operations: [ADDITIVE_OP, DESTRUCTIVE_OP],
+          throwOnOperations: errorUnfilledPlaceholder('backfill'),
+        },
+      }).run(['migration', 'plan', '--json'], { cwd: project.dir });
+
+      expect(run.exitCode).toBe(2);
+      const terminal = run.json.at(-1);
+      const envelope =
+        terminal !== undefined && terminal.kind === 'result' ? terminal.envelope : undefined;
+      expect(envelope).toMatchObject({ ok: false, error: { code: 'CLI.CONSENT_REQUIRED' } });
+      expect(await plannedDirs(project)).toEqual([]);
+    });
+
+    it('writes the placeholder baseline once --confirm grants consent', async () => {
+      const project = await destructiveBaselineProject();
+
+      const run = await harness(project, {
+        script: {
+          operations: [ADDITIVE_OP, DESTRUCTIVE_OP],
+          throwOnOperations: errorUnfilledPlaceholder('backfill'),
+        },
+      }).run(['migration', 'plan', '--confirm', basename(project.dir), '--json'], {
+        cwd: project.dir,
+      });
+
+      expect(run.exitCode).toBe(0);
+      expect(run.presented?.data).toMatchObject({ pendingPlaceholders: true });
+      expect((await plannedDirs(project)).length).toBe(2);
+    });
+
+    it('reports extension dirs the refused first run seeded once consent is granted', async () => {
+      const EXT_HASH = `f00d${'5'.repeat(60)}`;
+      const extMetadataBase = {
+        from: null,
+        to: EXT_HASH,
+        providedInvariants: [],
+        createdAt: '2026-01-01T00:00:00.000Z',
+      };
+      const project = await destructiveBaselineProject();
+
+      const run = await harness(project, {
+        script: destructiveScript,
+        overrides: {
+          extensions: [
+            {
+              kind: 'extension',
+              id: 'cipherstash',
+              familyId: 'sql',
+              targetId: 'postgres',
+              version: '1.0.0',
+              create: () => ({}),
+              contractSpace: {
+                contractJson: contractJson(EXT_HASH),
+                headRef: { hash: EXT_HASH, invariants: [] },
+                migrations: [
+                  {
+                    dirName: '0001_seed',
+                    metadata: {
+                      ...extMetadataBase,
+                      migrationHash: computeMigrationHash(extMetadataBase, []),
+                    },
+                    ops: [],
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      }).run(['migration', 'plan', '--confirm', basename(project.dir), '--json'], {
+        cwd: project.dir,
+      });
+
+      expect(run.exitCode).toBe(0);
+      expect(run.presented?.data).toMatchObject({
+        emittedExtensionDirs: [{ spaceId: 'cipherstash', dirName: '0001_seed' }],
+      });
+    });
+
+    it('never asks when the baseline is purely additive', async () => {
+      const project = await destructiveBaselineProject();
+
+      const run = await harness(project).run(['migration', 'plan', '--json'], {
+        cwd: project.dir,
+      });
+
+      expect(run.exitCode).toBe(0);
+      expect((await plannedDirs(project)).length).toBe(2);
+    });
+  });
+
+  it('reports baseline ops beside the delta and renders one tree root per package', async () => {
+    const project = await createOfflineProject({ storageHash: HASH_TO });
+    await seedContractSnapshot({ migrationsDir: project.migrationsDir, storageHash: HASH_FROM });
+    await seedDbRef({ appMigrationsDir: project.appMigrationsDir, storageHash: HASH_FROM });
+
+    const run = await harness(project, {
+      script: { operations: [ADDITIVE_OP, DESTRUCTIVE_OP] },
+    }).run(['migration', 'plan', '--confirm', basename(project.dir)], {
+      cwd: project.dir,
+      isTty: { stdout: true },
+    });
+
+    expect(run.exitCode).toBe(0);
+    const data = run.presented?.data as {
+      baselineDir: string;
+      dir: string;
+      operations: readonly { id: string; operationClass: string }[];
+      baselineOperations?: readonly { id: string; operationClass: string }[];
+    };
+    expect(data.operations).toHaveLength(2);
+    expect(data.baselineOperations).toHaveLength(2);
+    const tree = (run.presented?.presentation.human ?? []).find(
+      (block) => block.kind === 'tree',
+    ) as { roots: readonly { label: string; children: readonly unknown[] }[] };
+    expect(tree.roots.map((root) => root.label)).toEqual([data.baselineDir, data.dir]);
+    expect(tree.roots.map((root) => root.children.length)).toEqual([2, 2]);
+    expect(run.presented?.presentation.human).toContainEqual({
+      kind: 'summary',
+      status: 'warn',
+      text: 'This migration contains destructive operations that may cause data loss.',
+    });
+  });
   it('renders extension-space dirs under the configured migrations directory', async () => {
     const EXT_HASH = `f00d${'3'.repeat(60)}`;
     const extMetadataBase = {
@@ -331,6 +704,33 @@ describe('migration plan', () => {
     expect(run.json.at(-1)).toMatchObject({
       kind: 'result',
       envelope: { ok: false, error: { code: 'MIGRATION.PLANNING_FAILED' } },
+    });
+  });
+
+  it('reports a contract default the planner refuses as CONTRACT.DEFAULT_INVALID', async () => {
+    const project = await plannableProject();
+    const refusal =
+      'Column "at": The contract holds this default in a form its data type does not store: pg/timestamptz needs a UTC offset, but "2024-01-01 00:00:00" has none. Add Z for UTC or an offset such as +02:00, as in "2024-01-01T12:34:56Z". Re-emit the contract, then try again.';
+
+    const run = await harness(project, {
+      script: {
+        throwOnPlan: structuredError('CONTRACT.DEFAULT_INVALID', refusal, {
+          meta: { reason: 'default-not-canonical', column: 'at' },
+        }),
+      },
+    }).run(['migration', 'plan', '--json'], { cwd: project.dir });
+
+    expect(run.exitCode).toBe(2);
+    expect(run.json.at(-1)).toMatchObject({
+      kind: 'result',
+      envelope: {
+        ok: false,
+        error: {
+          code: 'CONTRACT.DEFAULT_INVALID',
+          summary: refusal,
+          meta: { reason: 'default-not-canonical', column: 'at' },
+        },
+      },
     });
   });
 

@@ -1,6 +1,9 @@
 import postgresAdapter from '@internal/adapter-postgres/control';
 import type { ContractConfig, PrismaNextConfig } from '@internal/config/config-types';
-import { defineConfig as coreDefineConfig } from '@internal/config/config-types';
+import {
+  defineConfig as coreDefineConfig,
+  defaultContractOutputPath,
+} from '@internal/config/config-types';
 import postgresDriver from '@internal/driver-postgres/control';
 import sql from '@internal/family-sql/control';
 import type { ControlExtensionDescriptor } from '@internal/framework-components/control';
@@ -26,14 +29,6 @@ export interface PostgresConfigOptions {
   };
 }
 
-function deriveOutputPath(contractPath: string): string {
-  const ext = extname(contractPath);
-  if (ext.length === 0) {
-    return `${contractPath}.json`;
-  }
-  return `${contractPath.slice(0, -ext.length)}.json`;
-}
-
 function contractConfigFromPath(contractPath: string, output: string): ContractConfig {
   return extname(contractPath) === '.ts'
     ? typescriptContractFromPath(contractPath, output)
@@ -51,14 +46,14 @@ function resolveContractConfig(options: PostgresConfigOptions): ContractConfig {
   if (typeof options.contract === 'string') {
     return contractConfigFromPath(
       options.contract,
-      explicitOutput ?? deriveOutputPath(options.contract),
+      explicitOutput ?? defaultContractOutputPath(options.contract),
     );
   }
   const firstInput = options.contract.source.inputs?.[0];
   const output =
     explicitOutput ??
     options.contract.output ??
-    (firstInput !== undefined ? deriveOutputPath(firstInput) : undefined);
+    (firstInput !== undefined ? defaultContractOutputPath(firstInput) : undefined);
   return { ...options.contract, ...ifDefined('output', output) };
 }
 
