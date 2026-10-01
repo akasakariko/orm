@@ -1,5 +1,4 @@
 import type { CodecControlHooks } from '@internal/family-sql/control';
-import { checkSqlDefaultBody } from '@internal/family-sql/control';
 import type { StorageColumn, StorageTypeInstance } from '@internal/sql-contract/types';
 import { ifDefined } from '@internal/utils/defined';
 import { isPgEnumParams } from '../codecs';
@@ -22,22 +21,6 @@ function assertSafeNativeType(nativeType: string): void {
       `Unsafe native type name in contract: "${nativeType}". ` +
         'Native type names must match /^[a-zA-Z][a-zA-Z0-9_ ]*(\\[\\])?$/',
       { meta: { nativeType } },
-    );
-  }
-}
-
-/**
- * Sanity check against accidental SQL injection from malformed contract files.
- * Rejects semicolons, SQL comment tokens, and dollar-quoting.
- * Not a comprehensive security boundary — the contract is developer-authored.
- */
-export function assertSafeDefaultExpression(expression: string): void {
-  if (checkSqlDefaultBody(expression) !== undefined) {
-    throw postgresError(
-      'CONTRACT.DEFAULT_INVALID',
-      `Unsafe default expression in contract: "${expression}". ` +
-        'Default expressions must not contain semicolons, SQL comment tokens, dollar-quoting, or subqueries.',
-      { meta: { expression } },
     );
   }
 }

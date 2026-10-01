@@ -10,7 +10,6 @@ import type { DdlColumn, DdlTableConstraint } from '@internal/sql-relational-cor
 import { col, lit } from '@internal/sql-relational-core/contract-free';
 import { blindCast } from '@internal/utils/casts';
 import { describe, expect, it } from 'vitest';
-import type { ColumnDefaultSetting } from '../src/core/ddl/nodes';
 import type { AlterColumnTypeOptions } from '../src/core/migrations/op-factory-call';
 import type { DataTransformOptions } from '../src/core/migrations/operations/data-transform';
 import type { CreateIndexExtras } from '../src/core/migrations/operations/indexes';
@@ -179,13 +178,12 @@ class ExposedMigration extends PostgresMigration<Contract, Contract> {
     return this.dropNotNull(options);
   }
 
-  callSetDefault(
-    options: ColumnDefaultSetting & {
-      readonly schema: string;
-      readonly table: string;
-      readonly operationClass?: 'additive' | 'widening';
-    },
-  ): Promise<Op> {
+  callSetDefault(options: {
+    readonly schema: string;
+    readonly table: string;
+    readonly column: DdlColumn;
+    readonly operationClass?: 'additive' | 'widening';
+  }): Promise<Op> {
     return this.setDefault(options);
   }
 
@@ -366,9 +364,7 @@ const cases: ReadonlyArray<{
       m.callSetDefault({
         schema: 'public',
         table: 'widget',
-        column: 'name',
-        type: 'text',
-        default: lit('unnamed'),
+        column: col('name', 'text', { default: lit('unnamed') }),
       }),
   },
   {
@@ -455,6 +451,7 @@ function fakeControlStack(): ControlStack<'sql', 'postgres'> {
   let counter = 0;
   const lowerer: ExecuteRequestLowerer = {
     lower: () => ({ sql: 'UNUSED', params: [] }),
+    renderColumnDefault: async () => '',
     lowerToExecuteRequest: async () => {
       counter += 1;
       return { sql: `LOWERED ${counter}`, params: [`p${counter}`] };
@@ -495,6 +492,31 @@ describe('PostgresMigration op-builder methods with a ControlStack', () => {
     expect(typeof op.execute[0]?.sql).toBe('string');
   });
 
+  it('setDefault refuses the options an earlier version wrote, naming the column and the rewrite', () => {
+    const m = new ExposedMigration(fakeControlStack());
+    const earlier = {
+      schema: 'public',
+      table: 'Box',
+      column: 'changed',
+      defaultSql: 'DEFAULT 2',
+      operationClass: 'widening',
+    } as unknown as Parameters<ExposedMigration['callSetDefault']>[0];
+
+    expect(() => m.callSetDefault(earlier)).toThrow(
+      expect.objectContaining({
+        code: 'MIGRATION.OPERATION_OPTION_REMOVED',
+        message:
+          '`setDefault` in migration.ts passes `defaultSql`, which this version no longer reads, for column "changed" of table "Box"',
+        fix: 'Pass the column as `col(name, type, { default, codecRef })`, with its default written as `lit(value)` or `fn(expression)`, in place of its name and `defaultSql`. Or, if the migration is not applied, delete its package and run `migration plan` again. The upgrade entry `migration-ts-column-defaults` shows the new shape: https://github.com/prisma/orm/tree/main/skills/prisma-8/upgrading',
+        meta: {
+          operation: 'setDefault',
+          option: 'defaultSql',
+          upgradeEntry: 'migration-ts-column-defaults',
+        },
+      }),
+    );
+  });
+
   it('createSchema lowers to an additive create-schema operation', async () => {
     const m = new ExposedMigration(fakeControlStack());
     const op = await m.callCreateSchema({ schema: 'reporting' });
@@ -503,24 +525,6 @@ describe('PostgresMigration op-builder methods with a ControlStack', () => {
     expect(op.operationClass).toBe('additive');
     expect(op.execute[0]?.description).toBe('Create schema "reporting"');
     expect(typeof op.execute[0]?.sql).toBe('string');
-  });
-
-  it('setDefault refuses an argument with no default, such as an untyped call that passes defaultSql', () => {
-    const m = new ExposedMigration(fakeControlStack());
-    const untypedCall = {
-      schema: 'public',
-      table: 'widget',
-      column: 'name',
-      defaultSql: "DEFAULT 'unnamed'",
-    } as unknown as Parameters<ExposedMigration['callSetDefault']>[0];
-
-    expect(() => m.callSetDefault(untypedCall)).toThrow(
-      expect.objectContaining({
-        code: 'CONTRACT.DEFAULT_INVALID',
-        message:
-          'setDefault on column "name" of table "widget" has no default. setDefault takes the default as default: lit(value) for a literal or default: fn(expression) for an expression.',
-      }),
-    );
   });
 
   it('dropTable lowers to a destructive drop-table operation', async () => {

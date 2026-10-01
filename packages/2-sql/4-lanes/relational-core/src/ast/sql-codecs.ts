@@ -18,6 +18,11 @@ import {
   type ColumnHelperFor,
   type ColumnHelperForStrict,
   column,
+  decodeJsonFloat,
+  decodeJsonInteger,
+  decodeJsonString,
+  encodeJsonFloat,
+  SAFE_INTEGER_RANGE,
 } from '@internal/framework-components/codec';
 import type { StandardSchemaV1 } from '@standard-schema/spec';
 import { type as arktype } from 'arktype';
@@ -30,11 +35,10 @@ import {
   sqlCharDecode,
   sqlCharEncode,
   sqlCharRenderOutputType,
-  sqlFloatDecodeJson,
+  sqlFloatDecode,
   sqlFloatEncode,
-  sqlFloatEncodeJson,
+  sqlIntDecode,
   sqlIntEncode,
-  sqlNumberDecode,
   sqlTextDecode,
   sqlTextEncode,
   sqlVarcharDecode,
@@ -64,7 +68,7 @@ export class SqlTextCodec extends CodecImpl<
     return value;
   }
   decodeJson(json: JsonValue): string {
-    return json as string;
+    return decodeJsonString(this.id, json);
   }
 }
 
@@ -89,20 +93,20 @@ sqlTextColumn satisfies ColumnHelperForStrict<SqlTextDescriptor>;
 export class SqlIntCodec extends CodecImpl<
   typeof SQL_INT_CODEC_ID,
   readonly ['equality', 'order', 'numeric'],
-  number | string,
+  number,
   number
 > {
   async encode(value: number, _ctx: CodecCallContext): Promise<number> {
     return sqlIntEncode(value);
   }
-  async decode(wire: number | string, _ctx: CodecCallContext): Promise<number> {
-    return sqlNumberDecode(wire);
+  async decode(wire: number, _ctx: CodecCallContext): Promise<number> {
+    return sqlIntDecode(wire);
   }
   encodeJson(value: number): JsonValue {
     return value;
   }
   decodeJson(json: JsonValue): number {
-    return json as number;
+    return decodeJsonInteger(this.id, json, SAFE_INTEGER_RANGE);
   }
 }
 
@@ -127,20 +131,20 @@ sqlIntColumn satisfies ColumnHelperForStrict<SqlIntDescriptor>;
 export class SqlFloatCodec extends CodecImpl<
   typeof SQL_FLOAT_CODEC_ID,
   readonly ['equality', 'order', 'numeric'],
-  number | string,
+  number,
   number
 > {
   async encode(value: number, _ctx: CodecCallContext): Promise<number> {
     return sqlFloatEncode(value);
   }
-  async decode(wire: number | string, _ctx: CodecCallContext): Promise<number> {
-    return sqlNumberDecode(wire);
+  async decode(wire: number, _ctx: CodecCallContext): Promise<number> {
+    return sqlFloatDecode(wire);
   }
   encodeJson(value: number): JsonValue {
-    return sqlFloatEncodeJson(value);
+    return encodeJsonFloat(value);
   }
   decodeJson(json: JsonValue): number {
-    return sqlFloatDecodeJson(json);
+    return decodeJsonFloat(this.id, json);
   }
 }
 
@@ -178,7 +182,7 @@ export class SqlCharCodec extends CodecImpl<
     return value;
   }
   decodeJson(json: JsonValue): string {
-    return json as string;
+    return decodeJsonString(this.id, json);
   }
 }
 
@@ -219,7 +223,7 @@ export class SqlVarcharCodec extends CodecImpl<
     return value;
   }
   decodeJson(json: JsonValue): string {
-    return json as string;
+    return decodeJsonString(this.id, json);
   }
 }
 

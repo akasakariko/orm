@@ -1,6 +1,4 @@
 import {
-  type AnyDdlColumnDefault,
-  type CodecRef,
   type DdlColumn,
   DdlNode,
   type DdlTableConstraint,
@@ -13,7 +11,6 @@ import type { RlsPolicyOperation } from '../rls/canonicalize';
 
 export interface AlterTableActionVisitor<R> {
   addColumn(action: AddColumnAction): R;
-  setDefault(action: SetDefaultAction): R;
   dropDefault(action: DropDefaultAction): R;
 }
 
@@ -37,39 +34,6 @@ export class AddColumnAction extends AlterTableAction {
   }
 }
 
-/**
- * The default `ALTER COLUMN … SET DEFAULT` writes on an existing column. `type` is the column type
- * as DDL writes it, with `[]` for a list. A literal default is written through the codec `codecRef`
- * names, as `CREATE TABLE` writes it.
- */
-export interface ColumnDefaultSetting {
-  readonly column: string;
-  readonly type: string;
-  readonly default: AnyDdlColumnDefault;
-  readonly codecRef?: CodecRef;
-}
-
-export class SetDefaultAction extends AlterTableAction {
-  readonly kind = 'set-default' as const;
-  readonly columnName: string;
-  readonly type: string;
-  readonly default: AnyDdlColumnDefault;
-  readonly codecRef: CodecRef | undefined;
-
-  constructor(setting: ColumnDefaultSetting) {
-    super();
-    this.columnName = setting.column;
-    this.type = setting.type;
-    this.default = setting.default;
-    this.codecRef = setting.codecRef;
-    Object.freeze(this);
-  }
-
-  override accept<R>(visitor: AlterTableActionVisitor<R>): R {
-    return visitor.setDefault(this);
-  }
-}
-
 export class DropDefaultAction extends AlterTableAction {
   readonly kind = 'drop-default' as const;
   readonly columnName: string;
@@ -88,13 +52,13 @@ export class DropDefaultAction extends AlterTableAction {
 /**
  * The set of ALTER TABLE subactions currently expressible as typed DDL.
  *
- * The remaining actions — SetNotNull, DropNotNull, AlterColumnType — are
- * still emitted as raw SQL by `operations/columns.ts` and join this union as
- * they are converted to typed DDL. Until then it is intentionally partial:
- * only the ALTER subactions used by the already-converted ops (AddColumn,
- * SetDefault, DropDefault) appear here.
+ * The remaining actions — SetDefault, SetNotNull, DropNotNull,
+ * AlterColumnType — are still emitted as raw SQL by `operations/columns.ts`
+ * and join this union as they are converted to typed DDL. Until then it is
+ * intentionally partial: only the ALTER subactions used by the
+ * already-converted ops (AddColumn, DropDefault) appear here.
  */
-export type AnyAlterTableAction = AddColumnAction | SetDefaultAction | DropDefaultAction;
+export type AnyAlterTableAction = AddColumnAction | DropDefaultAction;
 
 // ---------------------------------------------------------------------------
 // Top-level DDL visitor

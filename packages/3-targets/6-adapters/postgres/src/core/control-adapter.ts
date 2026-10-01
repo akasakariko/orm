@@ -1,5 +1,6 @@
 import type {
   ColumnDefault,
+  ColumnDefaultLiteralInputValue,
   ContractMarkerRecord,
   LedgerEntryRecord,
 } from '@internal/contract/types';
@@ -8,9 +9,10 @@ import {
   rethrowMarkerReadError,
   withMarkerReadErrorHandling,
 } from '@internal/errors/execution';
+import { checkSqlDefaultBody } from '@internal/family-sql/control';
 import type { SqlControlAdapter } from '@internal/family-sql/control-adapter';
 import { parseContractMarkerRow } from '@internal/family-sql/verify';
-import type { CodecLookup } from '@internal/framework-components/codec';
+import type { CodecLookupWithDescriptors } from '@internal/framework-components/codec';
 import { APP_SPACE_ID, type SchemaNodeRef } from '@internal/framework-components/control';
 import { UNBOUND_NAMESPACE_ID } from '@internal/framework-components/ir';
 import { ledgerOriginFromStored } from '@internal/migration-tools/ledger-origin';
@@ -30,7 +32,13 @@ import type {
   MarkerReadResult,
   SqlExecuteRequest,
 } from '@internal/sql-relational-core/ast';
-import { isDdlNode } from '@internal/sql-relational-core/ast';
+import {
+  type EncodedLiteralDefault,
+  encodeListLiteralDefault,
+  encodeLiteralDefault,
+  isDdlNode,
+  type LiteralDefaultColumn,
+} from '@internal/sql-relational-core/ast';
 import type { ColumnDescriptor, ExcludedProxy } from '@internal/sql-relational-core/contract-free';
 import { namingOfLiveName } from '@internal/sql-schema-ir/naming';
 import type {
@@ -70,7 +78,6 @@ import type {
   PostgresDropPolicy,
   PostgresDropType,
   RlsPolicyOperation,
-  SetDefaultAction,
 } from '@internal/target-postgres/ddl';
 import { parsePostgresDefault } from '@internal/target-postgres/default-normalizer';
 import { postgresError } from '@internal/target-postgres/errors';
@@ -78,7 +85,10 @@ import {
   introspectedNativeType,
   normalizeSchemaNativeType,
 } from '@internal/target-postgres/native-type-normalizer';
-import { renderLiteralDefaultSql } from '@internal/target-postgres/planner-ddl-builders';
+import {
+  isPostgresDateTimeDataType,
+  postgresDateTimeDdlText,
+} from '@internal/target-postgres/planner-ddl-builders';
 import { escapeLiteral, quoteIdentifier } from '@internal/target-postgres/sql-utils';
 import {
   PostgresDatabaseSchemaNode,
@@ -206,6 +216,20 @@ export class PostgresControlAdapter implements SqlControlAdapter<'postgres'> {
         context.contract,
       ),
       this.codecRegistry,
+    );
+  }
+
+  async renderColumnDefault(column: DdlColumn, table: string): Promise<string> {
+    if (column.default === undefined) return '';
+    return pgRenderDdlColumnDefault(
+      column.default,
+      column.type,
+      this.codecRegistry,
+      column.codecRef,
+      {
+        table,
+        column: column.name,
+      },
     );
   }
 
@@ -1593,6 +1617,20 @@ function groupBy<T, K extends keyof T>(items: readonly T[], key: K): Map<T[K], T
 // pgRenderDdlExecuteRequest — independent DDL walker for lowerToExecuteRequest
 // ---------------------------------------------------------------------------
 
+function pgIsTextLikeNativeType(nativeType: string): boolean {
+  return (
+    nativeType === 'text' ||
+    nativeType === 'varchar' ||
+    nativeType.startsWith('varchar(') ||
+    nativeType === 'character varying' ||
+    nativeType.startsWith('character varying(') ||
+    nativeType === 'char' ||
+    nativeType.startsWith('char(') ||
+    nativeType === 'character' ||
+    nativeType.startsWith('character(')
+  );
+}
+
 interface OutputSettings {
   readonly timeZone: string;
   readonly dateStyle: string;
@@ -1669,6 +1707,55 @@ async function readWithDefaultOutputSettings<T>(
   return result;
 }
 
+/**
+ * A value as DDL writes it: `ARRAY[...]` of each element's literal, cast to the list type, for a list written to a list type, and otherwise the value's literal, cast to the column type where PostgreSQL would read it as another type.
+ */
+function pgInlineLiteral(wire: unknown, nativeType: string, where: LiteralDefaultColumn): string {
+  if (Array.isArray(wire) && nativeType.endsWith('[]')) {
+    if (wire.length === 0) return "'{}'";
+    return `ARRAY[${wire.map((element) => pgLiteralText(element, where)).join(', ')}]::${nativeType}`;
+  }
+  const text = pgLiteralText(wire, where);
+  return pgLiteralNeedsCast(wire, nativeType) ? `${text}::${nativeType}` : text;
+}
+
+function pgLiteralNeedsCast(wire: unknown, nativeType: string): boolean {
+  if (typeof wire === 'number') return !Number.isFinite(wire);
+  if (typeof wire === 'string' || wire instanceof Date) return !pgIsTextLikeNativeType(nativeType);
+  return typeof wire === 'object' && wire !== null;
+}
+
+/** A value's literal without a cast: SQL NULL, a bare number or boolean, or quoted text. */
+function pgLiteralText(wire: unknown, where: LiteralDefaultColumn): string {
+  if (wire === null) return 'NULL';
+  if (typeof wire === 'boolean') return wire ? 'true' : 'false';
+  if (typeof wire === 'number') return Number.isFinite(wire) ? String(wire) : `'${String(wire)}'`;
+  if (typeof wire === 'bigint') return String(wire);
+  if (wire instanceof Date) {
+    if (Number.isNaN(wire.getTime())) {
+      throw adapterError(
+        'CONTRACT.DEFAULT_INVALID',
+        `Column "${where.table}"."${where.column}" has an invalid Date default`,
+        { meta: { table: where.table, column: where.column, reason: 'invalid-date-default' } },
+      );
+    }
+    return `'${escapeLiteral(wire.toISOString())}'`;
+  }
+  if (typeof wire === 'string') return `'${escapeLiteral(wire)}'`;
+  if (wire instanceof Uint8Array) {
+    const hex = Array.from(wire)
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+    return `'\\x${hex}'`;
+  }
+  if (typeof wire === 'object') return `'${escapeLiteral(JSON.stringify(wire))}'`;
+  throw adapterError(
+    'CONTRACT.PACK_CONTRIBUTION_INVALID',
+    `pgRenderDdlExecuteRequest: unexpected wire type "${typeof wire}"`,
+    { meta: { wireType: typeof wire } },
+  );
+}
+
 const SERIAL_FAMILY_TYPES = new Set([
   'serial',
   'serial4',
@@ -1681,8 +1768,9 @@ const SERIAL_FAMILY_TYPES = new Set([
 async function pgRenderDdlColumnDefault(
   def: LiteralColumnDefault | FunctionColumnDefault,
   nativeType: string,
-  codecLookup: CodecLookup,
+  codecLookup: CodecLookupWithDescriptors,
   codecRef: CodecRef | undefined,
+  where: LiteralDefaultColumn,
 ): Promise<string> {
   if (def.kind === 'function') {
     if (def.expression === 'autoincrement()') {
@@ -1697,12 +1785,71 @@ async function pgRenderDdlColumnDefault(
       }
       return '';
     }
+    if (checkSqlDefaultBody(def.expression) !== undefined) {
+      throw postgresError(
+        'CONTRACT.DEFAULT_INVALID',
+        `Unsafe default expression in contract: "${def.expression}". ` +
+          'Default expressions must not contain semicolons, SQL comment tokens, dollar-quoting, or subqueries.',
+        { meta: { expression: def.expression } },
+      );
+    }
     return `DEFAULT (${def.expression})`;
   }
-  return `DEFAULT ${await renderLiteralDefaultSql(def.value, nativeType, codecRef, codecLookup)}`;
+  const dataTypeId =
+    codecRef === undefined ? undefined : codecLookup.descriptorFor(codecRef.codecId)?.dataType;
+  const written = await pgWrittenDefault(
+    def.value,
+    nativeType,
+    dataTypeId,
+    codecLookup,
+    codecRef,
+    where,
+  );
+  return `DEFAULT ${pgInlineLiteral(written, nativeType, where)}`;
 }
 
-async function pgRenderDdlColumn(column: DdlColumn, codecLookup: CodecLookup): Promise<string> {
+/**
+ * The value DDL writes for a literal default, and for each element of a list default: a date or time value as the text PostgreSQL reads for its type, a value the codec reads as SQL NULL as `null`, and anything else as the codec's wire value. Without a codec, the value as written.
+ */
+async function pgWrittenDefault(
+  value: ColumnDefaultLiteralInputValue,
+  nativeType: string,
+  dataTypeId: string | undefined,
+  codecLookup: CodecLookupWithDescriptors,
+  codecRef: CodecRef | undefined,
+  where: LiteralDefaultColumn,
+): Promise<unknown> {
+  if (Array.isArray(value) && nativeType.endsWith('[]')) {
+    const encoded =
+      codecRef === undefined
+        ? undefined
+        : await encodeListLiteralDefault(codecLookup, codecRef, value, where);
+    return value.map((element, index) => pgWrittenValue(element, encoded?.[index], dataTypeId));
+  }
+  const encoded =
+    codecRef === undefined
+      ? undefined
+      : await encodeLiteralDefault(codecLookup, codecRef, value, where);
+  return pgWrittenValue(value, encoded, dataTypeId);
+}
+
+function pgWrittenValue(
+  value: ColumnDefaultLiteralInputValue,
+  encoded: EncodedLiteralDefault | undefined,
+  dataTypeId: string | undefined,
+): unknown {
+  if (typeof value === 'string' && isPostgresDateTimeDataType(dataTypeId)) {
+    return postgresDateTimeDdlText(value, dataTypeId);
+  }
+  if (encoded === undefined) return value;
+  return encoded.kind === 'sql-null' ? null : encoded.wire;
+}
+
+async function pgRenderDdlColumn(
+  column: DdlColumn,
+  codecLookup: CodecLookupWithDescriptors,
+  table: string,
+): Promise<string> {
   const parts = [quoteIdentifier(column.name), column.type];
   if (column.default) {
     const clause = await pgRenderDdlColumnDefault(
@@ -1710,6 +1857,7 @@ async function pgRenderDdlColumn(column: DdlColumn, codecLookup: CodecLookup): P
       column.type,
       codecLookup,
       column.codecRef,
+      { table, column: column.name },
     );
     if (clause.length > 0) parts.push(clause);
   }
@@ -1754,14 +1902,14 @@ function pgRenderDdlConstraint(constraint: DdlTableConstraint): string {
 
 async function pgRenderCreateTable(
   node: PostgresCreateTable,
-  codecLookup: CodecLookup,
+  codecLookup: CodecLookupWithDescriptors,
 ): Promise<SqlExecuteRequest> {
   const ifNotExists = node.ifNotExists ? 'IF NOT EXISTS ' : '';
   const tableRef = node.schema
     ? `${quoteIdentifier(node.schema)}.${quoteIdentifier(node.table)}`
     : quoteIdentifier(node.table);
   const columnDefs = await Promise.all(
-    node.columns.map((col: DdlColumn) => pgRenderDdlColumn(col, codecLookup)),
+    node.columns.map((col: DdlColumn) => pgRenderDdlColumn(col, codecLookup, node.table)),
   );
   const constraintDefs =
     node.constraints !== undefined ? node.constraints.map(pgRenderDdlConstraint) : [];
@@ -1803,31 +1951,15 @@ function pgRenderDropType(node: PostgresDropType): SqlExecuteRequest {
 
 async function pgRenderAlterTable(
   node: PostgresAlterTable,
-  codecLookup: CodecLookup,
+  codecLookup: CodecLookupWithDescriptors,
 ): Promise<SqlExecuteRequest> {
   const tableRef = node.schema
     ? `${quoteIdentifier(node.schema)}.${quoteIdentifier(node.table)}`
     : quoteIdentifier(node.table);
   const actionVisitor: AlterTableActionVisitor<Promise<string>> = {
     async addColumn(action: AddColumnAction): Promise<string> {
-      const colFragment = await pgRenderDdlColumn(action.column, codecLookup);
+      const colFragment = await pgRenderDdlColumn(action.column, codecLookup, node.table);
       return `ADD COLUMN ${colFragment}`;
-    },
-    async setDefault(action: SetDefaultAction): Promise<string> {
-      if (action.default.kind === 'function' && action.default.expression === 'autoincrement()') {
-        throw postgresError(
-          'CONTRACT.DEFAULT_INVALID',
-          `SET DEFAULT cannot give the existing column "${action.columnName}" an autoincrement() default, because autoincrement() is written as the column's SERIAL type when the column is created. Set a sequence default instead, as in fn("nextval('<sequence>'::regclass)").`,
-          { meta: { column: action.columnName, nativeType: action.type } },
-        );
-      }
-      const clause = await pgRenderDdlColumnDefault(
-        action.default,
-        action.type,
-        codecLookup,
-        action.codecRef,
-      );
-      return `ALTER COLUMN ${quoteIdentifier(action.columnName)} SET ${clause}`;
     },
     dropDefault(action: DropDefaultAction): Promise<string> {
       return Promise.resolve(`ALTER COLUMN ${quoteIdentifier(action.columnName)} DROP DEFAULT`);
@@ -1962,7 +2094,7 @@ function pgRenderDisableRowLevelSecurity(node: PostgresDisableRowLevelSecurity):
 
 async function pgRenderDdlExecuteRequest(
   ast: PostgresDdlNode,
-  codecLookup: CodecLookup,
+  codecLookup: CodecLookupWithDescriptors,
 ): Promise<SqlExecuteRequest> {
   const visitor = {
     createTable: (node: PostgresCreateTable) => pgRenderCreateTable(node, codecLookup),

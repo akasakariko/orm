@@ -1,4 +1,5 @@
 import type { Contract } from '@internal/contract/types';
+import { errorMigrationOperationOptionRemoved } from '@internal/errors/migration';
 import type { SqlMigrationPlanOperation } from '@internal/family-sql/control';
 import type { SqlControlAdapter } from '@internal/family-sql/control-adapter';
 import { Migration as SqlMigration } from '@internal/family-sql/migration';
@@ -8,9 +9,7 @@ import { MigrationContractViews } from '@internal/migration-tools/migration';
 import type { SqlStorage } from '@internal/sql-contract/types';
 import type { DdlColumn, DdlTableConstraint } from '@internal/sql-relational-core/ast';
 import { blindCast } from '@internal/utils/casts';
-import { ifDefined } from '@internal/utils/defined';
-import type { ColumnDefaultSetting } from '../ddl/nodes';
-import { errorPostgresMigrationStackMissing, postgresError } from '../errors';
+import { errorPostgresMigrationStackMissing } from '../errors';
 import { PostgresContractView } from '../postgres-contract-view';
 import { PostgresRlsPolicy, type RenderedRlsPolicyLiteral } from '../postgres-rls-policy';
 import {
@@ -387,29 +386,17 @@ export abstract class PostgresMigration<
     );
   }
 
-  protected setDefault(
-    options: ColumnDefaultSetting & {
-      readonly schema: string;
-      readonly table: string;
-      readonly operationClass?: 'additive' | 'widening';
-    },
-  ): Promise<SqlMigrationPlanOperation<PostgresPlanTargetDetails>> {
-    if (options.default === undefined) {
-      throw postgresError(
-        'CONTRACT.DEFAULT_INVALID',
-        `setDefault on column "${options.column}" of table "${options.table}" has no default. setDefault takes the default as default: lit(value) for a literal or default: fn(expression) for an expression.`,
-        { meta: { operation: 'setDefault', table: options.table, column: options.column } },
-      );
-    }
+  protected setDefault(options: {
+    readonly schema: string;
+    readonly table: string;
+    readonly column: DdlColumn;
+    readonly operationClass?: 'additive' | 'widening';
+  }): Promise<SqlMigrationPlanOperation<PostgresPlanTargetDetails>> {
+    refuseEarlierSetDefaultOptions(options);
     return new SetDefaultCall(
       options.schema,
       options.table,
-      {
-        column: options.column,
-        type: options.type,
-        default: options.default,
-        ...ifDefined('codecRef', options.codecRef),
-      },
+      options.column,
       options.operationClass,
     ).toOp(this.controlAdapterFor('setDefault'));
   }
@@ -533,4 +520,24 @@ export abstract class PostgresMigration<
       options.to,
     ).toOp(this.controlAdapterFor('renameRlsPolicy'));
   }
+}
+
+/**
+ * `setDefault` options an earlier version wrote carry the column's name in `column` and its default as SQL text in `defaultSql`.
+ */
+function refuseEarlierSetDefaultOptions(options: {
+  readonly table: string;
+  readonly column: DdlColumn;
+}): void {
+  const column: unknown = options.column;
+  const columnIsName = typeof column === 'string';
+  if (!columnIsName && !Object.hasOwn(options, 'defaultSql')) return;
+  throw errorMigrationOperationOptionRemoved({
+    operation: 'setDefault',
+    option: 'defaultSql',
+    subject: `column ${JSON.stringify(columnIsName ? column : options.column.name)} of table ${JSON.stringify(options.table)}`,
+    rewrite:
+      'Pass the column as `col(name, type, { default, codecRef })`, with its default written as `lit(value)` or `fn(expression)`, in place of its name and `defaultSql`.',
+    upgradeEntry: 'migration-ts-column-defaults',
+  });
 }

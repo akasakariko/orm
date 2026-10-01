@@ -49,6 +49,7 @@ export {
   classifyEnumMemberType,
   collectScalarTypeConstructors,
   flushAuthoringWarnings,
+  getAuthoringTypeConstructor,
   hasRegisteredFieldNamespace,
   instantiateAuthoringEntityType,
   instantiateAuthoringFieldPreset,

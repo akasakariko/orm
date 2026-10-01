@@ -1,7 +1,8 @@
+import { col, lit } from '@internal/sql-relational-core/contract-free';
 import { SqlColumnDefaultIR, SqlColumnIR } from '@internal/sql-schema-ir/types';
 import { describe, expect, it } from 'vitest';
 import {
-  columnDefaultSetting,
+  buildSetDefaultColumn,
   renderColumnAlterType,
   renderColumnDdl,
   resolveColumnTemporaryDefault,
@@ -122,66 +123,29 @@ describe('resolveColumnTemporaryDefault', () => {
   });
 });
 
-describe('columnDefaultSetting', () => {
+describe('buildSetDefaultColumn', () => {
   const noHooks = new Map();
 
-  it('is undefined when the diff node carries no resolved default', () => {
+  it('has no column to set when the diff node carries no resolved default', () => {
     const defaultNode = new SqlColumnDefaultIR({ raw: "'hello'::text" });
 
-    expect(columnDefaultSetting('v', defaultNode, noHooks)).toBeUndefined();
+    expect(buildSetDefaultColumn('v', defaultNode, noHooks)).toBeUndefined();
   });
 
-  it('carries a literal default with the column type and codec', () => {
+  it('carries a scalar literal default with the column type and codec, for the adapter to write', () => {
     const defaultNode = new SqlColumnDefaultIR({
-      resolved: { kind: 'literal', value: 'aGVsbG8=' },
-      nativeTypeContext: 'bytea',
-      codecRef: { codecId: 'pg/bytea@1' },
-      codecBaseNativeType: 'bytea',
+      resolved: { kind: 'literal', value: 'hello' },
+      nativeTypeContext: 'text',
+      codecRef: { codecId: 'pg/text@1' },
+      codecBaseNativeType: 'text',
     });
 
-    expect(columnDefaultSetting('v', defaultNode, noHooks)).toEqual({
-      column: 'v',
-      type: 'bytea',
-      default: { kind: 'literal', value: 'aGVsbG8=' },
-      codecRef: { codecId: 'pg/bytea@1' },
-    });
+    expect(buildSetDefaultColumn('v', defaultNode, noHooks)).toEqual(
+      col('v', 'text', { default: lit('hello'), codecRef: { codecId: 'pg/text@1' } }),
+    );
   });
 
-  it('carries a list default with the list type and element codec', () => {
-    const defaultNode = new SqlColumnDefaultIR({
-      resolved: { kind: 'literal', value: [{ a: 1 }, 'x'] },
-      nativeTypeContext: 'jsonb[]',
-      many: true,
-      codecRef: { codecId: 'pg/jsonb@1', many: true },
-      codecBaseNativeType: 'jsonb',
-    });
-
-    expect(columnDefaultSetting('v', defaultNode, noHooks)).toEqual({
-      column: 'v',
-      type: 'jsonb[]',
-      default: { kind: 'literal', value: [{ a: 1 }, 'x'] },
-      codecRef: { codecId: 'pg/jsonb@1', many: true },
-    });
-  });
-
-  it.each([
-    { typeName: 'order', type: '"order"[]' },
-    { typeName: 'my enum', type: '"my enum"[]' },
-    { typeName: 'my"enum', type: '"my""enum"[]' },
-    { typeName: 'audit.AuditAction', type: '"audit"."AuditAction"[]' },
-  ])('writes the type of a list of the enum $typeName as DDL writes it', ({ typeName, type }) => {
-    const defaultNode = new SqlColumnDefaultIR({
-      resolved: { kind: 'literal', value: ['asc'] },
-      nativeTypeContext: `${typeName}[]`,
-      many: true,
-      codecRef: { codecId: 'pg/enum@1', typeParams: { typeName }, many: true },
-      codecBaseNativeType: typeName,
-    });
-
-    expect(columnDefaultSetting('v', defaultNode, noHooks)?.type).toBe(type);
-  });
-
-  it('is undefined for an autoincrement() default, which the column type carries', () => {
+  it('has no column to set for an autoincrement default, which the column type writes', () => {
     const defaultNode = new SqlColumnDefaultIR({
       resolved: { kind: 'function', expression: 'autoincrement()' },
       nativeTypeContext: 'int4',
@@ -189,29 +153,36 @@ describe('columnDefaultSetting', () => {
       codecBaseNativeType: 'int4',
     });
 
-    expect(columnDefaultSetting('v', defaultNode, noHooks)).toBeUndefined();
+    expect(buildSetDefaultColumn('v', defaultNode, noHooks)).toBeUndefined();
   });
 
-  it('refuses an unsafe function default', () => {
-    const defaultNode = new SqlColumnDefaultIR({
-      resolved: { kind: 'function', expression: 'now(); DROP TABLE users' },
-      nativeTypeContext: 'timestamptz',
-      codecRef: { codecId: 'pg/timestamptz@1' },
-      codecBaseNativeType: 'timestamptz',
-    });
+  it.each([
+    { typeName: 'order', cast: '"order"[]' },
+    { typeName: 'my enum', cast: '"my enum"[]' },
+    { typeName: 'my"enum', cast: '"my""enum"[]' },
+    { typeName: 'audit.AuditAction', cast: '"audit"."AuditAction"[]' },
+  ])(
+    'gives a list default of the enum $typeName the column type as DDL writes it',
+    ({ typeName, cast }) => {
+      const defaultNode = new SqlColumnDefaultIR({
+        resolved: { kind: 'literal', value: ['asc'] },
+        nativeTypeContext: `${typeName}[]`,
+        many: true,
+        codecRef: { codecId: 'pg/enum@1', typeParams: { typeName }, many: true },
+        codecBaseNativeType: typeName,
+      });
 
-    expect(() => columnDefaultSetting('v', defaultNode, noHooks)).toThrow(
-      expect.objectContaining({ code: 'CONTRACT.DEFAULT_INVALID' }),
-    );
-  });
+      expect(buildSetDefaultColumn('v', defaultNode, noHooks)?.type).toBe(cast);
+    },
+  );
 
-  it('throws when a default to write carries no codec identity', () => {
+  it('throws when a default to render carries no codec identity', () => {
     const defaultNode = new SqlColumnDefaultIR({
       resolved: { kind: 'literal', value: 42 },
       nativeTypeContext: 'int4',
     });
 
-    expect(() => columnDefaultSetting('v', defaultNode, noHooks)).toThrow(
+    expect(() => buildSetDefaultColumn('v', defaultNode, noHooks)).toThrow(
       /carries no codec identity/,
     );
   });

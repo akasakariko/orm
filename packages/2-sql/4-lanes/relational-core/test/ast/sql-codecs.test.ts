@@ -1,3 +1,4 @@
+import { timeouts } from '@repo/test-utils';
 import { describe, expect, it } from 'vitest';
 import {
   SQL_CHAR_CODEC_ID,
@@ -53,11 +54,6 @@ describe('sql-codecs', () => {
       expect(await codec.decode(42, callCtx)).toBe(42);
     });
 
-    it('decodes the decimal text a driver hands back to a number', async () => {
-      expect(await codec.decode('42', callCtx)).toBe(42);
-      expect(await codec.decode('-7', callCtx)).toBe(-7);
-    });
-
     it('round-trips through JSON identity', () => {
       expect(codec.encodeJson(42)).toBe(42);
       expect(codec.decodeJson(42)).toBe(42);
@@ -76,11 +72,6 @@ describe('sql-codecs', () => {
       expect(await codec.decode(3.14, callCtx)).toBe(3.14);
     });
 
-    it('decodes the decimal text a driver hands back to a number', async () => {
-      expect(await codec.decode('-2.5', callCtx)).toBe(-2.5);
-      expect(await codec.decode('1e300', callCtx)).toBe(1e300);
-    });
-
     it('round-trips through JSON identity', () => {
       expect(codec.encodeJson(3.14)).toBe(3.14);
       expect(codec.decodeJson(3.14)).toBe(3.14);
@@ -90,14 +81,19 @@ describe('sql-codecs', () => {
     // PostgreSQL emits `"NaN"` and `"Infinity"` — which JSON has no number for.
     // The codec's application type is `number`, so it rejects rather than hand
     // back a string wearing that type.
-    it('rejects a non-finite value it cannot spell as JSON', () => {
-      expect(() => codec.encodeJson(Number.NaN)).toThrow(/finite/);
-      expect(() => codec.encodeJson(Number.POSITIVE_INFINITY)).toThrow(/finite/);
+    it('writes a non-finite value as the text PostgreSQL writes for it', () => {
+      expect(
+        [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY].map((value) =>
+          codec.encodeJson(value),
+        ),
+      ).toEqual(['NaN', 'Infinity', '-Infinity']);
     });
 
-    it('rejects the strings a database uses for non-finite floats', () => {
-      expect(() => codec.decodeJson('NaN')).toThrow(/sql\/float@1/);
-      expect(() => codec.decodeJson('Infinity')).toThrow(/sql\/float@1/);
+    it('reads the strings a database uses for non-finite floats', () => {
+      expect(['NaN', 'Infinity'].map((json) => codec.decodeJson(json))).toEqual([
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+      ]);
     });
 
     it('rejects a JSON value that is not a number', () => {
@@ -117,14 +113,33 @@ describe('sql-codecs', () => {
       expect(await codec.encode('user_001', callCtx)).toBe('user_001');
     });
 
-    it('trims trailing spaces on decode', async () => {
-      expect(await codec.decode('user_001                            ', callCtx)).toBe('user_001');
-      expect(await codec.decode('user_001', callCtx)).toBe('user_001');
+    it('trims trailing spaces on decode, and only spaces, the padding a character column adds', async () => {
+      expect(
+        await Promise.all(
+          ['user_001                            ', 'user_001', 'a\t  ', 'a\n', ' a'].map((wire) =>
+            codec.decode(wire, callCtx),
+          ),
+        ),
+      ).toEqual(['user_001', 'user_001', 'a\t', 'a\n', ' a']);
     });
 
-    it('round-trips through JSON identity', () => {
+    it('trims a value with a long interior run of spaces in time linear in its length', async () => {
+      const wire = `${' '.repeat(50_000)}x${' '.repeat(49_999)}`;
+      const started = performance.now();
+      const decoded = await codec.decode(wire, callCtx);
+      expect({ decoded, withinBound: performance.now() - started < timeouts.default }).toEqual({
+        decoded: `${' '.repeat(50_000)}x`,
+        withinBound: true,
+      });
+    });
+
+    it('round-trips through JSON identity, keeping trailing spaces, as a default is written', () => {
       expect(codec.encodeJson('user_001')).toBe('user_001');
-      expect(codec.decodeJson('user_001')).toBe('user_001');
+      expect(['user_001', 'a  ', 'a\t'].map((json) => codec.decodeJson(json))).toEqual([
+        'user_001',
+        'a  ',
+        'a\t',
+      ]);
     });
 
     it('renderOutputType returns Char<length>', () => {

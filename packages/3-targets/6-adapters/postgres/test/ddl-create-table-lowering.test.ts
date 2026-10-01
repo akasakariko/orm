@@ -1,5 +1,3 @@
-import type { ColumnDefaultLiteralInputValue } from '@internal/contract/types';
-import type { DdlColumn } from '@internal/sql-relational-core/ast';
 import { col, fn, lit } from '@internal/sql-relational-core/contract-free';
 import { createPostgresBuiltinCodecLookup } from '@internal/target-postgres/codecs';
 import { PostgresCreateTable } from '@internal/target-postgres/ddl';
@@ -193,6 +191,7 @@ describe('PostgresCreateTable DDL lowering', () => {
         col('a_float', 'float8', { default: lit(3.14) }),
         col('a_bool', 'boolean', { default: lit(true) }),
         col('a_nullable', 'uuid', { default: lit(null) }),
+        col('a_null_text', 'text', { default: lit(null), codecRef: { codecId: 'pg/text@1' } }),
       ],
     });
     const adapter = new PostgresControlAdapter(createPostgresBuiltinCodecLookup());
@@ -201,7 +200,130 @@ describe('PostgresCreateTable DDL lowering', () => {
     expect(lowered.sql).toContain('"a_float" float8 DEFAULT 3.14');
     expect(lowered.sql).toContain('"a_bool" boolean DEFAULT true');
     expect(lowered.sql).toContain('"a_nullable" uuid DEFAULT NULL');
+    expect(lowered.sql).toContain('"a_null_text" text DEFAULT NULL');
     expect(lowered.sql).not.toContain('::');
+  });
+
+  it('refuses a uuid default not in the form PostgreSQL writes, as a hand-edited contract may hold', async () => {
+    const adapter = new PostgresControlAdapter(createPostgresBuiltinCodecLookup());
+    const lower = (value: string) =>
+      adapter.lowerToExecuteRequest(
+        new PostgresCreateTable({
+          table: 'tokens',
+          columns: [col('u', 'uuid', { default: lit(value), codecRef: { codecId: 'pg/uuid@1' } })],
+        }),
+        { contract: {} as PostgresContract },
+      );
+
+    await expect(lower('A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11')).rejects.toMatchObject({
+      code: 'CONTRACT.DEFAULT_INVALID',
+      message:
+        'Column "tokens"."u" has a default its codec pg/uuid@1 refuses: pg/uuid@1 JSON value must be a UUID as PostgreSQL writes it, in lower case and hyphenated 8-4-4-4-12',
+      meta: {
+        table: 'tokens',
+        column: 'u',
+        codecId: 'pg/uuid@1',
+        value: 'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11',
+        reason: 'codec-refused-default',
+      },
+    });
+    expect((await lower('a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11')).sql).toContain(
+      `"u" uuid DEFAULT 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'`,
+    );
+  });
+
+  it.each([
+    ['text[]', 'pg/text@1', ['a', 1], 1],
+    ['int4[]', 'pg/int4@1', [1, 'two'], 'two'],
+  ])(
+    'refuses a list default on a %s column with an element its codec %s does not read, as a hand-written migration may hold',
+    async (nativeType, codecId, value, element) => {
+      const adapter = new PostgresControlAdapter(createPostgresBuiltinCodecLookup());
+      const lowering = adapter.lowerToExecuteRequest(
+        new PostgresCreateTable({
+          table: 'tokens',
+          columns: [
+            col('l', nativeType, { default: lit(value), codecRef: { codecId, many: true } }),
+          ],
+        }),
+        { contract: {} as PostgresContract },
+      );
+      await expect(lowering).rejects.toMatchObject({
+        code: 'CONTRACT.DEFAULT_INVALID',
+        meta: {
+          table: 'tokens',
+          column: 'l',
+          codecId,
+          value: element,
+          elementPosition: 2,
+          reason: 'codec-refused-default',
+        },
+      });
+    },
+  );
+
+  it('renders a list default, a NULL element and an empty list', async () => {
+    const adapter = new PostgresControlAdapter(createPostgresBuiltinCodecLookup());
+    const lowered = await adapter.lowerToExecuteRequest(
+      new PostgresCreateTable({
+        table: 'lists',
+        columns: [
+          col('tags', 'text[]', {
+            default: lit(['a', null, 'b']),
+            codecRef: { codecId: 'pg/text@1', many: true },
+          }),
+          col('counts', 'int4[]', {
+            default: lit([1, 2]),
+            codecRef: { codecId: 'pg/int4@1', many: true },
+          }),
+          col('none', 'text[]', {
+            default: lit([]),
+            codecRef: { codecId: 'pg/text@1', many: true },
+          }),
+        ],
+      }),
+      { contract: {} as PostgresContract },
+    );
+    expect(lowered.sql).toBe(
+      `CREATE TABLE "lists" (\n  "tags" text[] DEFAULT ARRAY['a', NULL, 'b']::text[],\n  "counts" int4[] DEFAULT ARRAY[1, 2]::int4[],\n  "none" text[] DEFAULT '{}'\n)`,
+    );
+  });
+
+  it('writes each list element as the codec writes a single value, inside the cast to the list type', async () => {
+    const adapter = new PostgresControlAdapter(createPostgresBuiltinCodecLookup());
+    const lowered = await adapter.lowerToExecuteRequest(
+      new PostgresCreateTable({
+        table: 'lists',
+        columns: [
+          col('bytes', 'bytea[]', {
+            default: lit(['aGVsbG8=', null]),
+            codecRef: { codecId: 'pg/bytea@1', many: true },
+          }),
+          col('docs', 'jsonb[]', {
+            default: lit(['x', { a: 1 }]),
+            codecRef: { codecId: 'pg/jsonb@1', many: true },
+          }),
+        ],
+      }),
+      { contract: {} as PostgresContract },
+    );
+    expect(lowered.sql).toBe(
+      `CREATE TABLE "lists" (\n  "bytes" bytea[] DEFAULT ARRAY['\\x68656c6c6f', NULL]::bytea[],\n  "docs" jsonb[] DEFAULT ARRAY['"x"', '{"a":1}']::jsonb[]\n)`,
+    );
+  });
+
+  it('renders a null literal default as SQL NULL on a text column and as the JSON null on a jsonb column', async () => {
+    const ast = new PostgresCreateTable({
+      table: 'defaults',
+      columns: [
+        col('note', 'text', { default: lit(null), codecRef: { codecId: 'pg/text@1' } }),
+        col('doc', 'jsonb', { default: lit(null), codecRef: { codecId: 'pg/jsonb@1' } }),
+      ],
+    });
+    const adapter = new PostgresControlAdapter(createPostgresBuiltinCodecLookup());
+    const lowered = await adapter.lowerToExecuteRequest(ast, { contract: {} as PostgresContract });
+    expect(lowered.sql).toContain('"note" text DEFAULT NULL');
+    expect(lowered.sql).toContain(`"doc" jsonb DEFAULT 'null'::jsonb`);
   });
 
   it('omits the cast on function defaults — a `DEFAULT (expr)` already returns the column type', async () => {
@@ -249,13 +371,13 @@ describe('PostgresCreateTable DDL lowering', () => {
     const adapter = new PostgresControlAdapter(createPostgresBuiltinCodecLookup());
     const lowered = await adapter.lowerToExecuteRequest(ast, { contract: {} as PostgresContract });
     expect(lowered.sql).toContain(
-      `"ids" int8[] DEFAULT ARRAY['1'::int8, '-2'::int8, '9007199254740993'::int8]::int8[]`,
+      `"ids" int8[] DEFAULT ARRAY['1', '-2', '9007199254740993']::int8[]`,
     );
     expect(lowered.sql).toContain(
-      `"amounts" numeric(10,2)[] DEFAULT ARRAY['1.5'::numeric(10,2), '-2.25'::numeric(10,2)]::numeric(10,2)[]`,
+      `"amounts" numeric(10,2)[] DEFAULT ARRAY['1.5', '-2.25']::numeric(10,2)[]`,
     );
     expect(lowered.sql).toContain(
-      `"stamps" timestamp(3)[] DEFAULT ARRAY['2024-01-01T00:00:00'::timestamp(3)]::timestamp(3)[]`,
+      `"stamps" timestamp(3)[] DEFAULT ARRAY['2024-01-01T00:00:00']::timestamp(3)[]`,
     );
     expect(lowered.sql).toContain(`"tags" text[] DEFAULT '{}'`);
   });
@@ -272,98 +394,5 @@ describe('PostgresCreateTable DDL lowering', () => {
     const lowered = await adapter.lowerToExecuteRequest(ast, { contract: {} as PostgresContract });
     expect(lowered.sql).toContain('"active" bool DEFAULT true NOT NULL');
     expect(lowered.sql).toContain(`"status" text DEFAULT 'open' NOT NULL`);
-  });
-});
-
-describe('PostgresCreateTable list literal defaults', () => {
-  const adapter = new PostgresControlAdapter(createPostgresBuiltinCodecLookup());
-
-  async function renderColumn(column: DdlColumn): Promise<string> {
-    const lowered = await adapter.lowerToExecuteRequest(
-      new PostgresCreateTable({ table: 'lists', columns: [column] }),
-    );
-    return lowered.sql;
-  }
-
-  it('renders each bytea element as the bytes its base64 text encodes', async () => {
-    const sql = await renderColumn(
-      col('bytes', 'bytea[]', {
-        default: lit(['aGVsbG8=']),
-        codecRef: { codecId: 'pg/bytea@1', many: true },
-      }),
-    );
-    expect(sql).toContain(`"bytes" bytea[] DEFAULT ARRAY['\\x68656c6c6f'::bytea]::bytea[]`);
-  });
-
-  it('renders each jsonb element as a JSON document, a string element included', async () => {
-    const sql = await renderColumn(
-      col('documents', 'jsonb[]', {
-        default: lit([{ a: 1 }, 'x']),
-        codecRef: { codecId: 'pg/jsonb@1', many: true },
-      }),
-    );
-    expect(sql).toContain(
-      `"documents" jsonb[] DEFAULT ARRAY['{"a":1}'::jsonb, '"x"'::jsonb]::jsonb[]`,
-    );
-  });
-
-  it('writes each interval element as its date and time text, with the element cast', async () => {
-    const sql = await renderColumn(
-      col('spans', 'interval[]', {
-        default: lit(['P1DT2H', 'PT-0.5S']),
-        codecRef: { codecId: 'pg/interval@1', many: true },
-      }),
-    );
-    expect(sql).toContain(
-      `"spans" interval[] DEFAULT ARRAY['P1DT2H'::interval, 'PT-0.5S'::interval]::interval[]`,
-    );
-  });
-
-  it('renders a null element as NULL', async () => {
-    const sql = await renderColumn(
-      col('bytes', 'bytea[]', {
-        default: lit(['aGVsbG8=', null]),
-        codecRef: { codecId: 'pg/bytea@1', many: true },
-      }),
-    );
-    expect(sql).toContain(`"bytes" bytea[] DEFAULT ARRAY['\\x68656c6c6f'::bytea, NULL]::bytea[]`);
-  });
-
-  it('encodes a Date element without reading it as JSON', async () => {
-    const sql = await renderColumn(
-      col('stamps', 'timestamptz(3)[]', {
-        default: lit([
-          new Date('2025-06-01T00:00:00.000Z'),
-        ] as unknown as ColumnDefaultLiteralInputValue),
-        codecRef: { codecId: 'pg/timestamptz-date@1', typeParams: { precision: 3 }, many: true },
-      }),
-    );
-    expect(sql).toContain(
-      `"stamps" timestamptz(3)[] DEFAULT ARRAY['2025-06-01T00:00:00.000Z'::timestamptz(3)]::timestamptz(3)[]`,
-    );
-  });
-
-  it('renders the raw elements when the codec is not registered', async () => {
-    const sql = await renderColumn(
-      col('bytes', 'bytea[]', {
-        default: lit(['aGVsbG8=']),
-        codecRef: { codecId: 'unregistered@1', many: true },
-      }),
-    );
-    expect(sql).toContain(`"bytes" bytea[] DEFAULT ARRAY['aGVsbG8=']::bytea[]`);
-  });
-
-  it('refuses a malformed bytea element with the codec error', async () => {
-    await expect(
-      renderColumn(
-        col('bytes', 'bytea[]', {
-          default: lit(['aGVsbG8=', 'not base64!']),
-          codecRef: { codecId: 'pg/bytea@1', many: true },
-        }),
-      ),
-    ).rejects.toMatchObject({
-      code: 'RUNTIME.DECODE_FAILED',
-      message: 'pg/bytea@1 database JSON value must be a base64 string',
-    });
   });
 });

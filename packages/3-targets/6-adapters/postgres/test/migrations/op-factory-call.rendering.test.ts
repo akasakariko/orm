@@ -55,29 +55,19 @@ describe('Postgres call classes - renderTypeScript + importRequirements', () => 
     expect(call.importRequirements()).toEqual([]);
   });
 
-  it('SetDefaultCall emits this.setDefault({...}) with the default, type and codec, and omits operationClass when additive', () => {
-    const additive = new SetDefaultCall('public', 'user', {
-      column: 'status',
-      type: 'text',
-      default: lit('open'),
-      codecRef: { codecId: 'pg/text@1' },
+  it('SetDefaultCall emits this.setDefault({...}) with the column, omits operationClass when additive', () => {
+    const column = col('created_at', 'timestamptz', { default: fn('now()') });
+    const additive = new SetDefaultCall('public', 'user', column);
+    const widening = new SetDefaultCall('public', 'user', column, 'widening');
+    expect({
+      additive: additive.renderTypeScript(),
+      widening: widening.renderTypeScript(),
+      imports: additive.importRequirements().map((requirement) => requirement.symbol),
+    }).toEqual({
+      additive: `this.setDefault({ schema: "public", table: "user", column: col("created_at", "timestamptz", { default: fn("now()") }) })`,
+      widening: `this.setDefault({ schema: "public", table: "user", column: col("created_at", "timestamptz", { default: fn("now()") }), operationClass: "widening" })`,
+      imports: ['col', 'fn'],
     });
-    expect(additive.renderTypeScript()).toBe(
-      `this.setDefault({ schema: "public", table: "user", column: "status", type: "text", default: lit("open"), codecRef: { codecId: "pg/text@1" } })`,
-    );
-    expect(additive.importRequirements()).toEqual([
-      { moduleSpecifier: '@internal/postgres/migration', symbol: 'lit' },
-    ]);
-
-    const widening = new SetDefaultCall(
-      'public',
-      'user',
-      { column: 'created_at', type: 'timestamptz', default: fn('now()') },
-      'widening',
-    );
-    expect(widening.renderTypeScript()).toBe(
-      `this.setDefault({ schema: "public", table: "user", column: "created_at", type: "timestamptz", default: fn("now()"), operationClass: "widening" })`,
-    );
   });
 
   it('DropConstraintCall omits kind when unique, emits it otherwise', () => {

@@ -1,6 +1,6 @@
 import type { ColumnDefault } from '@internal/contract/types';
 import type { SqlControlTargetDescriptor } from '@internal/family-sql/control';
-import { buildDataTypeResolver, buildNativeTypeExpander } from '@internal/family-sql/control';
+import { buildDataTypeResolver } from '@internal/family-sql/control';
 import type { SqlControlAdapter } from '@internal/family-sql/control-adapter';
 import type {
   ControlTargetInstance,
@@ -14,6 +14,7 @@ import { postgresResolveDefault } from '../core/default-normalizer';
 import { postgresTargetDescriptorMeta } from '../core/descriptor-meta';
 import { contractToPostgresDatabaseSchemaNode } from '../core/migrations/contract-to-postgres-database-schema-node';
 import { diffPostgresSchema } from '../core/migrations/diff-database-schema';
+import { buildPostgresNativeTypeExpander } from '../core/migrations/native-type-expander';
 import { createPostgresMigrationPlanner } from '../core/migrations/planner';
 import { renderDefaultLiteral } from '../core/migrations/planner-ddl-builders';
 import type { PostgresPlanTargetDetails } from '../core/migrations/planner-target-details';
@@ -30,11 +31,6 @@ import {
   postgresDiffSubjectGranularity,
 } from '../core/schema-ir/schema-node-kinds';
 
-/**
- * The raw default text of a schema node derived from a contract. It never reaches the database: a
- * contract-derived node always carries its structured default, which the diff compares and DDL
- * writes through the column codec.
- */
 export function postgresRenderDefault(def: ColumnDefault, column: StorageColumn): string {
   if (def.kind === 'function') {
     return def.expression;
@@ -51,9 +47,9 @@ function createPostgresTargetDescriptor(): SqlControlTargetDescriptor<
     ...postgresTargetDescriptorMeta,
     contractSerializer: new PostgresContractSerializer(),
     schemaVerifier: new PostgresSchemaVerifier(),
-    inferPslContract(schema, describedContracts) {
+    inferPslContract(schema, context, describedContracts) {
       PostgresDatabaseSchemaNode.assert(schema);
-      return inferPostgresPslContract(schema, describedContracts);
+      return inferPostgresPslContract(schema, context, describedContracts);
     },
     buildPslContract(contract, context) {
       return buildPostgresPslContract(contract, context);
@@ -74,14 +70,14 @@ function createPostgresTargetDescriptor(): SqlControlTargetDescriptor<
         >(createPostgresMigrationRunner(family));
       },
       contractToSchema(contract, frameworkComponents) {
-        const expander = buildNativeTypeExpander(frameworkComponents);
+        const expander = buildPostgresNativeTypeExpander(frameworkComponents);
         const postgresContract = blindCast<
           PostgresContract | null,
           'the family resolver only binds this hook for a Postgres-target contract'
         >(contract);
         return contractToPostgresDatabaseSchemaNode(postgresContract, {
           annotationNamespace: 'pg',
-          ...ifDefined('expandNativeType', expander),
+          expandNativeType: expander,
           renderDefault: postgresRenderDefault,
           resolveDefault: postgresResolveDefault,
           ...ifDefined('dataTypeOf', buildDataTypeResolver(frameworkComponents)),
@@ -122,5 +118,9 @@ export {
   PLAIN_DATE_TIME_NOW_GENERATOR_ID,
   plainDateTimeNowControlDescriptor,
 } from '../core/plain-date-time-now-generator';
+export {
+  postgresNativeAuthoringTypes,
+  postgresScalarAuthoringTypes,
+} from '../core/type-constructors';
 
 export default postgresTargetDescriptor;
