@@ -194,6 +194,7 @@ describe('integration: middleware-cache against real Postgres', {
 
   function buildRuntime(middleware: SqlMiddleware[]): Runtime {
     return new PostgresRuntimeImpl({
+      closeRefusal: undefined,
       context,
       adapter: stackInstance.adapter,
       driver,
