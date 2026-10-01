@@ -11,7 +11,7 @@ changes:
 
 # `setDefault` in a Postgres migration takes the default, not its SQL
 
-`this.setDefault(...)` no longer takes the SQL of the `DEFAULT` clause. It takes the default the way `col(...)` takes it for `this.addColumn(...)`: `lit(value)` for a literal, `fn(expression)` for an expression. It also takes the column type and, for a literal, the column codec. The adapter writes a literal through that codec, so a `Bytes` default stores the bytes its base64 text encodes, as it does in `CREATE TABLE`.
+`this.setDefault(...)` no longer takes the SQL of the `DEFAULT` clause. It takes the default the way `col(...)` takes it for `this.addColumn(...)`: `lit(value)` for a literal, `fn(expression)` for an expression. It also takes the column type and, for a literal, the column codec. The adapter writes a literal through that codec, so a `Bytes` default stores the bytes its base64 text encodes, as it does in `CREATE TABLE`. `db migrate` still rolls back a migration that sets a `bytea`, `interval` or pgvector literal default, because the schema check it runs afterwards cannot yet read those defaults back from the database.
 
 Rewrite each call:
 
