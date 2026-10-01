@@ -5,7 +5,7 @@ import type {
   RuntimeMiddlewareContext,
 } from '@internal/framework-components/runtime';
 import { vi } from 'vitest';
-import type { CachedEntry, CacheStore } from '../src/cache-store';
+import type { CacheEntry, CacheStore } from '../src/cache-store';
 
 export interface MockExec extends ExecutionPlan {
   readonly statement: string;
@@ -38,6 +38,8 @@ export function makeCtx(overrides?: Partial<RuntimeMiddlewareContext>): RuntimeM
   };
 }
 
+type Rows = readonly Record<string, unknown>[];
+
 /**
  * A versioned in-memory store for middleware tests that matches `meta` by value. It keeps a version
  * per key and one per `meta` value, and folds the version of the given `meta` into the version
@@ -45,7 +47,7 @@ export function makeCtx(overrides?: Partial<RuntimeMiddlewareContext>): RuntimeM
  * key the store has never seen.
  */
 export function spyStore() {
-  const inner = new Map<string, CachedEntry>();
+  const inner = new Map<string, Rows>();
   const entryMeta = new Map<string, string>();
   const versions = new Map<string, number>();
   const metaVersions = new Map<string, number>();
@@ -57,17 +59,24 @@ export function spyStore() {
     inner.delete(key);
     entryMeta.delete(key);
   };
-  const getSpy = vi.fn(async (target: Parameters<CacheStore['get']>[0]) => ({
-    entry: inner.get(target.key),
-    version: versionOf(target.key, target.meta),
-  }));
-  const setSpy = vi.fn(async (target: Parameters<CacheStore['set']>[0]) => {
-    if (target.version !== undefined && target.version !== versionOf(target.key, target.meta)) {
+  const getSpy = vi.fn(
+    async (target: Parameters<CacheStore['get']>[0]): Promise<CacheEntry<unknown, Rows>> => {
+      const value = inner.get(target.key);
+      return {
+        key: target.key,
+        meta: target.meta,
+        version: versionOf(target.key, target.meta),
+        data: value === undefined ? { empty: true } : { empty: false, value },
+      };
+    },
+  );
+  const setSpy = vi.fn(async (entry: CacheEntry<unknown, Rows>, value: Rows) => {
+    if (entry.version !== versionOf(entry.key, entry.meta)) {
       return false;
     }
-    inner.set(target.key, target.entry);
-    if (target.meta !== undefined) {
-      entryMeta.set(target.key, metaId(target.meta));
+    inner.set(entry.key, value);
+    if (entry.meta !== undefined) {
+      entryMeta.set(entry.key, metaId(entry.meta));
     }
     return true;
   });
@@ -85,7 +94,7 @@ export function spyStore() {
       }
     }
   });
-  const store: CacheStore = { get: getSpy, set: setSpy, unset: unsetSpy };
+  const store: CacheStore<unknown, Rows> = { get: getSpy, set: setSpy, unset: unsetSpy };
   return { ...store, getSpy, setSpy, unsetSpy, inner, versions };
 }
 

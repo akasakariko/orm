@@ -24,12 +24,15 @@ describe('cache key resolution', () => {
       );
 
       expect(store.getSpy).toHaveBeenCalledWith({ key: 'key:select 1', meta: undefined });
-      expect(store.setSpy).toHaveBeenCalledWith({
-        key: 'key:select 1',
-        meta: undefined,
-        entry: expect.anything(),
-        version: 0,
-      });
+      expect(store.setSpy).toHaveBeenCalledWith(
+        {
+          key: 'key:select 1',
+          meta: undefined,
+          version: 0,
+          data: { empty: true },
+        },
+        expect.anything(),
+      );
     });
 
     it('invokes ctx.contentHash when no per-query key annotation is supplied', async () => {
@@ -78,8 +81,8 @@ describe('cache key resolution', () => {
       );
 
       expect(store.inner.size).toBe(2);
-      expect(store.inner.get('key:A')?.rows).toEqual([{ from: 'A' }]);
-      expect(store.inner.get('key:B')?.rows).toEqual([{ from: 'B' }]);
+      expect(store.inner.get('key:A')).toEqual([{ from: 'A' }]);
+      expect(store.inner.get('key:B')).toEqual([{ from: 'B' }]);
     });
   });
 
@@ -101,12 +104,15 @@ describe('cache key resolution', () => {
       );
 
       expect(store.getSpy).toHaveBeenCalledWith({ key: 'custom-key', meta: undefined });
-      expect(store.setSpy).toHaveBeenCalledWith({
-        key: 'custom-key',
-        meta: undefined,
-        entry: expect.anything(),
-        version: 0,
-      });
+      expect(store.setSpy).toHaveBeenCalledWith(
+        {
+          key: 'custom-key',
+          meta: undefined,
+          version: 0,
+          data: { empty: true },
+        },
+        expect.anything(),
+      );
     });
 
     it('does not invoke ctx.contentHash when an override key is supplied', async () => {
@@ -147,9 +153,7 @@ describe('cache key resolution', () => {
 
     it('produces a hit using the user-supplied key when previously committed under it', async () => {
       const store = spyStore();
-      store.inner.set('shared-key', {
-        rows: [{ id: 'pre-cached' }],
-      });
+      store.inner.set('shared-key', [{ id: 'pre-cached' }]);
 
       const mw = createCacheMiddleware({ store });
       const exec = makeExec('select anything', {
@@ -245,8 +249,8 @@ describe('cache key resolution', () => {
       );
 
       expect(store.inner.size).toBe(2);
-      expect(store.inner.get('key-A')?.rows).toEqual([{ from: 'A' }]);
-      expect(store.inner.get('key-B')?.rows).toEqual([{ from: 'B' }]);
+      expect(store.inner.get('key-A')).toEqual([{ from: 'A' }]);
+      expect(store.inner.get('key-B')).toEqual([{ from: 'B' }]);
     });
   });
 });

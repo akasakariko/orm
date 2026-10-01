@@ -28,12 +28,15 @@ describe('createCacheMiddleware — deriveKey', () => {
     await runMiss(mw, exec, makeCtx(), [{ id: 1 }]);
 
     expect(store.getSpy).toHaveBeenCalledWith({ key: 'users:1', meta: undefined });
-    expect(store.setSpy).toHaveBeenCalledWith({
-      key: 'users:1',
-      meta: undefined,
-      entry: expect.anything(),
-      version: 0,
-    });
+    expect(store.setSpy).toHaveBeenCalledWith(
+      {
+        key: 'users:1',
+        meta: undefined,
+        version: 0,
+        data: { empty: true },
+      },
+      expect.anything(),
+    );
   });
 
   it('accepts a synchronous deriveKey', async () => {
@@ -43,12 +46,15 @@ describe('createCacheMiddleware — deriveKey', () => {
 
     await runMiss(mw, exec, makeCtx(), [{ id: 1 }]);
 
-    expect(store.setSpy).toHaveBeenCalledWith({
-      key: 'sync-key',
-      meta: undefined,
-      entry: expect.anything(),
-      version: 0,
-    });
+    expect(store.setSpy).toHaveBeenCalledWith(
+      {
+        key: 'sync-key',
+        meta: undefined,
+        version: 0,
+        data: { empty: true },
+      },
+      expect.anything(),
+    );
   });
 
   it('is called once per miss-then-store, with the exec and ctx of the read', async () => {
@@ -72,12 +78,15 @@ describe('createCacheMiddleware — deriveKey', () => {
 
     await runMiss(mw, exec, makeCtx(), [{ id: 1 }]);
 
-    expect(store.setSpy).toHaveBeenCalledWith({
-      key: 'users:key:select 1',
-      meta: undefined,
-      entry: expect.anything(),
-      version: 0,
-    });
+    expect(store.setSpy).toHaveBeenCalledWith(
+      {
+        key: 'users:key:select 1',
+        meta: undefined,
+        version: 0,
+        data: { empty: true },
+      },
+      expect.anything(),
+    );
   });
 
   it('is not called when the annotation sets a key', async () => {
@@ -91,12 +100,15 @@ describe('createCacheMiddleware — deriveKey', () => {
     await runMiss(mw, exec, makeCtx(), [{ id: 1 }]);
 
     expect(deriveKey).not.toHaveBeenCalled();
-    expect(store.setSpy).toHaveBeenCalledWith({
-      key: 'user-1',
-      meta: undefined,
-      entry: expect.anything(),
-      version: 0,
-    });
+    expect(store.setSpy).toHaveBeenCalledWith(
+      {
+        key: 'user-1',
+        meta: undefined,
+        version: 0,
+        data: { empty: true },
+      },
+      expect.anything(),
+    );
   });
 
   describe('is not called on a read the cache bypasses', () => {
@@ -150,11 +162,14 @@ describe('createCacheMiddleware — deriveKey', () => {
 
     await runMiss(mw, exec, makeCtx(), [{ id: 1 }]);
 
-    expect(store.setSpy).toHaveBeenCalledWith({
-      key: 'key:select 1',
-      meta: undefined,
-      entry: expect.anything(),
-      version: 0,
-    });
+    expect(store.setSpy).toHaveBeenCalledWith(
+      {
+        key: 'key:select 1',
+        meta: undefined,
+        version: 0,
+        data: { empty: true },
+      },
+      expect.anything(),
+    );
   });
 });

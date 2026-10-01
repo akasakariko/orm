@@ -12,12 +12,15 @@ describe('createCacheMiddleware — meta', () => {
 
     await runMiss(mw, exec, makeCtx(), [{ id: 1 }]);
 
-    expect(store.setSpy).toHaveBeenCalledWith({
-      key: 'key:select 1',
-      meta: { tags: ['users', 'posts'] },
-      entry: { rows: [{ id: 1 }] },
-      version: 0,
-    });
+    expect(store.setSpy).toHaveBeenCalledWith(
+      {
+        key: 'key:select 1',
+        meta: { tags: ['users', 'posts'] },
+        version: 0,
+        data: { empty: true },
+      },
+      [{ id: 1 }],
+    );
     expect(store.setSpy.mock.calls[0]?.[0].meta).toBe(meta);
   });
 
@@ -40,11 +43,14 @@ describe('createCacheMiddleware — meta', () => {
 
     await runMiss(mw, exec, makeCtx(), [{ id: 1 }]);
 
-    expect(store.setSpy).toHaveBeenCalledWith({
-      key: 'user-1',
-      meta: undefined,
-      entry: { rows: [{ id: 1 }] },
-      version: 0,
-    });
+    expect(store.setSpy).toHaveBeenCalledWith(
+      {
+        key: 'user-1',
+        meta: undefined,
+        version: 0,
+        data: { empty: true },
+      },
+      [{ id: 1 }],
+    );
   });
 });

@@ -2,7 +2,8 @@ import { expectTypeOf, test } from 'vitest';
 import {
   type CacheAnnotationHandle,
   type CacheAnnotationOptions,
-  type CachedEntry,
+  type CachedRows,
+  type CacheEntry,
   type CacheMiddleware,
   type CacheStore,
   cacheAnnotation,
@@ -14,19 +15,14 @@ interface TagMeta {
   tags: string[];
 }
 
-class TagStore implements CacheStore<TagMeta> {
-  async get(_target: {
+class TagStore implements CacheStore<TagMeta, CachedRows> {
+  async get(target: {
     readonly key: string;
     readonly meta: TagMeta | undefined;
-  }): Promise<{ readonly entry: CachedEntry | undefined; version: number }> {
-    return { entry: undefined, version: 0 };
+  }): Promise<CacheEntry<TagMeta, CachedRows>> {
+    return { key: target.key, meta: target.meta, version: 0, data: { empty: true } };
   }
-  async set(_target: {
-    readonly key: string;
-    readonly meta: TagMeta | undefined;
-    readonly entry: CachedEntry;
-    readonly version: number | undefined;
-  }): Promise<boolean> {
+  async set(_entry: CacheEntry<TagMeta, CachedRows>, _value: CachedRows): Promise<boolean> {
     return true;
   }
   async unset(_target: {
@@ -68,7 +64,7 @@ test('a pre-typed wrapper keeps the annotation and the store in agreement', () =
 });
 
 test('untyped calls default to unknown', () => {
-  expectTypeOf(createInMemoryCacheStore()).toEqualTypeOf<CacheStore<unknown>>();
+  expectTypeOf(createInMemoryCacheStore()).toEqualTypeOf<CacheStore<unknown, unknown>>();
   expectTypeOf(createCacheMiddleware()).toEqualTypeOf<CacheMiddleware<unknown>>();
   expectTypeOf(createCacheMiddleware({ store: createInMemoryCacheStore() })).toEqualTypeOf<
     CacheMiddleware<unknown>

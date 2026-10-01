@@ -62,9 +62,7 @@ describe('createCacheMiddleware — opt-in semantics', () => {
 describe('createCacheMiddleware — hit path', () => {
   it('returns cached rows from interceptQuery when the store has a non-expired entry', async () => {
     const store = spyStore();
-    store.inner.set('key:select 1', {
-      rows: [{ id: 1 }, { id: 2 }],
-    });
+    store.inner.set('key:select 1', [{ id: 1 }, { id: 2 }]);
 
     const mw = createCacheMiddleware({ store });
     const exec = makeExec('select 1', {
@@ -81,7 +79,7 @@ describe('createCacheMiddleware — hit path', () => {
 
   it('logs a middleware.cache.hit event via ctx.log.debug on a hit', async () => {
     const store = spyStore();
-    store.inner.set('key:select 1', { rows: [{ id: 1 }] });
+    store.inner.set('key:select 1', [{ id: 1 }]);
     const mw = createCacheMiddleware({ store });
     const exec = makeExec('select 1', {
       cache: cacheAnnotation({}),
@@ -98,7 +96,7 @@ describe('createCacheMiddleware — hit path', () => {
 
   it('does not call store.set on the hit path', async () => {
     const store = spyStore();
-    store.inner.set('key:select 1', { rows: [{ id: 1 }] });
+    store.inner.set('key:select 1', [{ id: 1 }]);
     const mw = createCacheMiddleware({ store });
     const exec = makeExec('select 1', {
       cache: cacheAnnotation({}),
@@ -121,7 +119,7 @@ describe('createCacheMiddleware — hit path', () => {
 
   it('survives the absence of ctx.log.debug (it is optional on RuntimeLog)', async () => {
     const store = spyStore();
-    store.inner.set('key:select 1', { rows: [{ id: 1 }] });
+    store.inner.set('key:select 1', [{ id: 1 }]);
     const mw = createCacheMiddleware({ store });
     const exec = makeExec('select 1', {
       cache: cacheAnnotation({}),
@@ -181,12 +179,15 @@ describe('createCacheMiddleware — miss path', () => {
     );
 
     expect(store.setSpy).toHaveBeenCalledTimes(1);
-    expect(store.setSpy).toHaveBeenCalledWith({
-      key: 'key:select 1',
-      meta: undefined,
-      entry: { rows: [{ id: 1 }, { id: 2 }] },
-      version: 0,
-    });
+    expect(store.setSpy).toHaveBeenCalledWith(
+      {
+        key: 'key:select 1',
+        meta: undefined,
+        version: 0,
+        data: { empty: true },
+      },
+      [{ id: 1 }, { id: 2 }],
+    );
   });
 
   it('does not commit when completed = false (driver threw mid-stream)', async () => {
@@ -290,11 +291,11 @@ describe('createCacheMiddleware — miss path', () => {
     await mw.afterQuery!(execA, result, ctx);
     await mw.afterQuery!(execB, result, ctx);
 
-    expect(store.inner.get('key:select A')?.rows).toEqual([
+    expect(store.inner.get('key:select A')).toEqual([
       { from: 'A', n: 1 },
       { from: 'A', n: 2 },
     ]);
-    expect(store.inner.get('key:select B')?.rows).toEqual([
+    expect(store.inner.get('key:select B')).toEqual([
       { from: 'B', n: 1 },
       { from: 'B', n: 2 },
     ]);
@@ -304,7 +305,7 @@ describe('createCacheMiddleware — miss path', () => {
 describe('createCacheMiddleware — scope guard', () => {
   it('passes through when ctx.scope = "connection"', async () => {
     const store = spyStore();
-    store.inner.set('key:select 1', { rows: [{ id: 1 }] });
+    store.inner.set('key:select 1', [{ id: 1 }]);
     const mw = createCacheMiddleware({ store });
     const exec = makeExec('select 1', {
       cache: cacheAnnotation({}),
@@ -317,7 +318,7 @@ describe('createCacheMiddleware — scope guard', () => {
 
   it('passes through when ctx.scope = "transaction"', async () => {
     const store = spyStore();
-    store.inner.set('key:select 1', { rows: [{ id: 1 }] });
+    store.inner.set('key:select 1', [{ id: 1 }]);
     const mw = createCacheMiddleware({ store });
     const exec = makeExec('select 1', {
       cache: cacheAnnotation({}),
@@ -419,9 +420,9 @@ describe('createCacheMiddleware — middleware shape', () => {
       ctx,
     );
 
-    const stored = (await store.get({ key: 'key:custom-not-this', meta: undefined })).entry;
-    expect(stored).toBeUndefined();
-    const real = (await store.get({ key: 'key:select custom', meta: undefined })).entry;
-    expect(real?.rows).toEqual([{ id: 7 }]);
+    const stored = await store.get({ key: 'key:custom-not-this', meta: undefined });
+    expect(stored.data).toEqual({ empty: true });
+    const real = await store.get({ key: 'key:select custom', meta: undefined });
+    expect(real.data).toEqual({ empty: false, value: [{ id: 7 }] });
   });
 });

@@ -2,5 +2,10 @@ export type { CacheAnnotationHandle, CacheAnnotationOptions } from '../cache-ann
 export { cacheAnnotation } from '../cache-annotation';
 export type { CacheMiddleware, CacheMiddlewareOptions } from '../cache-middleware';
 export { createCacheMiddleware, deriveKeyFromContentHash } from '../cache-middleware';
-export type { CachedEntry, CacheStore, InMemoryCacheStoreOptions } from '../cache-store';
+export type {
+  CachedRows,
+  CacheEntry,
+  CacheStore,
+  InMemoryCacheStoreOptions,
+} from '../cache-store';
 export { createInMemoryCacheStore } from '../cache-store';

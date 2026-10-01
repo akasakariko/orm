@@ -134,7 +134,7 @@ describe('createCacheMiddleware — invalidate', () => {
 });
 
 describe('createCacheMiddleware — misses overlapping invalidate', () => {
-  it('passes the version from get to the conditional set', async () => {
+  it('passes the entry get returned, with its version, to set', async () => {
     const store = spyStore();
     store.versions.set('A', 7);
     const mw = createCacheMiddleware({ store });
@@ -142,12 +142,15 @@ describe('createCacheMiddleware — misses overlapping invalidate', () => {
 
     await finishMiss(mw, await startMiss(mw, ctx, 'A'), ctx);
 
-    expect(store.setSpy).toHaveBeenCalledWith({
-      key: 'A',
-      meta: undefined,
-      entry: { rows: [{ id: 1 }] },
-      version: 7,
-    });
+    expect(store.setSpy).toHaveBeenCalledWith(
+      {
+        key: 'A',
+        meta: undefined,
+        version: 7,
+        data: { empty: true },
+      },
+      [{ id: 1 }],
+    );
   });
 
   it('stores a miss for key A that overlapped invalidate({ keys: ["B"] })', async () => {
@@ -159,7 +162,7 @@ describe('createCacheMiddleware — misses overlapping invalidate', () => {
     await mw.invalidate({ keys: ['B'] });
     await finishMiss(mw, exec, ctx);
 
-    expect(store.inner.get('A')).toEqual({ rows: [{ id: 1 }] });
+    expect(store.inner.get('A')).toEqual([{ id: 1 }]);
   });
 
   it('does not store a miss for key A that overlapped invalidate({ keys: ["A"] }), and logs the skip', async () => {
@@ -198,7 +201,7 @@ describe('createCacheMiddleware — misses overlapping invalidate', () => {
     await mw.invalidate({ meta: { tags: ['users'] } });
     await finishMiss(mw, exec, ctx);
 
-    expect(store.inner.get('A')).toEqual({ rows: [{ id: 1 }] });
+    expect(store.inner.get('A')).toEqual([{ id: 1 }]);
   });
 
   it('stores a miss that started after an invalidate', async () => {
@@ -209,7 +212,7 @@ describe('createCacheMiddleware — misses overlapping invalidate', () => {
     await mw.invalidate({ keys: ['A'] });
     await finishMiss(mw, await startMiss(mw, ctx, 'A'), ctx);
 
-    expect(store.inner.get('A')).toEqual({ rows: [{ id: 1 }] });
+    expect(store.inner.get('A')).toEqual([{ id: 1 }]);
   });
 
   it('logs the store when set returns true', async () => {
