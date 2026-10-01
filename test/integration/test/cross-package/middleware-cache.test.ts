@@ -3,7 +3,11 @@ import type {
   CrossFamilyMiddleware,
   RuntimeMiddlewareContext,
 } from '@internal/framework-components/runtime';
-import { cacheAnnotation, createCacheMiddleware } from '@internal/middleware-cache';
+import {
+  type CachedRows,
+  cacheAnnotation,
+  createCacheMiddleware,
+} from '@internal/middleware-cache';
 import { sql } from '@internal/sql-builder/runtime';
 import {
   AndExpr,
@@ -175,7 +179,7 @@ describe('integration: middleware-cache against real Postgres', {
       // Two runtimes share the same custom CacheStore so we can
       // observe whether the rewriter changes the key.
       const { createInMemoryCacheStore } = await import('@internal/middleware-cache');
-      const sharedStore = createInMemoryCacheStore();
+      const sharedStore = createInMemoryCacheStore<unknown, CachedRows>();
 
       const cacheNoRewrite = createCacheMiddleware({ store: sharedStore });
       const runtimeNoRewrite = buildRuntime([cacheNoRewrite]);

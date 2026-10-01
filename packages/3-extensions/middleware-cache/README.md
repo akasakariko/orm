@@ -154,7 +154,7 @@ The rules a store must follow:
 - **`unset` must not run a query through the runtime that uses the middleware.**
 - **Compare `meta` by value.** The `meta` passed to `unset` is a different object from the one passed to `get` and `set`. A store shared between processes must serialise `meta` itself.
 
-`createCacheMiddleware` accepts a store whose value type can hold `CachedRows`: `CacheStore<TMeta, CachedRows>`, or `CacheStore<TMeta, unknown>` such as `createInMemoryCacheStore()`. A store of any other value type is a type error.
+A store used with this middleware holds rows: `createCacheMiddleware` takes a `CacheStore<TMeta, CachedRows>`, and a store of any other value type, `unknown` included, is a type error. `TValue` exists so the same store type can serve other caches.
 
 The default store lives in one process and is **not** shared across replicas. For shared caching, supply a custom store. The guard for overlapping reads then works across every process that uses the store, because the store owns the versions:
 
@@ -201,7 +201,7 @@ const cache = createCacheMiddleware({ store: redis });
 
 ### The default store
 
-`createInMemoryCacheStore<TMeta, TValue>({ maxEntries?, ttlMs?, clock? })` is what `createCacheMiddleware()` uses when no `store` is given. It stores values of any type.
+`createInMemoryCacheStore<TMeta, TValue>({ maxEntries?, ttlMs?, clock? })` is what `createCacheMiddleware()` uses when no `store` is given. It stores values of any type. Written inline as `createCacheMiddleware({ store: createInMemoryCacheStore() })`, its value type is inferred as `CachedRows`; a store created on its own line for this middleware names it: `createInMemoryCacheStore<unknown, CachedRows>()`.
 
 - **Size.** At most `maxEntries` values, a positive integer (default 1000). Reads and writes both count as a use; the least recently used value is evicted first.
 - **Lifetime.** Every value lives `ttlMs` after its `set`, a positive number of milliseconds (default 60 000). `ttlMs: Infinity` never expires. A key's version is kept for `ttlMs` after the `unset` that moved it, so a key invalidated and never stored again costs one number until then. Any other `maxEntries` or `ttlMs`, such as `0` or `NaN`, throws `RUNTIME.ARGUMENT_INVALID`. Expiry is measured with `clock` (default `Date.now`); an expired value reads as empty and is dropped.

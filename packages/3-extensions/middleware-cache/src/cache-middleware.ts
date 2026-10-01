@@ -4,7 +4,6 @@ import type {
   ExecutionPlan,
   RuntimeMiddlewareContext,
 } from '@internal/framework-components/runtime';
-import { blindCast } from '@internal/utils/casts';
 import { cacheAnnotation } from './cache-annotation';
 import {
   type CachedRows,
@@ -22,22 +21,16 @@ import {
  *   fails the read. It must return different keys whenever the rows can differ; build on
  *   `deriveKeyFromContentHash` to keep the statement, parameters and storage hash.
  *
- * `TMeta` and `TValue` are the store's meta and value types; `createCacheMiddleware` infers them
- * from `store`. The middleware stores `CachedRows`, so `TValue` must accept them: `CachedRows`
- * itself, or `unknown`.
+ * `TMeta` is the store's meta type; `createCacheMiddleware` infers it from `store`. The store holds
+ * `CachedRows`.
  */
-export interface CacheMiddlewareOptions<TMeta = unknown, TValue = CachedRows> {
-  readonly store?: CacheStore<TMeta, TValue>;
+export interface CacheMiddlewareOptions<TMeta = unknown> {
+  readonly store?: CacheStore<TMeta, CachedRows>;
   readonly deriveKey?: (
     exec: ExecutionPlan,
     ctx: RuntimeMiddlewareContext,
   ) => string | Promise<string>;
 }
-
-/** Refuses, at compile time, a store whose value type cannot hold `CachedRows`. */
-type HoldsCachedRows<TValue> = [CachedRows] extends [TValue]
-  ? unknown
-  : { readonly storeValueTypeMustAcceptCachedRows: never };
 
 /**
  * The cache middleware.
@@ -74,7 +67,7 @@ export function deriveKeyFromContentHash(
  * empty entry `store.get` returned; `store.set(entry, rows)` is conditional on its version.
  */
 interface PendingMiss {
-  readonly entry: CacheEntry;
+  readonly entry: CacheEntry<unknown, CachedRows>;
   readonly buffer: Record<string, unknown>[];
 }
 
@@ -106,10 +99,10 @@ interface PendingMiss {
  * await cache.invalidate({ keys: ['user-1'] });
  * ```
  */
-export function createCacheMiddleware<TMeta = unknown, TValue = CachedRows>(
-  options?: CacheMiddlewareOptions<TMeta, TValue> & HoldsCachedRows<TValue>,
+export function createCacheMiddleware<TMeta = unknown>(
+  options?: CacheMiddlewareOptions<TMeta>,
 ): CacheMiddleware<TMeta> {
-  const store: CacheStore<unknown, unknown> = options?.store ?? createInMemoryCacheStore();
+  const store: CacheStore<unknown, CachedRows> = options?.store ?? createInMemoryCacheStore();
   const deriveKey = options?.deriveKey ?? deriveKeyFromContentHash;
   const pending = new WeakMap<object, PendingMiss>();
 
@@ -129,12 +122,7 @@ export function createCacheMiddleware<TMeta = unknown, TValue = CachedRows>(
     const entry = await store.get({ key, meta: annotation.meta });
     if (!entry.data.empty) {
       ctx.log.debug?.({ event: 'middleware.cache.hit', middleware: 'cache', key });
-      return {
-        rows: blindCast<
-          CachedRows,
-          'The middleware writes only CachedRows; createCacheMiddleware refuses other value types'
-        >(entry.data.value),
-      };
+      return { rows: entry.data.value };
     }
 
     pending.set(exec, { entry, buffer: [] });

@@ -1,5 +1,5 @@
 import { expectTypeOf, test } from 'vitest';
-import type { CachedRows, CacheEntry, CacheStore } from '../src/exports/index';
+import type { CachedRows, CacheEntry, CacheMiddleware, CacheStore } from '../src/exports/index';
 import * as exported from '../src/exports/index';
 
 const cache = exported.createCacheMiddleware();
@@ -72,14 +72,29 @@ test('CacheEntry carries key, meta, version and data', () => {
   }>();
 });
 
-test('createCacheMiddleware accepts a store of rows or of unknown values, and refuses others', () => {
+test('createCacheMiddleware accepts a store of rows, including the default store written inline', () => {
   const rowsStore: CacheStore<unknown, Rows> = { get, set, unset };
-  exported.createCacheMiddleware({ store: rowsStore });
-  exported.createCacheMiddleware({ store: exported.createInMemoryCacheStore() });
+  expectTypeOf(exported.createCacheMiddleware({ store: rowsStore })).toEqualTypeOf<
+    CacheMiddleware<unknown>
+  >();
+  expectTypeOf(
+    exported.createCacheMiddleware({ store: exported.createInMemoryCacheStore() }),
+  ).toEqualTypeOf<CacheMiddleware<unknown>>();
+  expectTypeOf(
+    exported.createCacheMiddleware({
+      store: exported.createInMemoryCacheStore({ maxEntries: 10, ttlMs: 5_000 }),
+    }),
+  ).toEqualTypeOf<CacheMiddleware<unknown>>();
+});
 
+test('createCacheMiddleware refuses a store of any other value type', () => {
   const stringStore = exported.createInMemoryCacheStore<unknown, string>();
   // @ts-expect-error - the middleware stores rows, which a store of strings cannot hold
   exported.createCacheMiddleware({ store: stringStore });
+
+  const unknownStore = exported.createInMemoryCacheStore<unknown, unknown>();
+  // @ts-expect-error - a store of unknown values is not a store of rows
+  exported.createCacheMiddleware({ store: unknownStore });
 });
 
 test('an old positional set is a type error', () => {
