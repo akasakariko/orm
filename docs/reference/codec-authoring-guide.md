@@ -406,6 +406,7 @@ The PSL name, TS helper, BSON storage types and application type of every Mongo 
 | `mongo/objectId@1`, `mongo/string@1`, `mongo/int32@1`, `mongo/double@1`, `mongo/bool@1`, `mongo/vector@1`, `mongo/decimal128@1`, `mongo/json@1` | the application value itself |
 | `mongo/date@1` | ISO-8601 text |
 | `mongo/int64@1` | decimal text; a safe-integer `number` is accepted on the way in |
+| `mongo/int64Number@1` | decimal text, as `mongo/int64@1` writes it |
 | `mongo/binary@1` | unwrapped base64 |
 | `mongo/bson@1` | canonical Extended JSON v2 (`EJSON.serialize(value, { relaxed: false })`), after writing each JavaScript number and `Uint8Array` as the BSON type the driver would store: an integer outside the int32 range as `double`, bytes as `binData` |
 
@@ -415,7 +416,7 @@ The PSL name, TS helper, BSON storage types and application type of every Mongo 
 
 The PSL names `Int`, `Float`, `Boolean` and `DateTime` are deprecated aliases of `Int32`, `Double`, `Bool` and `Date`: they resolve to the same codecs, report `PSL_DEPRECATED_SCALAR_NAME` as a warning, and will be removed.
 
-The JSON forms of `int64`, `decimal128` and `binary` match the Postgres `int8`, `numeric` and `bytea` codecs. `Decimal128.toString()` prints some values with an exponent (`1E+3`); the codec rewrites them without one (`1000`), keeping trailing zeros, so the text is stable across a round trip. The driver hands a stored `long` that fits in 53 bits back as a `number`, so the `int64` codec accepts `Long`, `number` and `bigint` on decode. Decoding a wire value of the wrong BSON type throws `RUNTIME.DECODE_FAILED`.
+The JSON forms of `int64`, `decimal128` and `binary` match the Postgres `int8`, `numeric` and `bytea` codecs. `Decimal128.toString()` prints some values with an exponent (`1E+3`); the codec rewrites them without one (`1000`), keeping trailing zeros, so the text is stable across a round trip. The driver hands a stored `long` that fits in 53 bits back as a `number`, a larger one (or any one with `promoteLongs: false`) as a `Long`, and every one as a `bigint` with `useBigInt64`, so the `int64` and `int64Number` codecs accept all three on decode. `mongo/int64@1` and `mongo/int64Number@1` both name the `mongo/int64` data type, as `pg/int8@1` and `pg/int8number@1` both name `pg/int8`: the first reads a `bigint`, the second a `number` within ±(2^53 − 1), refusing a stored value outside that range or with a fraction rather than rounding it, and both write a BSON `long`. Decoding a wire value of the wrong BSON type throws `RUNTIME.DECODE_FAILED`.
 
 `$jsonSchema` validators take each field's `bsonType` from the whole `targetTypes` list: one entry gives `bsonType: '<entry>'`, several give `bsonType: [...entries]` (`mongo/json@1` lists `object`, `array`, `string`, `double`, `int`, `long`, `bool`, `null`). A list field applies the same to `items`, and a nullable field prepends `'null'` unless the list already has it. A codec that declares no BSON type gets an empty schema (`{}`), which admits any value, or `{ bsonType: 'array', items: {} }` for a list field, which admits an array of any values; the field stays listed under `properties` because the validator is closed with `additionalProperties: false`.
 
@@ -488,7 +489,7 @@ A value is written either with a tag — a qualified name followed by a string i
 [pgJson.id]: {
   written: { kind: 'tag', tag: 'json', parse: parseJsonBody },
   print: printJsonBody,
-  documentation: 'Reads the body as a JSON document and stores it as the default value.',
+  documentation: 'Reads the text as a JSON document and stores it as the default value.',
 },
 ```
 
@@ -507,7 +508,9 @@ A number is the one plain form that yields several types, so its arm carries a c
 },
 ```
 
-Reading a written default is then: the entry parses or classifies the text into a value of a known type; if that type is not the column's, the column's type is looked up for a cast from it, and having none is `PSL_DEFAULT_TYPE_INCOMPATIBLE`; the canonical form, cast or not, is handed to the codec instance built with the column's parameters, and a refusal there is `PSL_INVALID_DEFAULT_LITERAL` with the codec's own message. A column whose data type has no authoring entry and no cast into it takes only a `` sql`...` `` default.
+Reading a written default is then: the entry parses or classifies the text into a value of a known type; if that type is not the column's, the column's type is looked up for a cast from it, and having none is `PSL_VALUE_TYPE_INCOMPATIBLE`; text the entry or a cast refuses is `PSL_INVALID_LITERAL`; the canonical form, cast or not, is handed to the codec instance built with the column's parameters, and a refusal there is `PSL_INVALID_DEFAULT_LITERAL` with the codec's own message. A column whose data type has no authoring entry and no cast into it takes only a `` sql`...` `` default.
+
+A data type need not be a column's type. `sql/expression` has an authoring entry that is a tag, declares no casts, and has no codec, so its values are admitted only where a position asks for that type. The SQL family defines and registers it. A family registers only a type whose definition must not differ between targets and that nothing casts from.
 
 Checks that depend on a column's parameters belong in the codec instance, on the canonical form: `vector(3)` refuses four elements, `numeric(10,2)` refuses a third decimal place, and a limit of the stored representation is the codec's to refuse too — `sqlite/real@1` refuses `NaN`, because SQLite cannot store it.
 
