@@ -15,6 +15,7 @@ import { sqliteCreateNamespace } from '../../src/core/sqlite-unbound-database';
 export const stubLowerer: ExecuteRequestLowerer = {
   lower: () => ({ sql: 'stub', params: [] }),
   lowerToExecuteRequest: async () => ({ sql: 'stub', params: [] }),
+  renderColumnDefault: async () => '',
 };
 
 const integer = { nativeType: 'integer', codecId: 'sqlite/integer@1', nullable: false };

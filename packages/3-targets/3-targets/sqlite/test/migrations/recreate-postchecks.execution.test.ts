@@ -10,8 +10,8 @@ import { issue, unique } from './node-issue-helpers';
 
 const codesSpec: SqliteTableSpec = {
   columns: [
-    { name: 'code', typeSql: 'TEXT', defaultSql: '', nullable: false },
-    { name: 'label', typeSql: 'TEXT', defaultSql: '', nullable: false },
+    { name: 'code', typeSql: 'TEXT', nullable: false },
+    { name: 'label', typeSql: 'TEXT', nullable: false },
   ],
   primaryKey: { columns: ['code'] },
   uniques: [{ columns: ['code'] }],
@@ -27,10 +27,12 @@ function postcheckResults(createTableSql: string): Record<string, boolean> {
   try {
     db.exec(createTableSql);
     return Object.fromEntries(
-      buildRecreatePostchecks('codes', uniqueIssues, codesSpec).map((check) => [
-        check.description,
-        Object.values(db.prepare(check.sql).get() ?? {})[0] === 1,
-      ]),
+      buildRecreatePostchecks('codes', uniqueIssues, codesSpec).map((check) => {
+        if (!('sql' in check)) {
+          throw new Error(`postcheck "${check.description}" carries no SQL to run`);
+        }
+        return [check.description, Object.values(db.prepare(check.sql).get() ?? {})[0] === 1];
+      }),
     );
   } finally {
     db.close();

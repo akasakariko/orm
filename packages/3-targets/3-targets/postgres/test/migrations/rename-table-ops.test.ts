@@ -16,6 +16,7 @@ function recordingCheckLowerer(): { lowerer: ExecuteRequestLowerer; received: un
         params: Object.freeze([`p${received.length}`]),
       });
     },
+    renderColumnDefault: async () => '',
   };
   return { lowerer, received };
 }
