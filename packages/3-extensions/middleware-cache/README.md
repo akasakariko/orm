@@ -201,7 +201,7 @@ const cache = createCacheMiddleware({ store: redis });
 
 ### The default store
 
-`createInMemoryCacheStore<TMeta, TValue>({ maxEntries?, ttlMs?, clock? })` is what `createCacheMiddleware()` uses when no `store` is given. It stores values of any type. Written inline as `createCacheMiddleware({ store: createInMemoryCacheStore() })`, its value type is inferred as `CachedRows`; a store created on its own line for this middleware names it: `createInMemoryCacheStore<unknown, CachedRows>()`.
+`createInMemoryCacheStore<TMeta, TValue>({ maxEntries?, ttlMs?, clock? })` is what `createCacheMiddleware()` uses when no `store` is given. It holds rows (`CachedRows`) unless you give it another value type.
 
 - **Size.** At most `maxEntries` values, a positive integer (default 1000). Reads and writes both count as a use; the least recently used value is evicted first.
 - **Lifetime.** Every value lives `ttlMs` after its `set`, a positive number of milliseconds (default 60 000). `ttlMs: Infinity` never expires. A key's version is kept for `ttlMs` after the `unset` that moved it, so a key invalidated and never stored again costs one number until then. Any other `maxEntries` or `ttlMs`, such as `0` or `NaN`, throws `RUNTIME.ARGUMENT_INVALID`. Expiry is measured with `clock` (default `Date.now`); an expired value reads as empty and is dropped.

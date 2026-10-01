@@ -2,7 +2,7 @@ import type { AfterQueryResult } from '@internal/framework-components/runtime';
 import { describe, expect, it, vi } from 'vitest';
 import { cacheAnnotation } from '../src/cache-annotation';
 import { createCacheMiddleware } from '../src/cache-middleware';
-import { type CachedRows, createInMemoryCacheStore } from '../src/cache-store';
+import { createInMemoryCacheStore } from '../src/cache-store';
 import { drain, makeCtx, makeExec, runMiss, spyStore } from './middleware-fixtures';
 
 describe('createCacheMiddleware — opt-in semantics', () => {
@@ -405,7 +405,7 @@ describe('createCacheMiddleware — middleware shape', () => {
   });
 
   it('respects a user-supplied custom CacheStore', async () => {
-    const store = createInMemoryCacheStore<unknown, CachedRows>({ maxEntries: 5 });
+    const store = createInMemoryCacheStore({ maxEntries: 5 });
     const mw = createCacheMiddleware({ store });
     const exec = makeExec('select custom', {
       cache: cacheAnnotation({}),

@@ -64,7 +64,7 @@ test('a pre-typed wrapper keeps the annotation and the store in agreement', () =
 });
 
 test('untyped calls default to unknown', () => {
-  expectTypeOf(createInMemoryCacheStore()).toEqualTypeOf<CacheStore<unknown, unknown>>();
+  expectTypeOf(createInMemoryCacheStore()).toEqualTypeOf<CacheStore<unknown, CachedRows>>();
   expectTypeOf(createCacheMiddleware()).toEqualTypeOf<CacheMiddleware<unknown>>();
   expectTypeOf(createCacheMiddleware({ store: createInMemoryCacheStore() })).toEqualTypeOf<
     CacheMiddleware<unknown>

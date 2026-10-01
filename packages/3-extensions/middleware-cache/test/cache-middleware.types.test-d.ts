@@ -49,7 +49,7 @@ const set = async (_entry: CacheEntry<unknown, Rows>, _value: Rows) => true;
 const unset = async (_target: Parameters<CacheStore['unset']>[0]) => {};
 
 test('createInMemoryCacheStore returns a CacheStore of the given meta and value types', () => {
-  expectTypeOf(exported.createInMemoryCacheStore()).toEqualTypeOf<CacheStore<unknown, unknown>>();
+  expectTypeOf(exported.createInMemoryCacheStore()).toEqualTypeOf<CacheStore<unknown, Rows>>();
   expectTypeOf(
     exported.createInMemoryCacheStore<{ tags: string[] }, Rows>({
       maxEntries: 10,
@@ -85,6 +85,12 @@ test('createCacheMiddleware accepts a store of rows, including the default store
       store: exported.createInMemoryCacheStore({ maxEntries: 10, ttlMs: 5_000 }),
     }),
   ).toEqualTypeOf<CacheMiddleware<unknown>>();
+});
+
+test('createCacheMiddleware accepts the default store created on its own line', () => {
+  const store = exported.createInMemoryCacheStore({ maxEntries: 10 });
+
+  expectTypeOf(exported.createCacheMiddleware({ store })).toEqualTypeOf<CacheMiddleware<unknown>>();
 });
 
 test('createCacheMiddleware refuses a store of any other value type', () => {

@@ -52,14 +52,17 @@ describe('createInMemoryCacheStore', () => {
 
     it('accepts ttlMs: Infinity and a positive integer maxEntries', () => {
       expect(() =>
-        createInMemoryCacheStore({ ttlMs: Number.POSITIVE_INFINITY, maxEntries: 1 }),
+        createInMemoryCacheStore<unknown, unknown>({
+          ttlMs: Number.POSITIVE_INFINITY,
+          maxEntries: 1,
+        }),
       ).not.toThrow();
     });
   });
 
   describe('get and set', () => {
     it('returns an empty entry with version 0 for a key never seen, carrying the meta given', async () => {
-      const store = createInMemoryCacheStore();
+      const store = createInMemoryCacheStore<unknown, unknown>();
 
       expect(await store.get({ key: 'absent', meta: { tags: ['users'] } })).toEqual({
         key: 'absent',
@@ -93,7 +96,7 @@ describe('createInMemoryCacheStore', () => {
     });
 
     it('overwrites a value through a set on the non-empty entry get returned', async () => {
-      const store = createInMemoryCacheStore();
+      const store = createInMemoryCacheStore<unknown, unknown>();
       await put(store, 'k', 1);
 
       expect(await put(store, 'k', 2)).toBe(true);
@@ -102,7 +105,7 @@ describe('createInMemoryCacheStore', () => {
     });
 
     it('ignores meta in get and set', async () => {
-      const store = createInMemoryCacheStore();
+      const store = createInMemoryCacheStore<unknown, unknown>();
       await store.set(await store.get({ key: 'k', meta: { tags: ['users'] } }), 1);
 
       expect(await store.get({ key: 'k', meta: { tags: ['posts'] } })).toEqual({
@@ -116,7 +119,7 @@ describe('createInMemoryCacheStore', () => {
 
   describe('versions', () => {
     it('does not change the version on set', async () => {
-      const store = createInMemoryCacheStore();
+      const store = createInMemoryCacheStore<unknown, unknown>();
       await store.unset({ keys: ['k'], meta: undefined });
 
       await put(store, 'k', 1);
@@ -125,7 +128,7 @@ describe('createInMemoryCacheStore', () => {
     });
 
     it('stores nothing and returns false when the version moved after get', async () => {
-      const store = createInMemoryCacheStore();
+      const store = createInMemoryCacheStore<unknown, unknown>();
       const entry = await store.get({ key: 'k', meta: undefined });
       await store.unset({ keys: ['k'], meta: undefined });
 
@@ -135,7 +138,7 @@ describe('createInMemoryCacheStore', () => {
     });
 
     it('refuses a refresh on a non-empty entry whose version moved', async () => {
-      const store = createInMemoryCacheStore();
+      const store = createInMemoryCacheStore<unknown, unknown>();
       await put(store, 'k', 1);
       const entry = await store.get({ key: 'k', meta: undefined });
       await store.unset({ keys: ['k'], meta: undefined });
@@ -145,7 +148,7 @@ describe('createInMemoryCacheStore', () => {
     });
 
     it('increments the version of a key unset removes', async () => {
-      const store = createInMemoryCacheStore();
+      const store = createInMemoryCacheStore<unknown, unknown>();
       await put(store, 'k', 1);
 
       await store.unset({ keys: ['k'], meta: undefined });
@@ -159,7 +162,7 @@ describe('createInMemoryCacheStore', () => {
     });
 
     it('increments the version of a key unset names that holds no value', async () => {
-      const store = createInMemoryCacheStore();
+      const store = createInMemoryCacheStore<unknown, unknown>();
 
       await store.unset({ keys: ['absent'], meta: undefined });
       await store.unset({ keys: ['absent'], meta: undefined });
@@ -169,7 +172,7 @@ describe('createInMemoryCacheStore', () => {
 
     it('forgets the version of a key ttlMs after the unset that set it', async () => {
       const time = controlledClock();
-      const store = createInMemoryCacheStore({ ttlMs: 100, clock: time.clock });
+      const store = createInMemoryCacheStore<unknown, unknown>({ ttlMs: 100, clock: time.clock });
       await store.unset({ keys: ['k'], meta: undefined });
 
       time.advanceTo(99);
@@ -182,7 +185,7 @@ describe('createInMemoryCacheStore', () => {
 
   describe('unset', () => {
     it('removes the named keys and keeps the rest', async () => {
-      const store = createInMemoryCacheStore();
+      const store = createInMemoryCacheStore<unknown, unknown>();
       await put(store, 'a', 'A');
       await put(store, 'b', 'B');
       await put(store, 'c', 'C');
@@ -195,7 +198,7 @@ describe('createInMemoryCacheStore', () => {
     });
 
     it('does nothing when neither keys nor meta is given', async () => {
-      const store = createInMemoryCacheStore();
+      const store = createInMemoryCacheStore<unknown, unknown>();
       await put(store, 'a', 'A');
 
       await store.unset({ keys: undefined, meta: undefined });
@@ -210,7 +213,7 @@ describe('createInMemoryCacheStore', () => {
       ['an object', { tags: ['users'] }],
       ['null', null],
     ])('rejects when meta is %s, and changes nothing', async (_label, meta) => {
-      const store = createInMemoryCacheStore();
+      const store = createInMemoryCacheStore<unknown, unknown>();
       await put(store, 'a', 'A');
 
       await expect(store.unset({ keys: ['a'], meta })).rejects.toMatchObject({
@@ -225,7 +228,7 @@ describe('createInMemoryCacheStore', () => {
 
   describe('LRU eviction at maxEntries', () => {
     it('evicts the least recently used value once maxEntries is exceeded', async () => {
-      const store = createInMemoryCacheStore({ maxEntries: 2 });
+      const store = createInMemoryCacheStore<unknown, unknown>({ maxEntries: 2 });
       await put(store, 'a', 'A');
       await put(store, 'b', 'B');
       await put(store, 'c', 'C');
@@ -236,7 +239,7 @@ describe('createInMemoryCacheStore', () => {
     });
 
     it('counts a get as a use', async () => {
-      const store = createInMemoryCacheStore({ maxEntries: 2 });
+      const store = createInMemoryCacheStore<unknown, unknown>({ maxEntries: 2 });
       await put(store, 'a', 'A');
       await put(store, 'b', 'B');
       await store.get({ key: 'a', meta: undefined });
@@ -248,7 +251,7 @@ describe('createInMemoryCacheStore', () => {
     });
 
     it('keeps 1000 values by default', async () => {
-      const store = createInMemoryCacheStore();
+      const store = createInMemoryCacheStore<unknown, unknown>();
       for (let i = 0; i <= 1000; i++) {
         await put(store, `k${i}`, i);
       }
@@ -262,7 +265,7 @@ describe('createInMemoryCacheStore', () => {
   describe('expiry', () => {
     it('expires a value once ttlMs has passed since set, on the injected clock', async () => {
       const time = controlledClock(1_000);
-      const store = createInMemoryCacheStore({ ttlMs: 500, clock: time.clock });
+      const store = createInMemoryCacheStore<unknown, unknown>({ ttlMs: 500, clock: time.clock });
       await put(store, 'k', 1);
 
       time.advanceTo(1_499);
@@ -274,7 +277,7 @@ describe('createInMemoryCacheStore', () => {
 
     it('expires values after 60 seconds by default', async () => {
       const time = controlledClock();
-      const store = createInMemoryCacheStore({ clock: time.clock });
+      const store = createInMemoryCacheStore<unknown, unknown>({ clock: time.clock });
       await put(store, 'k', 1);
 
       time.advanceTo(59_999);
@@ -286,7 +289,7 @@ describe('createInMemoryCacheStore', () => {
 
     it('never expires a value when ttlMs is Infinity', async () => {
       const time = controlledClock();
-      const store = createInMemoryCacheStore({
+      const store = createInMemoryCacheStore<unknown, unknown>({
         ttlMs: Number.POSITIVE_INFINITY,
         clock: time.clock,
       });
@@ -299,7 +302,11 @@ describe('createInMemoryCacheStore', () => {
 
     it('frees the slot of an expired value', async () => {
       const time = controlledClock();
-      const store = createInMemoryCacheStore({ maxEntries: 2, ttlMs: 100, clock: time.clock });
+      const store = createInMemoryCacheStore<unknown, unknown>({
+        maxEntries: 2,
+        ttlMs: 100,
+        clock: time.clock,
+      });
       await put(store, 'old', 'old');
       time.advanceTo(50);
       await put(store, 'live', 'live');
